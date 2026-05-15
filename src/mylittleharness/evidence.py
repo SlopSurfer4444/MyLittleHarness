@@ -13,7 +13,13 @@ from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
 from .parsing import Frontmatter, parse_frontmatter
-from .writeback import WritebackFact, state_writeback_facts
+from .writeback import (
+    WritebackFact,
+    acceptance_evidence_findings,
+    current_state_writeback_facts,
+    satisfied_post_archive_carry_forward_finding,
+    state_writeback_facts,
+)
 
 
 ANCHOR_PATTERNS = (
@@ -48,6 +54,11 @@ DURABLE_PROOF_RECORD_LIMIT = 5
 AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
 AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
+COORDINATION_RECORD_DIRS = (
+    "project/verification/work-claims",
+    "project/verification/handoffs",
+    "project/verification/session-active-work",
+)
 AGENT_RUN_REQUIRED_SCALARS = (
     "schema",
     "record_type",
@@ -55,11 +66,16 @@ AGENT_RUN_REQUIRED_SCALARS = (
     "role",
     "actor",
     "task",
+    "assigned_scope",
+    "runtime",
+    "worktree_id",
     "status",
     "stop_reason",
     "attempt_budget",
+    "docs_decision",
+    "residual_risk",
 )
-AGENT_RUN_REQUIRED_LISTS = ("input_refs", "output_refs", "claimed_paths", "commands", "source_hashes")
+AGENT_RUN_REQUIRED_LISTS = ("input_refs", "output_refs", "claimed_paths", "changed_files", "commands", "verification_refs", "source_hashes")
 AGENT_RUN_STATUSES = {
     "succeeded",
     "failed",
@@ -68,6 +84,7 @@ AGENT_RUN_STATUSES = {
     "needs-refinement",
     "needs-human-review",
 }
+AGENT_RUN_DOCS_DECISIONS = {"updated", "not-needed", "uncertain"}
 RECORD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SOURCE_HASH_RE = re.compile(r"^(.+?)\s+(?:sha256=([a-fA-F0-9]{64})|(missing)|(unreadable)|(invalid-path))$")
 
@@ -78,13 +95,22 @@ class AgentRunRecordRequest:
     role: str
     actor: str
     task: str
+    assigned_scope: str
+    runtime: str
+    worktree_id: str
     status: str
     stop_reason: str
     attempt_budget: str
     input_refs: tuple[str, ...]
     output_refs: tuple[str, ...]
     claimed_paths: tuple[str, ...]
+    changed_files: tuple[str, ...]
     commands: tuple[str, ...]
+    verification_refs: tuple[str, ...]
+    docs_decision: str
+    residual_risk: str
+    handoff_refs: tuple[str, ...]
+    claim_refs: tuple[str, ...]
     repeated_failure_signature: str
     provider: str
     model_id: str
@@ -97,13 +123,22 @@ def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
         role=str(getattr(args, "agent_role", "") or "").strip(),
         actor=str(getattr(args, "actor", "") or "").strip(),
         task=str(getattr(args, "task", "") or "").strip(),
+        assigned_scope=str(getattr(args, "assigned_scope", "") or "").strip(),
+        runtime=str(getattr(args, "runtime", "") or "").strip(),
+        worktree_id=str(getattr(args, "worktree_id", "") or "").strip(),
         status=str(getattr(args, "status", "") or "").strip(),
         stop_reason=str(getattr(args, "stop_reason", "") or "").strip(),
         attempt_budget=str(getattr(args, "attempt_budget", "") or "").strip(),
         input_refs=_tuple_values(getattr(args, "input_refs", ())),
         output_refs=_tuple_values(getattr(args, "output_refs", ())),
         claimed_paths=_tuple_values(getattr(args, "claimed_paths", ())),
+        changed_files=_tuple_values(getattr(args, "changed_files", ())),
         commands=_tuple_values(getattr(args, "commands", ())),
+        verification_refs=_tuple_values(getattr(args, "verification_refs", ())),
+        docs_decision=str(getattr(args, "docs_decision", "") or "").strip(),
+        residual_risk=str(getattr(args, "residual_risk", "") or "").strip(),
+        handoff_refs=_tuple_values(getattr(args, "handoff_refs", ())),
+        claim_refs=_tuple_values(getattr(args, "claim_refs", ())),
         repeated_failure_signature=str(getattr(args, "repeated_failure_signature", "") or "").strip(),
         provider=str(getattr(args, "provider", "") or "").strip(),
         model_id=str(getattr(args, "model_id", "") or "").strip(),
@@ -237,6 +272,83 @@ def agent_run_record_findings(inventory: Inventory, code_prefix: str = "agent-ru
     return findings
 
 
+def lifecycle_mutation_provenance_findings(inventory: Inventory, code_prefix: str = "lifecycle-provenance") -> list[Finding]:
+    state = inventory.state
+    state_source = state.rel_path if state and state.exists else "project/project-state.md"
+    state_data = state.frontmatter.data if state and state.exists else {}
+    facts = state_writeback_facts(state)
+    records = _agent_run_record_paths(inventory.root) if inventory.root_kind == "live_operating_root" else []
+    coordination_records = _coordination_record_paths(inventory.root) if inventory.root_kind == "live_operating_root" else []
+    findings = [
+        Finding(
+            "info",
+            f"{code_prefix}-boundary",
+            "lifecycle mutation provenance is read-only visibility; it cannot repair, rollback, close out, archive, mark roadmap done, stage, commit, push, or approve concurrent work",
+            state_source,
+        )
+    ]
+    if facts:
+        fact_fields = ", ".join(sorted(facts)[:8])
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-state-writeback",
+                f"project-state closeout/writeback facts are present: fields={fact_fields}; source={state_source}",
+                state_source,
+            )
+        )
+    plan_status = str(state_data.get("plan_status") or "").strip()
+    active_plan = str(state_data.get("active_plan") or "").strip()
+    if plan_status == "active" or active_plan:
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-active-lifecycle",
+                (
+                    f"active lifecycle posture visible: plan_status={plan_status or '<none>'}; "
+                    f"active_plan={active_plan or '<none>'}; active_phase={state_data.get('active_phase') or '<none>'}; "
+                    f"phase_status={state_data.get('phase_status') or '<none>'}"
+                ),
+                state_source,
+            )
+        )
+    if records:
+        examples = ", ".join(_to_rel_path(inventory.root, path) for path in records[:3])
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-agent-run-visibility",
+                f"agent-run evidence records available for recent run visibility: count={len(records)}; examples={examples}",
+                AGENT_RUNS_DIR_REL,
+            )
+        )
+    elif (plan_status == "active" or facts) and coordination_records:
+        examples = ", ".join(_to_rel_path(inventory.root, path) for path in coordination_records[:3])
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-unknown-owner",
+                (
+                    "lifecycle/writeback posture is present but no agent-run evidence records were found; "
+                    f"concurrent coordination records exist at {examples}; inspect project-state, roadmap, handoff, claim, and Git status before assuming ownership"
+                ),
+                AGENT_RUNS_DIR_REL,
+            )
+        )
+    elif plan_status == "active" or facts:
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-agent-run-absent",
+                "active lifecycle/writeback posture is visible and no agent-run evidence records were found; no concurrent coordination records were found",
+                AGENT_RUNS_DIR_REL,
+            )
+        )
+    else:
+        findings.append(Finding("info", f"{code_prefix}-quiet", "no active lifecycle mutation or agent-run evidence was found", state_source))
+    return findings
+
+
 def evidence_findings(inventory: Inventory) -> list[Finding]:
     state = inventory.state
     state_data = state.frontmatter.data if state and state.exists else {}
@@ -270,6 +382,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_closeout_findings(active_plan, inventory))
     findings.extend(_git_trailer_suggestion_findings(active_plan, inventory))
     findings.extend(_quality_cue_findings(active_plan, inventory))
+    findings.extend(_acceptance_evidence_findings(inventory, state_data))
     findings.extend(_operator_required_findings(inventory))
     findings.extend(_line_group_findings(active_plan, "evidence-residual-risk", "residual risk", (r"residual risk", r"residual risks"), inventory))
     findings.extend(_line_group_findings(active_plan, "evidence-skip-rationale", "skip rationale", SKIP_RATIONALE_PATTERNS, inventory))
@@ -462,9 +575,14 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
         ("--role", request.role),
         ("--actor", request.actor),
         ("--task", request.task),
+        ("--assigned-scope", request.assigned_scope),
+        ("--runtime", request.runtime),
+        ("--worktree-id", request.worktree_id),
         ("--status", request.status),
         ("--stop-reason", request.stop_reason),
         ("--attempt-budget", request.attempt_budget),
+        ("--docs-decision", request.docs_decision),
+        ("--residual-risk", request.residual_risk),
     ):
         if not value:
             findings.append(Finding("error", "agent-run-record-refused", f"{field} is required"))
@@ -478,11 +596,22 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
             )
         )
 
+    if request.docs_decision and request.docs_decision not in AGENT_RUN_DOCS_DECISIONS:
+        findings.append(
+            Finding(
+                "error",
+                "agent-run-record-refused",
+                f"--docs-decision must be one of {', '.join(sorted(AGENT_RUN_DOCS_DECISIONS))}",
+            )
+        )
+
     for field, values in (
         ("--input-ref", request.input_refs),
         ("--output-ref", request.output_refs),
         ("--claimed-path", request.claimed_paths),
+        ("--changed-file", request.changed_files),
         ("--command", request.commands),
+        ("--verification-ref", request.verification_refs),
     ):
         if not values:
             findings.append(Finding("error", "agent-run-record-refused", f"{field} must be supplied at least once"))
@@ -491,6 +620,10 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
         ("--input-ref", request.input_refs),
         ("--output-ref", request.output_refs),
         ("--claimed-path", request.claimed_paths),
+        ("--changed-file", request.changed_files),
+        ("--verification-ref", request.verification_refs),
+        ("--handoff-ref", request.handoff_refs),
+        ("--claim-ref", request.claim_refs),
     ):
         for value in values:
             conflict = _root_relative_path_conflict(value)
@@ -543,13 +676,22 @@ def _render_agent_run_record(root: Path, request: AgentRunRecordRequest) -> tupl
         ("role", request.role),
         ("actor", request.actor),
         ("task", request.task),
+        ("assigned_scope", request.assigned_scope),
+        ("runtime", request.runtime),
+        ("worktree_id", request.worktree_id),
         ("status", request.status),
         ("stop_reason", request.stop_reason),
         ("attempt_budget", request.attempt_budget),
         ("input_refs", request.input_refs),
         ("output_refs", request.output_refs),
         ("claimed_paths", request.claimed_paths),
+        ("changed_files", request.changed_files),
         ("commands", request.commands),
+        ("verification_refs", request.verification_refs),
+        ("docs_decision", request.docs_decision),
+        ("residual_risk", request.residual_risk),
+        ("handoff_refs", request.handoff_refs),
+        ("claim_refs", request.claim_refs),
         ("source_hashes", tuple(source_hashes)),
         ("created_at_utc", _utc_timestamp()),
     ]
@@ -577,17 +719,50 @@ def _render_agent_run_record(root: Path, request: AgentRunRecordRequest) -> tupl
         "",
         f"- role: `{request.role}`",
         f"- actor: `{request.actor}`",
+        f"- assigned_scope: `{request.assigned_scope}`",
+        f"- runtime: `{request.runtime}`",
+        f"- worktree_id: `{request.worktree_id}`",
         f"- status: `{request.status}`",
         f"- stop_reason: `{request.stop_reason}`",
         f"- attempt_budget: `{request.attempt_budget}`",
+        f"- docs_decision: `{request.docs_decision}`",
+        f"- residual_risk: `{request.residual_risk}`",
         "",
         "## Task",
         "",
         request.task,
         "",
-        "## Commands",
+        "## Changed Files",
         "",
     ]
+    lines.extend(f"- `{path}`" for path in request.changed_files)
+    lines.extend(
+        [
+            "",
+            "## Verification",
+            "",
+        ]
+    )
+    lines.extend(f"- `{ref}`" for ref in request.verification_refs)
+    lines.extend(
+        [
+            "",
+            "## Handoff And Claim Pointers",
+            "",
+        ]
+    )
+    if request.handoff_refs or request.claim_refs:
+        lines.extend(f"- handoff: `{ref}`" for ref in request.handoff_refs)
+        lines.extend(f"- claim: `{ref}`" for ref in request.claim_refs)
+    else:
+        lines.append("- none recorded")
+    lines.extend(
+        [
+            "",
+            "## Commands",
+            "",
+        ]
+    )
     lines.extend(f"- `{command}`" for command in request.commands)
     lines.extend(["", "## Source Hashes", ""])
     lines.extend(f"- `{entry}`" for entry in source_hashes)
@@ -641,7 +816,15 @@ def _source_hash_entries(root: Path, request: AgentRunRecordRequest) -> tuple[li
 def _source_bound_refs(request: AgentRunRecordRequest) -> tuple[str, ...]:
     refs: list[str] = []
     seen: set[str] = set()
-    for rel_path in (*request.input_refs, *request.output_refs, *request.claimed_paths):
+    for rel_path in (
+        *request.input_refs,
+        *request.output_refs,
+        *request.claimed_paths,
+        *request.changed_files,
+        *request.verification_refs,
+        *request.handoff_refs,
+        *request.claim_refs,
+    ):
         normalized = rel_path.replace("\\", "/").strip()
         if normalized and normalized not in seen:
             refs.append(normalized)
@@ -672,10 +855,18 @@ def _agent_run_record_metadata_findings(
     status = str(data.get("status") or "").strip()
     if status and status not in AGENT_RUN_STATUSES:
         findings.append(Finding("warn", code, f"agent run record status is unsupported: {status}", rel_path))
+    docs_decision = str(data.get("docs_decision") or "").strip()
+    if docs_decision and docs_decision not in AGENT_RUN_DOCS_DECISIONS:
+        findings.append(Finding("warn", code, f"agent run record docs_decision is unsupported: {docs_decision}", rel_path))
     for field in AGENT_RUN_REQUIRED_LISTS:
         values = _frontmatter_string_list(data.get(field))
         if not values:
             findings.append(Finding("warn", code, f"agent run record missing required list field: {field}", rel_path))
+    for field in ("input_refs", "output_refs", "claimed_paths", "changed_files", "verification_refs", "handoff_refs", "claim_refs"):
+        for value in _frontmatter_string_list(data.get(field)):
+            conflict = _root_relative_path_conflict(value)
+            if conflict:
+                findings.append(Finding("warn", code, f"agent run record {field} path {conflict}: {value}", rel_path))
     return findings
 
 
@@ -742,6 +933,16 @@ def _agent_run_record_paths(root: Path) -> list[Path]:
     if not directory.exists() or not directory.is_dir():
         return []
     return sorted(directory.glob("*.md"))
+
+
+def _coordination_record_paths(root: Path) -> list[Path]:
+    records: list[Path] = []
+    for directory_rel in COORDINATION_RECORD_DIRS:
+        directory = root / directory_rel
+        if not directory.exists() or not directory.is_dir():
+            continue
+        records.extend(path for path in directory.iterdir() if path.is_file() and path.suffix == ".json")
+    return sorted(records)
 
 
 def _agent_run_record_target_rel(request: AgentRunRecordRequest) -> str:
@@ -907,7 +1108,7 @@ def _closeout_findings(active_plan: Surface | None, inventory: Inventory) -> lis
     findings: list[Finding] = []
     policy = inventory.manifest.get("policy", {}) if isinstance(inventory.manifest, dict) else {}
     closeout_commit = policy.get("closeout_commit")
-    facts = state_writeback_facts(inventory.state)
+    facts = current_state_writeback_facts(inventory)
     if closeout_commit:
         findings.append(
             Finding(
@@ -970,7 +1171,7 @@ def _writeback_fact_finding(code: str, label: str, fact: WritebackFact) -> Findi
 
 
 def _quality_cue_findings(active_plan: Surface | None, inventory: Inventory) -> list[Finding]:
-    facts = state_writeback_facts(inventory.state)
+    facts = current_state_writeback_facts(inventory)
     if not active_plan and not facts:
         return [
             Finding(
@@ -1004,6 +1205,21 @@ def _quality_cue_findings(active_plan: Surface | None, inventory: Inventory) -> 
     ]
 
 
+def _acceptance_evidence_findings(inventory: Inventory, state_data: dict[str, object]) -> list[Finding]:
+    if str(state_data.get("phase_status") or "") != "complete":
+        return []
+    facts = current_state_writeback_facts(inventory)
+    values = {field: fact.value for field, fact in facts.items()}
+    return acceptance_evidence_findings(
+        inventory,
+        values,
+        completion_reason="completed active-plan phase",
+        apply=False,
+        code_prefix="evidence",
+        include_success=True,
+    )
+
+
 def _operator_required_findings(inventory: Inventory) -> list[Finding]:
     source = inventory.manifest_surface.rel_path if inventory.manifest_surface and inventory.manifest_surface.exists else None
     return [
@@ -1030,9 +1246,13 @@ def _line_group_findings(
     inventory: Inventory,
 ) -> list[Finding]:
     fact_key = "residual_risk" if "residual" in label else "carry_forward" if "carry" in label else ""
-    fact = state_writeback_facts(inventory.state).get(fact_key) if fact_key else None
+    fact = current_state_writeback_facts(inventory).get(fact_key) if fact_key else None
     if fact:
         return [_writeback_fact_finding(code, f"{label} candidate", fact)]
+    if fact_key == "carry_forward":
+        historical = satisfied_post_archive_carry_forward_finding(inventory, code)
+        if historical:
+            return [historical]
     if not active_plan:
         return [Finding("info", code, f"{label} scan skipped because no active plan is present")]
     cues = find_cues(active_plan, label.replace(" ", "-"), f"{label} candidate", patterns)

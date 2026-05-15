@@ -390,7 +390,6 @@ def _render_research_compare(root: Path, target: ResearchCompareTarget) -> tuple
         ),
         "source_hashes:",
         *(f'  - "{_yaml_double_quoted_value(f"{source.rel_path} sha256={source.source_hash}")}"' for source in target.sources),
-        'superseded_by: ""',
         "---",
     ]
     lines = [

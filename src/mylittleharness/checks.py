@@ -17,6 +17,8 @@ from pathlib import Path
 
 from . import __version__
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .dashboard import dashboard_check_findings
+from .evidence import lifecycle_mutation_provenance_findings
 from .inventory import (
     EXPECTED_SPEC_NAMES,
     Inventory,
@@ -37,7 +39,9 @@ from .parsing import extract_path_refs, parse_frontmatter
 from .product_hygiene_checks import product_hygiene_findings
 from .roadmap import (
     ROADMAP_REL,
+    active_plan_roadmap_item_ids,
     roadmap_acceptance_readiness_findings,
+    roadmap_batch_slice_gate_findings,
     roadmap_items_for_diagnostics,
     roadmap_order_namespace_findings,
     roadmap_compacted_dependency_archive_evidence_findings,
@@ -53,6 +57,7 @@ from .projection_artifacts import (
     ARTIFACT_DIR_REL,
     build_projection_artifacts,
     inspect_projection_artifacts,
+    projection_cache_posture_payload,
     projection_artifact_path_query_findings,
     rebuild_projection_artifacts,
 )
@@ -77,11 +82,13 @@ from .writeback import (
     active_plan_completed_phase_handoff_findings,
     active_plan_phase_body_status_fact,
     active_plan_preceding_phase_body_status_facts,
+    acceptance_evidence_findings,
     canonical_phase_body_status,
     closeout_values_are_complete,
     state_writeback_facts,
     state_writeback_identity_matches_current_plan,
 )
+from .vcs import product_diff_write_scope_findings
 
 
 LARGE_FILE_LINES = 500
@@ -247,6 +254,7 @@ PHASE_STATUS_VALUES = {
 }
 PHASE_BODY_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
+INCOMPLETE_EVIDENCE_VALUES = {"", "pending", "uncertain", "unknown", "tbd", "todo"}
 SPEC_STATUS_VALUES = ("draft", "accepted", "superseded", "archived")
 SPEC_IMPLEMENTATION_POSTURE_VALUES = (
     "not-applicable",
@@ -292,6 +300,7 @@ ROUTE_METADATA_STATUS_VALUES = {
     "archived",
     "blocked",
     "complete",
+    "compared",
     "deferred",
     "distilled",
     "done",
@@ -323,7 +332,7 @@ ROUTE_METADATA_STATUS_HINTS_BY_ROUTE = {
     "adrs": ("draft", "accepted", "superseded", "archived"),
     "decisions": ("draft", "accepted", "superseded", "archived"),
     "incubation": ("incubating", "implemented", "rejected", "superseded", "archived", "stale"),
-    "research": ("imported", "distilled", "research-ready", "accepted", "superseded", "archived", "stale"),
+    "research": ("imported", "distilled", "compared", "research-ready", "accepted", "superseded", "archived", "stale"),
     "roadmap": ("proposed", "accepted", "active", "blocked", "done", "deferred", "rejected", "superseded"),
     "stable-specs": ("draft", "accepted", "synced", "stale", "superseded", "archived"),
     "verification": ("pending", "passed", "failed", "partial", "partially-verified", "archived"),
@@ -851,6 +860,14 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(roadmap_source_incubation_evidence_findings(inventory))
     findings.extend(roadmap_related_specs_evidence_findings(inventory))
     findings.extend(roadmap_human_review_gate_findings(inventory))
+    findings.extend(
+        roadmap_batch_slice_gate_findings(
+            inventory,
+            active_plan_roadmap_item_ids(inventory),
+            route="check",
+            source="project/implementation-plan.md",
+        )
+    )
     findings.extend(deep_research_rubric_recovery_findings(inventory))
     findings.extend(roadmap_compacted_dependency_archive_evidence_findings(inventory))
     findings.extend(roadmap_done_docs_archive_evidence_findings(inventory))
@@ -858,8 +875,106 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_target_artifact_ownership_findings(inventory))
     findings.extend(_verification_ledger_status_findings(inventory))
     findings.extend(_working_memory_compaction_rail_findings(inventory))
+    findings.extend(multi_agent_security_findings(inventory))
+    findings.extend(dashboard_check_findings(inventory))
+    findings.extend(lifecycle_mutation_provenance_findings(inventory, "check-lifecycle-provenance"))
     findings.extend(_docmap_findings(inventory))
     findings.extend(_mirror_findings(inventory))
+    return findings
+
+
+def multi_agent_security_findings(
+    inventory: Inventory, code_prefix: str = "check-multi-agent-security"
+) -> list[Finding]:
+    state_source = inventory.state.rel_path if inventory.state and inventory.state.exists else None
+    findings = [
+        Finding(
+            "info",
+            f"{code_prefix}-root-posture",
+            (
+                f"root kind: {inventory.root_kind}; multi-agent security diagnostics are read-only threat-model posture "
+                "and cannot promote a product fixture, archive root, generated output, adapter, hook, daemon, or dashboard into authority"
+            ),
+            state_source,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-authority",
+            (
+                "claims, agent-run evidence, handoff packets, and session active-work records are the repo-visible "
+                "coordination authority; hooks, dashboards, daemons, adapters, provider state, logs, and caches remain advisory"
+            ),
+            "project/verification",
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-hooks",
+            (
+                "hooks are explicit opt-in sensors/blockers/context injectors; hook output cannot approve repair, closeout, "
+                "archive, roadmap status, staging, commit, push, rollback, release, dispatcher decisions, or daemon truth"
+            ),
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-dashboard",
+            (
+                "dashboard output is projection/cockpit context only; route files, project-state lifecycle fields, claims, "
+                "runs, handoffs, and explicit writeback facts remain truth"
+            ),
+            ".mylittleharness/generated/projection",
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-runtime-cache",
+            (
+                "mlhd runtime cache, process observations, local logs, and notifications are disposable; deleting them must "
+                "not change what is active, accepted, verified, blocked, closeable, or archived"
+            ),
+            ".mylittleharness",
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-dispatcher-gate",
+            (
+                "a dispatcher cannot start work without a repo-visible handoff packet, compatible active claim, and planned "
+                "agent-run evidence path; model/provider/tool routing cannot bypass those records"
+            ),
+            "project/verification",
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-adapter-boundary",
+            (
+                "MCP/A2A/relay/provider adapters are transport or projection helpers by default; they must not store secrets, "
+                "open a background server, choose providers, or approve lifecycle movement without an explicit future route"
+            ),
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-prompt-injection",
+            (
+                "repo text, hook arguments, dashboard inputs, adapter payloads, and logs are untrusted context until reconciled "
+                "against route manifests, write scope, allowed routes, claims, handoffs, and explicit evidence"
+            ),
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-path-secret-leakage",
+            (
+                "security-sensitive output should name root-relative refs, hashes, and bounded summaries instead of copying "
+                "environment variables, credentials, provider payloads, log bodies, or source bodies into runtime state"
+            ),
+            "project/verification",
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-unsafe-defaults-disabled",
+            (
+                "check starts no dashboard, daemon, dispatcher, provider gateway, A2A server, network listener, hook install, "
+                "worker process, or runtime cache mutation; risky runtime expansion stays behind later explicit dry-run/apply rails"
+            ),
+        ),
+    ]
     return findings
 
 
@@ -1062,6 +1177,8 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
         missing_code="projection-index-missing",
     )
     reason = _projection_cache_reason_label(artifact_reason, index_reason)
+    posture = projection_cache_posture_payload(artifact_findings, index_findings)
+    refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
     return [
         Finding(
             "info",
@@ -1069,6 +1186,15 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
             (
                 f"generated projection cache: artifacts={artifact_status}; sqlite_index={index_status}; "
                 f"detail={reason}; source files and the in-memory projection remain authoritative"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "projection-cache-posture",
+            (
+                f"structured cache posture: artifacts={artifact_status}; sqlite_index={index_status}; "
+                f"stale_reason={reason}; refresh_by_adapter=false; next_safe={refresh_commands}"
             ),
             ARTIFACT_DIR_REL,
         ),
@@ -6179,6 +6305,8 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             findings.extend(_active_plan_docs_decision_findings(plan, data))
             findings.extend(_active_plan_writeback_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
+            findings.extend(_active_plan_phase_evidence_findings(inventory, data))
+            findings.extend(product_diff_write_scope_findings(inventory, code_prefix="active-plan"))
             findings.extend(_active_plan_work_result_capsule_findings(inventory, plan, data))
             findings.extend(_active_plan_source_incubation_relationship_findings(inventory, plan))
     elif plan and plan.exists:
@@ -6981,7 +7109,6 @@ def _active_plan_work_result_capsule_findings(inventory: Inventory, plan: Surfac
             "how checked:",
             "checked by:",
             "verification:",
-            "verification",
         ),
     )
     has_remaining = _work_result_contains_any_label(normalized, ("what remains:", "no required follow-up"))
@@ -7013,6 +7140,103 @@ def _active_plan_work_result_capsule_findings(inventory: Inventory, plan: Surfac
 
 def _work_result_contains_any_label(normalized_text: str, labels: tuple[str, ...]) -> bool:
     return any(label in normalized_text for label in labels)
+
+
+def _active_plan_phase_evidence_findings(inventory: Inventory, state_data: dict[str, object]) -> list[Finding]:
+    if str(state_data.get("phase_status") or "") != "complete":
+        return []
+
+    source = inventory.state.rel_path if inventory.state else "project/project-state.md"
+    facts = state_writeback_facts(inventory.state)
+    if not facts:
+        return [
+            Finding(
+                "warn",
+                "active-plan-phase-evidence-missing",
+                (
+                    "project-state phase_status is complete, but no repo-visible phase evidence is attached to the "
+                    "current active plan; record at least docs_decision, state_writeback, verification, and work_result "
+                    "with `mylittleharness --root <root> writeback --dry-run --phase-status complete --docs-decision "
+                    "uncertain --state-writeback \"<phase evidence>\" --verification \"<command/result>\" --work-result "
+                    "\"<plain-language capsule>\"`; docs_decision uncertain is allowed for provisional phase handoff "
+                    "but not confident final closeout"
+                ),
+                source,
+            )
+        ]
+
+    if not state_writeback_identity_matches_current_plan(inventory):
+        first_fact = next(iter(facts.values()))
+        return [
+            Finding(
+                "warn",
+                "active-plan-phase-evidence-stale",
+                (
+                    "project-state phase_status is complete, but the recorded closeout/phase evidence does not match "
+                    "the current active plan identity; record same-request phase evidence before relying on closeout, "
+                    "archive, roadmap done-status, or next-plan movement"
+                ),
+                first_fact.source,
+                first_fact.line,
+            )
+        ]
+
+    values = {field: fact.value for field, fact in facts.items()}
+    missing = _missing_phase_evidence_fields(values)
+    if missing:
+        first_fact = next(iter(facts.values()))
+        return [
+            Finding(
+                "warn",
+                "active-plan-phase-evidence-thin",
+                (
+                    "project-state phase_status is complete, but phase evidence is missing structural field(s): "
+                    f"{', '.join(missing)}; record a provisional handoff with docs_decision uncertain plus "
+                    "state_writeback, verification, and work_result, or record updated/not-needed docs_decision "
+                    "when preparing confident final closeout"
+                ),
+                first_fact.source,
+                first_fact.line,
+            )
+        ]
+
+    verification_fact = facts.get("verification")
+    findings = [
+        Finding(
+            "info",
+            "active-plan-phase-evidence",
+            "project-state phase_status is complete with repo-visible phase evidence for docs_decision, state_writeback, verification, and work_result",
+            verification_fact.source if verification_fact else source,
+            verification_fact.line if verification_fact else None,
+        )
+    ]
+    findings.extend(
+        acceptance_evidence_findings(
+            inventory,
+            values,
+            completion_reason="completed active-plan phase",
+            apply=False,
+            code_prefix="active-plan",
+            include_success=True,
+        )
+    )
+    return findings
+
+
+def _missing_phase_evidence_fields(values: dict[str, str]) -> tuple[str, ...]:
+    missing: list[str] = []
+    docs_decision = str(values.get("docs_decision") or "").strip().casefold()
+    if docs_decision not in DOCS_DECISION_VALUES:
+        missing.append("docs_decision")
+    for field in ("state_writeback", "verification", "work_result"):
+        if not _phase_evidence_value_is_present(values.get(field, "")):
+            missing.append(field)
+    return tuple(missing)
+
+
+def _phase_evidence_value_is_present(value: object) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).rstrip(".").casefold()
+    return normalized not in INCOMPLETE_EVIDENCE_VALUES
 
 
 def _spec_findings(inventory: Inventory) -> list[Finding]:

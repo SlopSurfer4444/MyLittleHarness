@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import shlex
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1477,7 +1478,7 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(code, 0)
                     self.assertEqual(before, snapshot_tree(root))
                     self.assertIn("route-metadata-status", rendered)
-                    self.assertIn("route-specific allowed statuses: imported, distilled, research-ready", rendered)
+                    self.assertIn("route-specific allowed statuses: imported, distilled, compared, research-ready", rendered)
                     self.assertIn('suggest --intent "metadata status"', rendered)
                     self.assertIn("advisory only, no lifecycle approval", rendered)
                     self.assertIn("route-metadata-missing-target", rendered)
@@ -3613,6 +3614,548 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("repo-visible authority is unchanged until an explicit apply succeeds", rendered)
                     self.assertNotIn("rerun the same reviewed command with `--apply`", rendered)
 
+    def test_plan_roadmap_item_status_gate_refuses_non_current_items_without_write_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            source_dir = root / "project/plan-incubation"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            cases = (
+                ("deferred-status-work", "deferred"),
+                ("rejected-status-work", "rejected"),
+                ("done-status-work", "done"),
+            )
+            roadmap_path = root / "project/roadmap.md"
+            additions = []
+            for item_id, status in cases:
+                source_rel = f"project/plan-incubation/{item_id}.md"
+                (root / source_rel).write_text(
+                    f"# {item_id}\n\nThis source would be related to an active plan if the status gate leaked.\n",
+                    encoding="utf-8",
+                )
+                title = item_id.replace("-", " ").title()
+                additions.append(
+                    "\n"
+                    f"### {title}\n\n"
+                    f"- `id`: `{item_id}`\n"
+                    f"- `status`: `{status}`\n"
+                    "- `order`: `900`\n"
+                    f"- `execution_slice`: `{item_id}`\n"
+                    "- `slice_goal`: `Do not open this non-current roadmap fact as active work.`\n"
+                    f"- `slice_members`: `[\"{item_id}\"]`\n"
+                    "- `slice_dependencies`: `[]`\n"
+                    "- `slice_closeout_boundary`: `explicit closeout/writeback only`\n"
+                    "- `dependencies`: `[]`\n"
+                    f"- `source_incubation`: `{source_rel}`\n"
+                    "- `source_research`: ``\n"
+                    "- `related_specs`: `[]`\n"
+                    "- `related_plan`: `project/implementation-plan.md`\n"
+                    "- `archived_plan`: `project/archive/plans/historical.md`\n"
+                    "- `target_artifacts`: `[\"src/mylittleharness/planning.py\"]`\n"
+                    "- `verification_summary`: `Status gate should refuse before route-write preview.`\n"
+                    "- `docs_decision`: `not-needed`\n"
+                    "- `carry_forward`: `Historical status should stay non-current.`\n"
+                    "- `supersedes`: `[]`\n"
+                    "- `superseded_by`: `[]`\n"
+                )
+            roadmap_path.write_text(roadmap_path.read_text(encoding="utf-8") + "".join(additions), encoding="utf-8")
+            before = snapshot_tree(root)
+
+            for item_id, status in cases:
+                with self.subTest(status=status):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", item_id])
+
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("Result: refused", rendered)
+                    self.assertIn("plan-roadmap-status-refused", rendered)
+                    self.assertIn(f"status '{status}'", rendered)
+                    self.assertIn("opens only accepted or active items", rendered)
+                    self.assertIn("not current legal next actions", rendered)
+                    self.assertNotIn("plan-target", rendered)
+                    self.assertNotIn("plan-lifecycle", rendered)
+                    self.assertNotIn("plan-route-write", rendered)
+                    self.assertNotIn("plan-roadmap-sync", rendered)
+                    self.assertNotIn("plan-source-incubation-sync", rendered)
+
+    def test_plan_roadmap_item_status_gate_allows_accepted_item_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_path.write_text(
+                roadmap_path.read_text(encoding="utf-8")
+                + "\n### Current Action Gate Accepted\n\n"
+                "- `id`: `current-action-gate-accepted`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `900`\n"
+                "- `execution_slice`: `current-action-gate-accepted`\n"
+                "- `slice_goal`: `Accepted work can still preview a bounded plan opening.`\n"
+                "- `slice_members`: `[\"current-action-gate-accepted\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `explicit closeout/writeback only`\n"
+                "- `dependencies`: `[]`\n"
+                "- `source_incubation`: ``\n"
+                "- `source_research`: ``\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: ``\n"
+                "- `archived_plan`: ``\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\"]`\n"
+                "- `verification_summary`: `Accepted status remains eligible for normal dry-run preview.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "- `carry_forward`: `Open through explicit plan review.`\n"
+                "- `supersedes`: `[]`\n"
+                "- `superseded_by`: `[]`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--dry-run",
+                        "--roadmap-item",
+                        "current-action-gate-accepted",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertNotIn("plan-roadmap-status-refused", rendered)
+            self.assertIn("plan-route-write", rendered)
+            self.assertIn("apply would write only the active plan", rendered)
+
+    def test_plan_refuses_audit_deliverable_with_product_targets_without_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Audit Product Target\n\n"
+                "- `id`: `audit-product-target`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `p1-umbrella-audit`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `audit-product-target`\n"
+                "- `slice_goal`: `Audit lifecycle routes for shortcut paths.`\n"
+                "- `slice_members`: `[\"audit-product-target\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `audit and proposal only unless explicitly promoted later`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Future work should produce an audit matrix before product implementation.`\n"
+                "- `docs_decision`: `uncertain`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "audit-product-target"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("Result: refused", rendered)
+            self.assertIn("plan-deliverable-class-refused", rendered)
+            self.assertIn("audit deliverable intent", rendered)
+            self.assertIn("product implementation target_artifacts or route hints", rendered)
+            self.assertIn("--field deliverable_class=implementation", rendered)
+            self.assertNotIn("plan-route-write", rendered)
+
+    def test_plan_allows_audit_intent_when_deliverable_class_is_promoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Promoted Audit Implementation\n\n"
+                "- `id`: `promoted-audit-implementation`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `p1-umbrella-audit`\n"
+                "- `deliverable_class`: `implementation`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `promoted-audit-implementation`\n"
+                "- `slice_goal`: `Implement the promoted plan guardrail after audit review.`\n"
+                "- `slice_members`: `[\"promoted-audit-implementation\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `audit source explicitly promoted to implementation`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Focused planning regression should pass.`\n"
+                "- `docs_decision`: `not-needed`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "promoted-audit-implementation"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertNotIn("plan-deliverable-class-refused", rendered)
+            self.assertIn("plan-route-write", rendered)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('  - "src/mylittleharness/planning.py"', plan_text)
+            self.assertIn('  - "tests/test_cli.py"', plan_text)
+
+    def test_plan_renders_non_implementation_diagnostic_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Product Diff Diagnostic\n\n"
+                "- `id`: `product-diff-diagnostic`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `p1-review-diagnostic`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `product-diff-diagnostic`\n"
+                "- `slice_goal`: `Produce a repo-visible fan-in diagnostic matrix without mutating product source.`\n"
+                "- `slice_members`: `[\"product-diff-diagnostic\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `diagnostic artifact only; no product diff acceptance`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"project/verification/product-diff-diagnostic.md\"]`\n"
+                "- `verification_summary`: `Diagnostic artifact maps dirty product paths to evidence, disposition, risk, and next slices.`\n"
+                "- `docs_decision`: `uncertain`\n"
+                "- `work_class`: `review`\n"
+                "- `deliverable_class`: `diagnostic`\n"
+                "- `implementation_allowed`: `false`\n"
+                "- `promotion_required`: `true`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "product-diff-diagnostic"])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("plan-non-implementation-contract", dry_rendered)
+            self.assertIn("work_class=non_implementation, deliverable_class=diagnostic, implementation_allowed=false, promotion_required=true", dry_rendered)
+            self.assertIn("plan-output-artifact-gate", dry_rendered)
+            self.assertIn("product tests are not primary proof", dry_rendered)
+            self.assertIn("candidate task: Produce diagnostic deliverable for roadmap item product-diff-diagnostic.", dry_rendered)
+            self.assertNotIn("candidate task: Implement roadmap item product-diff-diagnostic.", dry_rendered)
+            self.assertNotIn("plan-verification-gate-target-tests", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "product-diff-diagnostic"])
+            self.assertEqual(apply_code, 0)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('work_class: "non_implementation"', plan_text)
+            self.assertIn('deliverable_class: "diagnostic"', plan_text)
+            self.assertIn("implementation_allowed: false", plan_text)
+            self.assertIn("promotion_required: true", plan_text)
+            self.assertIn('active_phase: "phase-1-diagnostic-scope"', plan_text)
+            self.assertIn("### phase-1-diagnostic-scope", plan_text)
+            self.assertIn("### phase-2-diagnostic-matrix", plan_text)
+            self.assertIn("### phase-3-diagnostic-state-transfer", plan_text)
+            self.assertIn("repo-visible `diagnostic` output artifact exists at `project/verification/product-diff-diagnostic.md`", plan_text)
+            self.assertIn("product tests are not used as primary proof", plan_text)
+            self.assertIn('active_phase: "phase-1-diagnostic-scope"', state_text)
+            self.assertNotIn("Implement the roadmap-backed behavior", plan_text)
+            self.assertNotIn("PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src", plan_text)
+
+    def test_plan_allows_diagnostic_source_product_hints_when_output_target_is_operating_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/verification/product-diff-fan-in-map.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "# Product Diff Fan-In Map\n\n"
+                "This diagnostic reviews dirty product paths as read context only.\n\n"
+                "- affected_routes: src/mylittleharness/roadmap.py, tests/test_cli.py\n"
+                "- safe_boundary: diagnostic output artifact only; no product source mutation.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Product Diff Fan In Scope Diagnostic\n\n"
+                "- `id`: `product-diff-fan-in-scope-diagnostic`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `p1-review-diagnostic`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `product-diff-fan-in-scope-diagnostic`\n"
+                "- `slice_goal`: `Produce a repo-visible fan-in diagnostic matrix without mutating product source.`\n"
+                "- `slice_members`: `[\"product-diff-fan-in-scope-diagnostic\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `diagnostic artifact only; no product diff acceptance`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_members`: `[\"{source_rel}\"]`\n"
+                "- `target_artifacts`: `[\"project/verification/product-diff-fan-in-scope-diagnostic.md\"]`\n"
+                "- `verification_summary`: `Diagnostic artifact maps dirty product paths to evidence, disposition, risk, and next slices.`\n"
+                "- `docs_decision`: `uncertain`\n"
+                "- `work_class`: `non_implementation`\n"
+                "- `deliverable_class`: `diagnostic`\n"
+                "- `implementation_allowed`: `false`\n"
+                "- `promotion_required`: `true`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--dry-run",
+                        "--roadmap-item",
+                        "product-diff-fan-in-scope-diagnostic",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("plan-non-implementation-contract", rendered)
+            self.assertIn("plan-output-artifact-gate", rendered)
+            self.assertIn("project/verification/product-diff-fan-in-scope-diagnostic.md", rendered)
+            self.assertIn("candidate task: Produce diagnostic deliverable for roadmap item product-diff-fan-in-scope-diagnostic.", rendered)
+            self.assertNotIn("plan-deliverable-class-refused", rendered)
+            self.assertNotIn("plan-verification-gate-target-tests", rendered)
+            self.assertNotIn("candidate task: Implement roadmap item product-diff-fan-in-scope-diagnostic.", rendered)
+
+    def test_plan_renders_fan_in_review_required_disposition_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Product Diff Fan In Review\n\n"
+                "- `id`: `product-diff-fan-in-review`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `fan-in-review`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `product-diff-fan-in-review`\n"
+                "- `slice_goal`: `Produce a fan-in review disposition matrix without mutating product source.`\n"
+                "- `slice_members`: `[\"product-diff-fan-in-review\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `review artifact only; no product diff acceptance`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"project/verification/fan-in-review.md\"]`\n"
+                "- `verification_summary`: `Fan-in artifact names source snapshot, cluster disposition, missing evidence, forbidden shortcuts, owner route, follow-up slice, and no product diff acceptance.`\n"
+                "- `docs_decision`: `uncertain`\n"
+                "- `work_class`: `review`\n"
+                "- `deliverable_class`: `fan-in-review`\n"
+                "- `implementation_allowed`: `false`\n"
+                "- `promotion_required`: `true`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "product-diff-fan-in-review"])
+
+            self.assertEqual(code, 0)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('deliverable_class: "fan_in_review"', plan_text)
+            self.assertIn("### phase-1-fan-in-review-scope", plan_text)
+            self.assertIn("### phase-2-fan-in-review-disposition", plan_text)
+            self.assertIn("source snapshot, cluster disposition, missing evidence, forbidden shortcuts, owner route, follow-up slice", plan_text)
+            self.assertIn("no-product-diff-acceptance", plan_text)
+
+    def test_plan_refuses_proposal_route_hints_as_product_targets_without_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/proposal-route-hints.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "# Proposal Route Hints\n\n"
+                "[MLH-Fix-Candidate] Proposal should not become a product patch just because it names owner routes. "
+                "affected_routes: src/mylittleharness/planning.py, tests/test_cli.py "
+                "expected_owner_command: plan should preserve proposal class.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Proposal Route Hints\n\n"
+                "- `id`: `proposal-route-hints`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `proposal-only`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `proposal-route-hints`\n"
+                "- `slice_goal`: `Proposal only unless explicit implementation metadata is added.`\n"
+                "- `slice_members`: `[\"proposal-route-hints\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `proposal only; no product implementation plan`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `target_artifacts`: `[]`\n"
+                "- `verification_summary`: `Plan dry-run should refuse inferred product write scope.`\n"
+                "- `docs_decision`: `uncertain`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "proposal-route-hints"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("plan-deliverable-class-refused", rendered)
+            self.assertIn("proposal deliverable intent", rendered)
+            self.assertIn("src/mylittleharness/planning.py", rendered)
+            self.assertNotIn("plan-route-write", rendered)
+
+    def test_plan_dry_run_route_write_evidence_overrides_noop_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            source_dir = root / "project/plan-incubation"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            source_rel = "project/plan-incubation/dry-run-no-op-preview.md"
+            (root / source_rel).write_text(
+                "---\n"
+                'topic: "dry run no op preview"\n'
+                'related_plan: "project/implementation-plan.md"\n'
+                'related_roadmap_item: "dry-run-no-op-preview"\n'
+                "---\n"
+                "# Dry Run No-Op Preview\n\n"
+                "The no-op wording here is topic text, not a dry-run lifecycle result.\n",
+                encoding="utf-8",
+            )
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_path.write_text(
+                roadmap_path.read_text(encoding="utf-8")
+                + "\n### Dry Run No Op Preview\n\n"
+                "- `id`: `dry-run-no-op-preview`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `910`\n"
+                "- `execution_slice`: `dry-run-no-op-preview`\n"
+                "- `slice_goal`: `Preview a plan whose source text says no-op while route writes are still needed.`\n"
+                "- `slice_members`: `[\"dry-run-no-op-preview\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `report consistency only`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `source_research`: ``\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: `project/implementation-plan.md`\n"
+                "- `archived_plan`: ``\n"
+                "- `target_artifacts`: `[\"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Route-write previews require apply-needed work result wording.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "- `carry_forward`: `Open through explicit plan review.`\n"
+                "- `supersedes`: `[]`\n"
+                "- `superseded_by`: `[]`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--dry-run",
+                        "--roadmap-item",
+                        "dry-run-no-op-preview",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("plan-route-write", rendered)
+            self.assertIn("plan-roadmap-noop", rendered)
+            self.assertIn("Result: completed", rendered)
+            self.assertNotIn("Result: no changes needed", rendered)
+            self.assertNotIn("no apply is needed for the reported current posture", rendered)
+            self.assertIn("bounded apply path", rendered)
+            self.assertIn("rerun the same reviewed command with `--apply`", rendered)
+
+    def test_evidence_and_closeout_treat_satisfied_post_archive_carry_forward_as_historical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            write_sample_roadmap(root)
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "current-action-eligibility-gate"\n'
+                'primary_roadmap_item: "minimal-roadmap-mutation-rail"\n'
+                "covered_roadmap_items:\n"
+                '  - "minimal-roadmap-mutation-rail"\n'
+                "---\n"
+                "# Current Action Eligibility Gate\n",
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                archive_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "minimal-roadmap-mutation-rail",
+                        "--worktree-start-state",
+                        "fixture dirty",
+                        "--task-scope",
+                        "archive current action eligibility fixture",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "archived the active plan and marked the roadmap item done",
+                        "--verification",
+                        "focused fixture verification passed",
+                        "--commit-decision",
+                        "not committed",
+                        "--carry-forward",
+                        "Archive active plan and mark roadmap item done",
+                    ]
+                )
+            self.assertEqual(archive_code, 0)
+            self.assertFalse(plan_path.exists())
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn('active_plan: ""', state_text)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            target_block = roadmap_text.split("### Minimal Roadmap Mutation Rail", 1)[1]
+            self.assertIn("- `status`: `done`", target_block)
+            before_reports = snapshot_tree(root)
+
+            for command in ("evidence", "closeout"):
+                with self.subTest(command=command):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), command])
+
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before_reports, snapshot_tree(root))
+                    self.assertIn("historical satisfied carry-forward only", rendered)
+                    self.assertIn("not a current closeout candidate or next action", rendered)
+                    self.assertNotIn("candidate: carry-forward candidate", rendered)
+                    self.assertNotIn("suggestion: MLH-Carry-Forward: Archive active plan", rendered)
+
     def test_bootstrap_inspect_product_fixture_readiness_and_no_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_package_source_root(Path(tmp))
@@ -3980,6 +4523,14 @@ class CliTests(unittest.TestCase):
             root = make_operating_root(Path(tmp))
             (root / "src").mkdir()
             (root / "src/changed.py").write_text("print('before')\n", encoding="utf-8")
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/smoke.md").write_text(
+                "---\n"
+                'status: "passed"\n'
+                "---\n"
+                "# Smoke Verification\n",
+                encoding="utf-8",
+            )
             before = snapshot_tree_bytes(root)
 
             common_args = [
@@ -3995,6 +4546,12 @@ class CliTests(unittest.TestCase):
                 "codex",
                 "--task",
                 "Implement source-bound run evidence.",
+                "--assigned-scope",
+                "agent-run-evidence-route-mvp",
+                "--runtime",
+                "local-shell",
+                "--worktree-id",
+                "main",
                 "--status",
                 "succeeded",
                 "--stop-reason",
@@ -4007,8 +4564,20 @@ class CliTests(unittest.TestCase):
                 "AGENTS.md",
                 "--claimed-path",
                 "src/changed.py",
+                "--changed-file",
+                "src/changed.py",
                 "--command",
                 "pytest -q tests/test_cli.py",
+                "--verification-ref",
+                "project/verification/smoke.md",
+                "--docs-decision",
+                "updated",
+                "--residual-risk",
+                "none known",
+                "--handoff-ref",
+                "project/verification/handoffs/run-1.json",
+                "--claim-ref",
+                "project/verification/work-claims/claim-1.json",
                 "--provider",
                 "openai",
                 "--model-id",
@@ -4036,6 +4605,15 @@ class CliTests(unittest.TestCase):
             self.assertIn("agent-run-record-written", apply_rendered)
             self.assertIn("evidence record apply wrote one source-bound agent run evidence record", apply_rendered)
             self.assertIn('schema: "mylittleharness.agent-run.v1"', record_text)
+            self.assertIn('assigned_scope: "agent-run-evidence-route-mvp"', record_text)
+            self.assertIn('runtime: "local-shell"', record_text)
+            self.assertIn('worktree_id: "main"', record_text)
+            self.assertIn('docs_decision: "updated"', record_text)
+            self.assertIn('residual_risk: "none known"', record_text)
+            self.assertIn("changed_files:", record_text)
+            self.assertIn('  - "project/verification/smoke.md"', record_text)
+            self.assertIn('  - "project/verification/handoffs/run-1.json"', record_text)
+            self.assertIn('  - "project/verification/work-claims/claim-1.json"', record_text)
             self.assertIn('provider: "openai"', record_text)
             self.assertIn('model_id: "gpt-test"', record_text)
             self.assertIn("src/changed.py sha256=", record_text)
@@ -4056,6 +4634,7 @@ class CliTests(unittest.TestCase):
             clean_rendered = clean_check.getvalue()
             self.assertIn("Agent Run Evidence", clean_rendered)
             self.assertIn("candidate: agent run record: project/verification/agent-runs/run-1.md", clean_rendered)
+            self.assertIn("check-lifecycle-provenance-agent-run-visibility", clean_rendered)
             self.assertNotIn("check-agent-run-record-stale", clean_rendered)
 
             (root / "src/changed.py").write_text("print('after')\n", encoding="utf-8")
@@ -4080,6 +4659,343 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn("check-agent-run-record-malformed", rendered)
             self.assertIn("agent run record is missing frontmatter", rendered)
+
+    def test_check_reports_global_lifecycle_and_session_active_work_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            record_dir = root / "project/verification/session-active-work"
+            record_dir.mkdir(parents=True)
+            records = {
+                "active-a.json": {
+                    "schema": "mylittleharness.session-active-work.v1",
+                    "record_type": "session-active-work",
+                    "session_id": "session-a",
+                    "run_id": "run-a",
+                    "agent_id": "codex-a",
+                    "status": "active",
+                    "active_plan": "project/implementation-plan.md",
+                    "active_phase": "phase-worker-a",
+                    "execution_slice": "session-scoped-active-work",
+                    "lease_expires_at": "2999-01-01T00:00:00Z",
+                },
+                "expired-b.json": {
+                    "schema": "mylittleharness.session-active-work.v1",
+                    "record_type": "session-active-work",
+                    "session_id": "session-b",
+                    "run_id": "run-b",
+                    "agent_id": "codex-b",
+                    "status": "active",
+                    "active_plan": "project/implementation-plan.md",
+                    "execution_slice": "session-scoped-active-work",
+                    "lease_expires_at": "2000-01-01T00:00:00Z",
+                },
+                "stale-c.json": {
+                    "schema": "mylittleharness.session-active-work.v1",
+                    "record_type": "session-active-work",
+                    "session_id": "session-c",
+                    "run_id": "run-c",
+                    "agent_id": "codex-c",
+                    "status": "blocked",
+                    "active_plan": "project/implementation-plan.md",
+                    "execution_slice": "session-scoped-active-work",
+                    "last_heartbeat_at_utc": "2000-01-01T00:00:00Z",
+                },
+                "unknown-d.json": {
+                    "schema": "mylittleharness.session-active-work.v1",
+                    "record_type": "session-active-work",
+                    "session_id": "session-d",
+                    "run_id": "run-d",
+                    "agent_id": "codex-d",
+                    "status": "mystery",
+                    "active_plan": "project/implementation-plan.md",
+                    "execution_slice": "session-scoped-active-work",
+                },
+            }
+            for name, payload in records.items():
+                (record_dir / name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("lifecycle-summary", rendered)
+            self.assertIn("active plan is in progress; active_phase: Phase 4 - Validation And Closeout", rendered)
+            self.assertIn("Session Active Work", rendered)
+            self.assertIn("check-session-active-work-record", rendered)
+            self.assertIn("session_id=session-a; run_id=run-a; agent_id=codex-a; status=active", rendered)
+            self.assertIn("check-session-active-work-expired", rendered)
+            self.assertIn("session_id=session-b; run_id=run-b; agent_id=codex-b; status=expired", rendered)
+            self.assertIn("check-session-active-work-stale", rendered)
+            self.assertIn("session_id=session-c; run_id=run-c; agent_id=codex-c; status=stale", rendered)
+            self.assertIn("check-session-active-work-unknown-status", rendered)
+            self.assertIn("session_id=session-d; run_id=run-d; agent_id=codex-d; status=unknown", rendered)
+            self.assertIn("project-state lifecycle stays global authority", rendered)
+            self.assertIn("no session record approves closeout, archive, roadmap status", rendered)
+
+    def test_check_reports_worktree_coordination_root_contract_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            coordination_root = make_operating_root(base / "coordination")
+            edit_root = make_root(base / "edit-worktree", active=False, mirrors=False)
+            claim_dir = coordination_root / "project/verification/work-claims"
+            run_dir = coordination_root / "project/verification/agent-runs"
+            claim_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (claim_dir / "claim-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-1",
+                        "claim_kind": "write",
+                        "owner_role": "coder",
+                        "owner_actor": "codex",
+                        "execution_slice": "worktree-coordination-root-contract",
+                        "status": "active",
+                        "claimed_paths": ["src/work.py"],
+                        "claimed_routes": [],
+                        "claimed_resources": [],
+                        "coordination_root": str(coordination_root),
+                        "edit_worktree_root": str(edit_root),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "run-1.md").write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_id: "run-1"\n'
+                'coordination_root: "' + str(coordination_root).replace("\\", "/") + '"\n'
+                'edit_worktree_root: "' + str(edit_root).replace("\\", "/") + '"\n'
+                "---\n"
+                "# Run\n",
+                encoding="utf-8",
+            )
+            before_coordination = snapshot_tree_bytes(coordination_root)
+            before_edit = snapshot_tree_bytes(edit_root)
+
+            with patch.dict(os.environ, {"MLH_COORDINATION_ROOT": str(coordination_root)}, clear=False):
+                coordination_output = io.StringIO()
+                with redirect_stdout(coordination_output):
+                    self.assertEqual(main(["--root", str(coordination_root), "check"]), 0)
+                edit_output = io.StringIO()
+                with redirect_stdout(edit_output):
+                    self.assertEqual(main(["--root", str(edit_root), "check"]), 0)
+
+            self.assertEqual(before_coordination, snapshot_tree_bytes(coordination_root))
+            self.assertEqual(before_edit, snapshot_tree_bytes(edit_root))
+            coordination_rendered = coordination_output.getvalue()
+            self.assertIn("Worktree Coordination", coordination_rendered)
+            self.assertIn("check-worktree-coordination-root-ok", coordination_rendered)
+            self.assertIn("check-worktree-coordination-same-root", coordination_rendered)
+            self.assertIn("check-worktree-coordination-record-root-pair", coordination_rendered)
+            self.assertIn("work claim claim-1 names coordination_root=", coordination_rendered)
+            self.assertIn("agent run run-1 names coordination_root=", coordination_rendered)
+            self.assertIn("MLH_COORDINATION_ROOT is a routing hint, not hidden state", coordination_rendered)
+
+            edit_rendered = edit_output.getvalue()
+            self.assertIn("root_kind=product_source_fixture", edit_rendered)
+            self.assertIn("check-worktree-coordination-root-ok", edit_rendered)
+            self.assertIn("check-worktree-coordination-split-root", edit_rendered)
+            self.assertIn("coordination writes remain separate from edit-worktree source edits", edit_rendered)
+
+            with patch.dict(os.environ, {"MLH_COORDINATION_ROOT": str(edit_root)}, clear=False):
+                leakage_output = io.StringIO()
+                with redirect_stdout(leakage_output):
+                    self.assertEqual(main(["--root", str(coordination_root), "check"]), 0)
+            leakage_rendered = leakage_output.getvalue()
+            self.assertIn("check-worktree-coordination-root-refused", leakage_rendered)
+            self.assertIn("refusing product-source or archive roots as shared coordination authority", leakage_rendered)
+
+    def test_check_reports_multi_agent_security_threat_model_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_operating_root(base / "operating")
+            (root / ".mylittleharness/generated/projection").mkdir(parents=True)
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("check-multi-agent-security-root-posture", rendered)
+            self.assertIn("check-multi-agent-security-authority", rendered)
+            self.assertIn("check-multi-agent-security-hooks", rendered)
+            self.assertIn("check-multi-agent-security-dashboard", rendered)
+            self.assertIn("check-multi-agent-security-runtime-cache", rendered)
+            self.assertIn("check-multi-agent-security-dispatcher-gate", rendered)
+            self.assertIn("check-multi-agent-security-adapter-boundary", rendered)
+            self.assertIn("check-multi-agent-security-prompt-injection", rendered)
+            self.assertIn("check-multi-agent-security-path-secret-leakage", rendered)
+            self.assertIn("check-multi-agent-security-unsafe-defaults-disabled", rendered)
+            self.assertIn("claims, agent-run evidence, handoff packets, and session active-work records are the repo-visible coordination authority", rendered)
+            self.assertIn("hooks are explicit opt-in sensors/blockers/context injectors", rendered)
+            self.assertIn("dashboard output is projection/cockpit context only", rendered)
+            self.assertIn("mlhd runtime cache, process observations, local logs, and notifications are disposable", rendered)
+            self.assertIn("a dispatcher cannot start work without a repo-visible handoff packet, compatible active claim, and planned agent-run evidence path", rendered)
+            self.assertIn("check starts no dashboard, daemon, dispatcher, provider gateway, A2A server", rendered)
+
+            product_root = make_root(base / "product", active=False, mirrors=False)
+            before_product = snapshot_tree_bytes(product_root)
+            product_output = io.StringIO()
+            with redirect_stdout(product_output):
+                self.assertEqual(main(["--root", str(product_root), "check"]), 0)
+
+            self.assertEqual(before_product, snapshot_tree_bytes(product_root))
+            self.assertIn(
+                "root kind: product_source_fixture; multi-agent security diagnostics are read-only",
+                product_output.getvalue(),
+            )
+
+    def test_dashboard_inspect_reports_read_only_cockpit_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            session_dir = root / "project/verification/session-active-work"
+            session_dir.mkdir(parents=True)
+            (session_dir / "expired.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.session-active-work.v1",
+                        "record_type": "session-active-work",
+                        "session_id": "session-expired",
+                        "run_id": "run-expired",
+                        "agent_id": "codex",
+                        "status": "active",
+                        "active_plan": "project/implementation-plan.md",
+                        "active_phase": "phase-1",
+                        "execution_slice": "read-only-dashboard-prototype",
+                        "lease_expires_at": "2000-01-01T00:00:00Z",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("MyLittleHarness dashboard --inspect", rendered)
+            for heading in ("Dashboard", "Lifecycle", "Roadmap", "Coordination", "Projection", "Alerts", "Boundary"):
+                self.assertIn(heading, rendered)
+            self.assertIn("dashboard-read-only", rendered)
+            self.assertIn("dashboard-inputs", rendered)
+            self.assertIn("project-state, roadmap, claims, agent-run records, handoffs, session active work", rendered)
+            self.assertIn("dashboard-lifecycle", rendered)
+            self.assertIn("Lifecycle Provenance", rendered)
+            self.assertIn("dashboard-lifecycle-provenance-active-lifecycle", rendered)
+            self.assertIn("dashboard-next-legal-dry-run", rendered)
+            self.assertIn("writeback --dry-run --phase-status complete", rendered)
+            self.assertIn("does not approve running or applying it", rendered)
+            self.assertIn("dashboard-roadmap", rendered)
+            self.assertIn("dashboard-session-active-work-expired", rendered)
+            self.assertIn("dashboard-work-claim-status", rendered)
+            self.assertIn("dashboard-handoff-packet-records", rendered)
+            self.assertIn("dashboard-runtime-cache-absent", rendered)
+            self.assertIn("dashboard-alerts", rendered)
+            self.assertIn("dashboard has no mutation buttons", rendered)
+            self.assertIn("product-diff acceptance", rendered)
+
+            json_output = io.StringIO()
+            with redirect_stdout(json_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(json_output.getvalue())
+            self.assertEqual("mylittleharness.dashboard.v1", payload["schema"])
+            self.assertTrue(payload["read_only"])
+            self.assertEqual("live_operating_root", payload["root_kind"])
+            self.assertIn("project/project-state.md", payload["source_refs"])
+            self.assertIn("project/roadmap.md", payload["source_refs"])
+            self.assertEqual("active", payload["lifecycle"]["plan_status"])
+            self.assertGreaterEqual(payload["roadmap"]["status_counts"]["accepted"], 1)
+            self.assertGreaterEqual(payload["projection"]["source_count"], 1)
+            self.assertGreaterEqual(payload["alerts"]["warning_count"], 1)
+            self.assertIn("writeback --dry-run --phase-status complete", payload["nextLegalDryRun"]["command"])
+            self.assertFalse(payload["nextLegalDryRun"]["approves_lifecycle"])
+            self.assertIn("product-diff acceptance", payload["nextLegalDryRun"]["boundary"])
+            self.assertIn("repo-visible files remain truth", payload["authority_boundary"])
+
+    def test_dashboard_reports_mlhd_runtime_cockpit_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "events.jsonl").write_text('{"event":"process-started"}\n', encoding="utf-8")
+            (runtime_dir / "sessions.json").write_text(
+                json.dumps({"sessions": [{"session_id": "session-1", "status": "running"}]}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("mlhd Runtime", rendered)
+            self.assertIn("dashboard-mlhd-optional-runtime", rendered)
+            self.assertIn("dashboard-mlhd-runtime-cache-present", rendered)
+            self.assertIn("dashboard-mlhd-disposable-cache-boundary", rendered)
+            self.assertIn("dashboard-mlhd-durable-mutation-boundary", rendered)
+            self.assertIn("dashboard-mlhd-localhost-defaults", rendered)
+            self.assertIn("starts no listener", rendered)
+            self.assertIn("repo-visible files remain authority", rendered)
+
+            json_output = io.StringIO()
+            with redirect_stdout(json_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(json_output.getvalue())
+            self.assertEqual("mylittleharness.mlhd-runtime.v1", payload["mlhd"]["schema"])
+            self.assertEqual("present", payload["mlhd"]["runtime_cache_status"])
+            self.assertEqual(2, payload["mlhd"]["cache_file_count"])
+            self.assertFalse(payload["mlhd"]["network_listener_started"])
+            self.assertEqual("127.0.0.1", payload["mlhd"]["default_bind_host"])
+            self.assertTrue(payload["mlhd"]["durable_mutations_delegate_to_cli"])
+            self.assertFalse(payload["mlhd"]["stores_provider_credentials"])
+            self.assertFalse(payload["mlhd"]["approves_lifecycle"])
+
+            authority_before = {
+                rel_path: content
+                for rel_path, content in before.items()
+                if not rel_path.startswith(".mylittleharness/runtime")
+            }
+            shutil.rmtree(root / ".mylittleharness/runtime")
+            absent_before = snapshot_tree_bytes(root)
+            absent_output = io.StringIO()
+            with redirect_stdout(absent_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            self.assertEqual(absent_before, snapshot_tree_bytes(root))
+            self.assertEqual(
+                authority_before,
+                {
+                    rel_path: content
+                    for rel_path, content in snapshot_tree_bytes(root).items()
+                    if not rel_path.startswith(".mylittleharness/runtime")
+                },
+            )
+            absent_payload = json.loads(absent_output.getvalue())
+            self.assertEqual("absent", absent_payload["mlhd"]["runtime_cache_status"])
+            self.assertEqual(0, absent_payload["mlhd"]["cache_file_count"])
+            self.assertTrue(absent_payload["mlhd"]["disposable_cache"])
 
     def test_claim_apply_writes_repo_visible_claim_and_refuses_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4110,6 +5026,8 @@ class CliTests(unittest.TestCase):
                 "src/owned.py",
                 "--claimed-resource",
                 "port:3000",
+                "--ttl",
+                "2h",
             ]
 
             dry_run_output = io.StringIO()
@@ -4128,11 +5046,49 @@ class CliTests(unittest.TestCase):
             self.assertIn("work-claim-written", rendered_apply)
             self.assertEqual("mylittleharness.work-claim.v1", claim_payload["schema"])
             self.assertEqual(["src/owned.py"], claim_payload["claimed_paths"])
+            created_lease = datetime.fromisoformat(claim_payload["lease_expires_at"].replace("Z", "+00:00"))
+            self.assertGreater(created_lease, datetime.now(timezone.utc))
+
+            extend_args = [
+                "--root",
+                str(root),
+                "claim",
+                "--action",
+                "extend",
+                "--claim-id",
+                "claim-1",
+                "--ttl",
+                "3h",
+            ]
+            extend_dry_run = io.StringIO()
+            with redirect_stdout(extend_dry_run):
+                self.assertEqual(main([*extend_args, "--dry-run"]), 0)
+            self.assertIn("would extend work claim", extend_dry_run.getvalue())
+            self.assertEqual(claim_payload, json.loads(claim_path.read_text(encoding="utf-8")))
+
+            extend_apply = io.StringIO()
+            with redirect_stdout(extend_apply):
+                self.assertEqual(main([*extend_args, "--apply"]), 0)
+            extended_payload = json.loads(claim_path.read_text(encoding="utf-8"))
+            self.assertIn("work-claim-extended", extend_apply.getvalue())
+            self.assertEqual("active", extended_payload["status"])
+            self.assertIn("extended_at_utc", extended_payload)
+            extended_lease = datetime.fromisoformat(extended_payload["lease_expires_at"].replace("Z", "+00:00"))
+            self.assertGreater(extended_lease, created_lease)
 
             status_output = io.StringIO()
             with redirect_stdout(status_output):
                 self.assertEqual(main(["--root", str(root), "claim", "--status"]), 0)
             self.assertIn("claim_id=claim-1; status=active", status_output.getvalue())
+
+            status_json = io.StringIO()
+            with redirect_stdout(status_json):
+                self.assertEqual(main(["--root", str(root), "claim", "--status", "--json"]), 0)
+            status_payload = json.loads(status_json.getvalue())
+            self.assertEqual("mylittleharness.report.v1", status_payload["schema_version"])
+            self.assertEqual("claim --status", status_payload["command"])
+            self.assertEqual("ok", status_payload["result"]["status"])
+            self.assertFalse(status_payload["boundary"]["json_output_approves_lifecycle"])
 
             overlap_args = [
                 "--root",
@@ -4185,6 +5141,59 @@ class CliTests(unittest.TestCase):
                 )
             self.assertIn("work-claim-released", release_output.getvalue())
             self.assertEqual("released", json.loads(claim_path.read_text(encoding="utf-8"))["status"])
+
+    def test_claim_extend_refuses_stale_claim_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            claim_dir = root / "project/verification/work-claims"
+            claim_dir.mkdir(parents=True)
+            claim_path = claim_dir / "claim-1.json"
+            claim_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-1",
+                        "claim_kind": "write",
+                        "owner_role": "coder",
+                        "owner_actor": "codex",
+                        "execution_slice": "slice-a",
+                        "claimed_paths": ["src/owned.py"],
+                        "claimed_routes": [],
+                        "claimed_resources": [],
+                        "lease_expires_at": "2000-01-01T00:00:00Z",
+                        "status": "active",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "claim",
+                        "--action",
+                        "extend",
+                        "--claim-id",
+                        "claim-1",
+                        "--ttl",
+                        "1h",
+                        "--apply",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("work-claim-refused", rendered)
+            self.assertIn("cannot extend stale work claim", rendered)
 
     def test_claim_status_and_agents_check_warn_on_malformed_work_claim_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4302,6 +5311,63 @@ class CliTests(unittest.TestCase):
             root = make_operating_root(Path(tmp))
             (root / "src").mkdir()
             (root / "src/work.py").write_text("print('work')\n", encoding="utf-8")
+            (root / "project/verification/agent-runs").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/agent-runs/run-1.md").write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-1"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "worker output"\n'
+                'assigned_scope: "slice-a"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "verification-passed"\n'
+                'attempt_budget: "1/1"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none"\n'
+                "input_refs:\n"
+                '  - "project/implementation-plan.md"\n'
+                "output_refs:\n"
+                '  - "src/work.py"\n'
+                "claimed_paths:\n"
+                '  - "src/work.py"\n'
+                "changed_files:\n"
+                '  - "src/work.py"\n'
+                "commands:\n"
+                '  - "pytest -q tests/test_cli.py"\n'
+                "verification_refs:\n"
+                '  - "project/verification/agent-runs/run-1.md"\n'
+                "source_hashes:\n"
+                '  - "src/work.py missing"\n'
+                "---\n"
+                "# Run 1\n",
+                encoding="utf-8",
+            )
+            (root / "project/verification/work-claims").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/work-claims/claim-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-1",
+                        "claim_kind": "write",
+                        "owner_role": "coder",
+                        "owner_actor": "worker-a",
+                        "execution_slice": "slice-a",
+                        "claimed_paths": ["src/work.py"],
+                        "claimed_routes": ["claim"],
+                        "claimed_resources": [],
+                        "status": "active",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             approval_args = [
                 "--root",
@@ -4364,8 +5430,12 @@ class CliTests(unittest.TestCase):
                 "verification fails",
                 "--required-output",
                 "changed_paths",
+                "--evidence-ref",
+                "project/verification/agent-runs/run-1.md",
                 "--approval-packet-ref",
                 "project/verification/approval-packets/approval-1.json",
+                "--claim-ref",
+                "project/verification/work-claims/claim-1.json",
             ]
             handoff_output = io.StringIO()
             with redirect_stdout(handoff_output):
@@ -4375,8 +5445,237 @@ class CliTests(unittest.TestCase):
             self.assertIn("handoff-packet-written", handoff_rendered)
             self.assertIn("without granting worker lifecycle authority", handoff_rendered)
             handoff_payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+            self.assertEqual("created", handoff_payload["status"])
             self.assertEqual(["src/work.py"], handoff_payload["write_scope"])
+            self.assertEqual(["project/verification/agent-runs/run-1.md"], handoff_payload["evidence_refs"])
             self.assertEqual(["project/verification/approval-packets/approval-1.json"], handoff_payload["approval_packet_refs"])
+            self.assertEqual(["project/verification/work-claims/claim-1.json"], handoff_payload["claim_refs"])
+
+            handoff_status = io.StringIO()
+            with redirect_stdout(handoff_status):
+                self.assertEqual(main(["--root", str(root), "handoff", "--status"]), 0)
+            self.assertIn("handoff-packet-status-packet", handoff_status.getvalue())
+            self.assertIn("read-only handoff posture", handoff_status.getvalue())
+
+            accept_dry_run = io.StringIO()
+            with redirect_stdout(accept_dry_run):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "handoff",
+                            "--dry-run",
+                            "--action",
+                            "accept",
+                            "--handoff-id",
+                            "handoff-1",
+                            "--accepted-by",
+                            "coordinator",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("would accept handoff packet", accept_dry_run.getvalue())
+            self.assertEqual("created", json.loads(handoff_path.read_text(encoding="utf-8"))["status"])
+
+            accept_apply = io.StringIO()
+            with redirect_stdout(accept_apply):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "handoff",
+                            "--apply",
+                            "--action",
+                            "accept",
+                            "--handoff-id",
+                            "handoff-1",
+                            "--accepted-by",
+                            "coordinator",
+                            "--acceptance-note",
+                            "scope acknowledged",
+                        ]
+                    ),
+                    0,
+                )
+            accepted_payload = json.loads(handoff_path.read_text(encoding="utf-8"))
+            self.assertIn("handoff-packet-accepted", accept_apply.getvalue())
+            self.assertEqual("accepted", accepted_payload["status"])
+            self.assertEqual("coordinator", accepted_payload["accepted_by"])
+            self.assertEqual("scope acknowledged", accepted_payload["acceptance_note"])
+
+            unsafe_route = io.StringIO()
+            with redirect_stdout(unsafe_route):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "handoff",
+                            "--apply",
+                            "--handoff-id",
+                            "handoff-unsafe",
+                            "--worker-id",
+                            "worker-a",
+                            "--role-id",
+                            "coder",
+                            "--execution-slice",
+                            "slice-a",
+                            "--allowed-route",
+                            "transition",
+                            "--write-scope",
+                            "src/work.py",
+                            "--stop-condition",
+                            "verification fails",
+                            "--required-output",
+                            "changed_paths",
+                            "--evidence-ref",
+                            "project/verification/agent-runs/run-1.md",
+                            "--claim-ref",
+                            "project/verification/work-claims/claim-1.json",
+                        ]
+                    ),
+                    2,
+                )
+            self.assertIn("worker handoff cannot allow lifecycle-authority routes", unsafe_route.getvalue())
+            self.assertFalse((root / "project/verification/handoffs/handoff-unsafe.json").exists())
+
+    def test_handoff_status_reports_dispatcher_launcher_gate_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_operating_root(base / "coordination")
+            edit_root = make_root(base / "edit-worktree", active=False, mirrors=False)
+            empty_before = snapshot_tree_bytes(root)
+
+            empty_output = io.StringIO()
+            with redirect_stdout(empty_output):
+                self.assertEqual(main(["--root", str(root), "handoff", "--status"]), 0)
+
+            self.assertEqual(empty_before, snapshot_tree_bytes(root))
+            empty_rendered = empty_output.getvalue()
+            self.assertIn("dispatcher-launch-refused", empty_rendered)
+            self.assertIn("no repo-visible handoff packet is launchable", empty_rendered)
+            self.assertIn("compatible active claim", empty_rendered)
+
+            claim_dir = root / "project/verification/work-claims"
+            handoff_dir = root / "project/verification/handoffs"
+            run_dir = root / "project/verification/agent-runs"
+            claim_dir.mkdir(parents=True)
+            handoff_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (claim_dir / "claim-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-1",
+                        "claim_kind": "write",
+                        "owner_role": "coder",
+                        "owner_actor": "worker-a",
+                        "execution_slice": "dispatcher-agent-launcher",
+                        "claimed_paths": ["src/work.py"],
+                        "claimed_routes": [],
+                        "claimed_resources": [],
+                        "lease_expires_at": "2999-01-01T00:00:00Z",
+                        "status": "active",
+                        "coordination_root": str(root),
+                        "edit_worktree_root": str(edit_root),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (handoff_dir / "handoff-ready.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "handoff-ready",
+                        "status": "created",
+                        "worker_id": "worker-a",
+                        "role_id": "coder",
+                        "execution_slice": "dispatcher-agent-launcher",
+                        "allowed_routes": ["unclassified"],
+                        "write_scope": ["src/work.py"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["changed_paths"],
+                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "approval_packet_refs": [],
+                        "claim_refs": ["project/verification/work-claims/claim-1.json"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (handoff_dir / "handoff-missing-claim.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "handoff-missing-claim",
+                        "status": "created",
+                        "worker_id": "worker-b",
+                        "role_id": "coder",
+                        "execution_slice": "dispatcher-agent-launcher",
+                        "allowed_routes": ["unclassified"],
+                        "write_scope": ["src/work.py"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["changed_paths"],
+                        "evidence_refs": ["project/verification/agent-runs/run-missing.md"],
+                        "approval_packet_refs": [],
+                        "claim_refs": ["project/verification/work-claims/missing-claim.json"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            packet_before = snapshot_tree_bytes(root)
+
+            with patch.dict(os.environ, {"MLH_COORDINATION_ROOT": str(root)}, clear=False):
+                packet_output = io.StringIO()
+                with redirect_stdout(packet_output):
+                    self.assertEqual(main(["--root", str(root), "handoff", "--status"]), 0)
+
+            self.assertEqual(packet_before, snapshot_tree_bytes(root))
+            packet_rendered = packet_output.getvalue()
+            self.assertIn("dispatcher-launch-ready", packet_rendered)
+            self.assertIn("dispatcher-launch-claim-ref-ready", packet_rendered)
+            self.assertIn("dispatcher-launch-evidence-planned", packet_rendered)
+            self.assertIn("planned agent-run evidence path is available", packet_rendered)
+            self.assertIn("dispatcher-launch-refused", packet_rendered)
+            self.assertIn("missing claim ref project/verification/work-claims/missing-claim.json", packet_rendered)
+            self.assertIn("no worker process was started", packet_rendered)
+            self.assertIn("dispatcher-worktree-coordination-root-ok", packet_rendered)
+            self.assertIn("dispatcher-worktree-coordination-same-root", packet_rendered)
+            self.assertIn("dispatcher-worktree-coordination-record-root-pair", packet_rendered)
+            self.assertIn("repo-visible files in the live coordination root remain authority", packet_rendered)
+
+            (run_dir / "run-1.md").write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-1"\n'
+                "---\n"
+                "# Run 1\n",
+                encoding="utf-8",
+            )
+            recorded_before = snapshot_tree_bytes(root)
+            recorded_output = io.StringIO()
+            with redirect_stdout(recorded_output):
+                self.assertEqual(main(["--root", str(root), "handoff", "--status"]), 0)
+
+            self.assertEqual(recorded_before, snapshot_tree_bytes(root))
+            self.assertIn("dispatcher-launch-evidence-recorded", recorded_output.getvalue())
 
     def test_approval_packet_existing_id_reports_append_only_supersession_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5532,6 +6831,71 @@ class CliTests(unittest.TestCase):
             self.assertIn("--work-result", rendered)
 
     def test_check_accepts_work_result_capsule_check_label_aliases(self) -> None:
+        for check_label in ("How checked: focused tests passed.", "Verification: focused tests passed."):
+            with self.subTest(check_label=check_label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_active_live_root(Path(tmp), phase_status="complete")
+                    state = root / "project/project-state.md"
+                    state.write_text(
+                        state.read_text(encoding="utf-8")
+                        + "\n## MLH Closeout Writeback\n\n"
+                        "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                        "- plan_id: current-plan\n"
+                        "- active_plan: project/implementation-plan.md\n"
+                        "- docs_decision: updated\n"
+                        "- state_writeback: completed the lifecycle update\n"
+                        "- verification: focused tests passed\n"
+                        "- commit_decision: manual policy\n"
+                        "- carry_forward: no follow-up\n"
+                        f"- work_result: Result: completed; What was done: diagnostic aliases were accepted. {check_label} What remains: no required follow-up.\n"
+                        "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                        encoding="utf-8",
+                    )
+                    (root / "project/implementation-plan.md").write_text(
+                        "---\n"
+                        'plan_id: "current-plan"\n'
+                        'title: "Current Plan"\n'
+                        'docs_decision: "updated"\n'
+                        'state_writeback: "completed the lifecycle update"\n'
+                        'verification: "focused tests passed"\n'
+                        'commit_decision: "manual policy"\n'
+                        "---\n"
+                        "# Current Plan\n\n"
+                        "## Closeout Summary\n\n"
+                        "- docs_decision: updated\n"
+                        "- state_writeback: completed the lifecycle update\n"
+                        "- verification: focused tests passed\n"
+                        "- commit_decision: manual policy\n",
+                        encoding="utf-8",
+                    )
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "check"])
+                    rendered = output.getvalue()
+
+                    self.assertEqual(code, 0)
+                    self.assertIn("active-plan-work-result-capsule", rendered)
+                    self.assertNotIn("active-plan-work-result-capsule-thin", rendered)
+
+    def test_check_warns_when_completed_phase_lacks_structured_phase_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("active-plan-phase-evidence-missing", rendered)
+            self.assertIn("--phase-status complete --docs-decision uncertain", rendered)
+            self.assertIn("--verification", rendered)
+            self.assertIn("docs_decision uncertain is allowed for provisional phase handoff", rendered)
+
+    def test_check_does_not_treat_remaining_verification_word_as_check_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
             state = root / "project/project-state.md"
@@ -5546,7 +6910,7 @@ class CliTests(unittest.TestCase):
                 "- verification: focused tests passed\n"
                 "- commit_decision: manual policy\n"
                 "- carry_forward: no follow-up\n"
-                "- work_result: Result: completed; What was done: diagnostic aliases were accepted. How checked: focused tests passed. What remains: no required follow-up.\n"
+                "- work_result: Result: completed; What was done: diagnostic aliases were accepted. What remains: verification evidence still needs review.\n"
                 "<!-- END mylittleharness-closeout-writeback v1 -->\n",
                 encoding="utf-8",
             )
@@ -5574,8 +6938,9 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
 
             self.assertEqual(code, 0)
-            self.assertIn("active-plan-work-result-capsule", rendered)
-            self.assertNotIn("active-plan-work-result-capsule-thin", rendered)
+            self.assertIn("active-plan-phase-evidence", rendered)
+            self.assertIn("active-plan-work-result-capsule-thin", rendered)
+            self.assertIn("How it was checked (or How checked/Verification)", rendered)
 
     def test_check_ignores_active_plan_writeback_drift_for_mismatched_closeout_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5827,9 +7192,426 @@ class CliTests(unittest.TestCase):
             state_text = state_path.read_text(encoding="utf-8")
             self.assertIn('plan_status: "active"', state_text)
             self.assertIn('active_plan: "project/implementation-plan.md"', state_text)
-            self.assertIn('active_phase: "phase-1-implementation"', state_text)
             self.assertIn('phase_status: "complete"', state_text)
             self.assertNotIn('last_archived_plan: "project/archive/plans/', state_text)
+
+    def test_writeback_refuses_phase_completion_with_generic_acceptance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    'active_phase: "phase-1-implementation"\nphase_status: "pending"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Writeback Acceptance Matcher"\n'
+                'execution_slice: "mlh-writeback-evidence-acceptance-matcher"\n'
+                'primary_roadmap_item: "mlh-writeback-evidence-acceptance-matcher"\n'
+                'deliverable_class: "implementation"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/writeback.py"\n'
+                '  - "tests/test_cli.py"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                "---\n"
+                "# Writeback Acceptance Matcher\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            args = [
+                "--root",
+                str(root),
+                "writeback",
+                "--phase-status",
+                "complete",
+                "--docs-decision",
+                "not-needed",
+                "--state-writeback",
+                "complete",
+                "--verification",
+                "tests passed",
+                "--commit-decision",
+                "manual policy",
+                "--residual-risk",
+                "none known",
+            ]
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main([*args[:3], "--dry-run", *args[3:]])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-acceptance-evidence-generic", dry_rendered)
+            self.assertIn("writeback-acceptance-evidence-mismatch", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main([*args[:3], "--apply", *args[3:]])
+            self.assertEqual(apply_code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-acceptance-evidence-generic", apply_output.getvalue())
+
+    def test_writeback_accepts_phase_completion_with_matching_acceptance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    'active_phase: "phase-1-implementation"\nphase_status: "pending"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Writeback Acceptance Matcher"\n'
+                'execution_slice: "mlh-writeback-evidence-acceptance-matcher"\n'
+                'primary_roadmap_item: "mlh-writeback-evidence-acceptance-matcher"\n'
+                'deliverable_class: "implementation"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/writeback.py"\n'
+                '  - "src/mylittleharness/evidence.py"\n'
+                '  - "src/mylittleharness/checks.py"\n'
+                '  - "tests/test_cli.py"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "uncertain"\n'
+                "---\n"
+                "# Writeback Acceptance Matcher\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Implemented mlh-writeback-evidence-acceptance-matcher in src/mylittleharness/writeback.py and tests/test_cli.py",
+                        "--verification",
+                        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed with exit 0",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "No docs/API impact; unrelated dirty product diff remains unaccepted",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-acceptance-evidence", rendered)
+
+            state_text = state_path.read_text(encoding="utf-8")
+            self.assertIn('phase_status: "complete"', state_text)
+            self.assertIn("- residual_risk: No docs/API impact; unrelated dirty product diff remains unaccepted", state_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertIn("active-plan-acceptance-evidence", check_rendered)
+            self.assertNotIn("active-plan-acceptance-evidence-generic", check_rendered)
+
+    def test_writeback_refuses_wrong_class_acceptance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    'active_phase: "phase-1-diagnostic"\nphase_status: "pending"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "diagnostic-plan"\n'
+                'title: "Product Diff Diagnostic"\n'
+                'execution_slice: "mlh-product-diff-fan-in-scope-diagnostic"\n'
+                'primary_roadmap_item: "mlh-product-diff-fan-in-scope-diagnostic"\n'
+                'deliverable_class: "diagnostic"\n'
+                "target_artifacts:\n"
+                '  - "project/verification/product-diff-diagnostic.md"\n'
+                'active_phase: "phase-1-diagnostic"\n'
+                'phase_status: "pending"\n'
+                "---\n"
+                "# Product Diff Diagnostic\n\n"
+                "## Phases\n\n"
+                "### phase-1-diagnostic\n\n"
+                "- id: `phase-1-diagnostic`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "changed product code",
+                        "--verification",
+                        "PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed with exit 0",
+                        "--commit-decision",
+                        "manual policy",
+                        "--residual-risk",
+                        "diagnostic artifact was not produced",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-acceptance-evidence-class-mismatch", rendered)
+
+    def test_writeback_refuses_fan_in_review_without_disposition_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    'active_phase: "phase-1-fan-in-review-scope"\nphase_status: "pending"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "fan-in-review-plan"\n'
+                'title: "Fan-In Review Disposition"\n'
+                'execution_slice: "mlh-fan-in-review-disposition-contract"\n'
+                'primary_roadmap_item: "mlh-fan-in-review-disposition-contract"\n'
+                'deliverable_class: "fan_in_review"\n'
+                "target_artifacts:\n"
+                '  - "project/verification/fan-in-review.md"\n'
+                'active_phase: "phase-1-fan-in-review-scope"\n'
+                'phase_status: "pending"\n'
+                "---\n"
+                "# Fan-In Review Disposition\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "uncertain",
+                        "--state-writeback",
+                        "Produced fan-in review evidence at project/verification/fan-in-review.md for mlh-fan-in-review-disposition-contract.",
+                        "--verification",
+                        "project/verification/fan-in-review.md was reviewed as the fan-in artifact.",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "Docs impact uncertain; dirty product diff remains unaccepted.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-fan-in-review-disposition-missing", rendered)
+            for required in (
+                "source snapshot",
+                "cluster disposition",
+                "missing evidence",
+                "forbidden shortcuts",
+                "owner route",
+                "follow-up slice",
+            ):
+                self.assertIn(required, rendered)
+            self.assertIn("no implicit product-diff acceptance", rendered)
+
+    def test_writeback_accepts_fan_in_review_with_required_disposition_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    'active_phase: "phase-1-fan-in-review-scope"\nphase_status: "pending"',
+                ),
+                encoding="utf-8",
+            )
+            artifact_path = root / "project/verification/fan-in-review.md"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                "# Fan-In Review\n\n"
+                "- source snapshot: product git status and diff stat were captured for review only.\n"
+                "- cluster disposition: source, docs, tests, and runtime clusters are split into owner slices.\n"
+                "- missing evidence: implementation acceptance evidence remains required for each follow-up slice.\n"
+                "- forbidden shortcuts: no product diff acceptance, discard, revert, staging, commit, push, or release.\n"
+                "- owner route: roadmap/writeback owns future disposition changes through explicit dry-run/apply.\n"
+                "- follow-up slice: mlh-commit-readiness-diagnostic checks commit grouping later.\n"
+                "- no implicit product diff acceptance: dirty product diff remains unaccepted.\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "fan-in-review-plan"\n'
+                'title: "Fan-In Review Disposition"\n'
+                'execution_slice: "mlh-fan-in-review-disposition-contract"\n'
+                'primary_roadmap_item: "mlh-fan-in-review-disposition-contract"\n'
+                'deliverable_class: "fan_in_review"\n'
+                "target_artifacts:\n"
+                '  - "project/verification/fan-in-review.md"\n'
+                'active_phase: "phase-1-fan-in-review-scope"\n'
+                'phase_status: "pending"\n'
+                "---\n"
+                "# Fan-In Review Disposition\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "uncertain",
+                        "--state-writeback",
+                        "Completed mlh-fan-in-review-disposition-contract using project/verification/fan-in-review.md.",
+                        "--verification",
+                        "project/verification/fan-in-review.md records source snapshot, cluster disposition, missing evidence, forbidden shortcuts, owner route, follow-up slice, and no product diff acceptance.",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "Docs impact uncertain until product clusters are accepted separately; dirty product diff remains unaccepted.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-acceptance-evidence", rendered)
+            self.assertNotIn("writeback-fan-in-review-disposition-missing", rendered)
+            self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
+
+    def test_check_warns_when_product_dirty_diff_exceeds_active_plan_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            posture = product_diff_scope_posture(product_root)
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("active-plan-product-diff-write-scope", rendered)
+            self.assertIn("docs/out.md", rendered)
+            self.assertIn("src/allowed.py", rendered)
+
+    def test_writeback_refuses_out_of_scope_product_diff_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            before = snapshot_tree(root)
+            posture = product_diff_scope_posture(product_root)
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Implemented product-diff-scope-gate in src/allowed.py",
+                        "--verification",
+                        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed for src/allowed.py",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "none known",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-product-diff-write-scope-blocked", rendered)
+            self.assertIn("docs/out.md", rendered)
+
+    def test_writeback_allows_disclosed_out_of_scope_product_diff_residual_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = root / "project/project-state.md"
+            posture = product_diff_scope_posture(product_root)
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Implemented product-diff-scope-gate in src/allowed.py",
+                        "--verification",
+                        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed for src/allowed.py",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "Out-of-scope product dirty diff docs/out.md remains unaccepted and outside this slice.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-product-diff-write-scope-disclosed", rendered)
+            self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
 
     def test_writeback_partial_closeout_refuses_unkeyed_prior_facts_for_active_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5967,6 +7749,108 @@ class CliTests(unittest.TestCase):
             self.assertIn('status: "complete"', plan_text)
             self.assertIn("- status: `done`", plan_text)
             self.assertIn("- docs_decision: uncertain", plan_text)
+
+    def test_writeback_phase_advance_uncertain_docs_records_provisional_evidence_without_stale_carry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                )
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- plan_id: old-plan\n"
+                "- active_plan: project/implementation-plan.md\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: previous plan closed\n"
+                "- verification: previous validation passed\n"
+                "- commit_decision: previous manual policy\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Current Plan"\n'
+                'status: "in_progress"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "in_progress"\n'
+                'docs_decision: "pending"\n'
+                "---\n"
+                "# Current Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `in_progress`\n\n"
+                "### phase-2-verification-and-docs\n\n"
+                "- id: `phase-2-verification-and-docs`\n"
+                "- status: `pending`\n\n"
+                "## Closeout Summary\n\n"
+                "- docs_decision: pending\n"
+                "- state_writeback: pending\n"
+                "- verification: pending\n"
+                "- commit_decision: pending\n"
+                "- work_result: pending\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            common_args = [
+                "--root",
+                str(root),
+                "writeback",
+                "--active-phase",
+                "phase-2-verification-and-docs",
+                "--phase-status",
+                "pending",
+                "--docs-decision",
+                "uncertain",
+                "--state-writeback",
+                "phase 1 evidence attached",
+                "--verification",
+                "focused phase 1 tests passed",
+                "--commit-decision",
+                "manual policy",
+                "--work-result",
+                "Result: partial; What was done: phase 1 evidence attached. How it was checked: focused tests passed. What remains: docs verification phase",
+            ]
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main([*common_args[:3], "--dry-run", *common_args[3:]])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("provisional phase evidence", dry_rendered)
+            self.assertIn("writeback-phase-advancement", dry_rendered)
+            self.assertNotIn("writeback-closeout-identity-refused", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main([*common_args[:3], "--apply", *common_args[3:]])
+            rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertIn("provisional phase evidence", rendered)
+            self.assertIn("writeback-phase-advancement", rendered)
+            self.assertNotIn("previous validation passed", rendered)
+
+            state_text = state.read_text(encoding="utf-8")
+            self.assertIn('active_phase: "phase-2-verification-and-docs"', state_text)
+            self.assertIn('phase_status: "pending"', state_text)
+            self.assertIn("- plan_id: current-plan", state_text)
+            self.assertIn("- docs_decision: uncertain", state_text)
+            self.assertIn("- verification: focused phase 1 tests passed", state_text)
+            self.assertNotIn("old-plan", state_text)
+            self.assertNotIn("previous validation passed", state_text)
+
+            plan_text = plan_path.read_text(encoding="utf-8")
+            self.assertIn('active_phase: "phase-2-verification-and-docs"', plan_text)
+            self.assertIn('phase_status: "pending"', plan_text)
+            self.assertIn("- id: `phase-1-implementation`\n- status: `done`", plan_text)
+            self.assertIn("- id: `phase-2-verification-and-docs`\n- status: `pending`", plan_text)
+            self.assertIn("- verification: focused phase 1 tests passed", plan_text)
 
     def test_writeback_complete_closeout_replaces_mismatched_identity_and_records_current_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7377,6 +9261,33 @@ class CliTests(unittest.TestCase):
             self.assertIn('derived_from: "manual export"', text)
             self.assertIn("imported_text sha256=", text)
             self.assertIn("Promotion into specs, plans, or project state requires", text)
+
+    def test_research_import_surfaces_active_lifecycle_provenance_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--dry-run",
+                        "--title",
+                        "Concurrent Lifecycle Note",
+                        "--text",
+                        "Lifecycle posture should remain visible during intake.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-lifecycle-provenance-active-lifecycle", rendered)
+            self.assertIn("research-import-lifecycle-provenance-agent-run-absent", rendered)
+            self.assertIn("lifecycle mutation provenance is read-only visibility", rendered)
 
     def test_research_import_apply_refuses_product_fixture_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8974,8 +10885,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(dry_code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("meta-feedback-agent-operability-signal", dry_rendered)
-            self.assertIn("owner commands: meta-feedback, check, writeback, and the mlh-meta-feedback skill", dry_rendered)
+            self.assertIn("owner commands: meta-feedback, check, writeback, and the route-specific owner command", dry_rendered)
             self.assertIn("docs_decision pressure", dry_rendered)
+            self.assertIn("required evidence", dry_rendered)
 
             apply_output = io.StringIO()
             with redirect_stdout(apply_output):
@@ -8998,8 +10910,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(apply_code, 0)
             self.assertIn("meta-feedback-agent-operability-boundary", apply_output.getvalue())
             note_text = (root / "project/plan-incubation/route-discovery-hesitation.md").read_text(encoding="utf-8")
-            self.assertIn("expected_owner_command: meta-feedback, check, writeback, and the mlh-meta-feedback skill", note_text)
+            self.assertIn("expected_owner_command: meta-feedback, check, writeback, and the route-specific owner command", note_text)
             self.assertIn("agent_friction: command ergonomics, route discovery, dry-run/apply wording, docs_decision pressure", note_text)
+            self.assertIn("obscure lifecycle authority", note_text)
 
     def test_meta_feedback_apply_collects_candidate_without_automatic_roadmap_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11356,6 +13269,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("plan-synthesis-bundle-rationale", rendered)
+            self.assertIn("plan-batch-slice-gate", rendered)
+            self.assertIn("without explicit reviewed bundle or human-gate evidence", rendered)
+            self.assertIn("--only-requested-item", rendered)
             self.assertIn("shared execution_slice 'roadmap-operationalization' covers 2 roadmap items", rendered)
             self.assertIn("shared related_specs", rendered)
             self.assertIn("in-slice dependencies: minimal-roadmap-mutation-rail -> roadmap-operationalization-rail", rendered)
@@ -13525,6 +15441,90 @@ class CliTests(unittest.TestCase):
             self.assertIn("blockers=", rendered)
             self.assertIn("next_safe_command=", rendered)
 
+    def test_roadmap_and_check_surface_high_blast_human_gate_before_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/high-blast-promotion.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "High Blast Promotion"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# High Blast Promotion\n\n"
+                "[MLH-Fix-Candidate] stage fan-in-review-high-blast requires explicit human acceptance.\n",
+                encoding="utf-8",
+            )
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_text = (
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### High Blast Promotion\n\n"
+                "- `id`: `high-blast-promotion`\n"
+                "- `status`: `proposed`\n"
+                "- `stage`: `fan-in-review-high-blast`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `high-blast-promotion`\n"
+                "- `slice_goal`: `Require a human gate before high-blast promotion becomes plannable.`\n"
+                "- `slice_members`: `[\"high-blast-promotion\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `human-gated promotion only`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `source_research`: ``\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: ``\n"
+                "- `archived_plan`: ``\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`\n"
+                "- `verification_summary`: `Readiness must block on high-blast human gate.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "- `carry_forward`: `Do not open a plan until human acceptance is visible.`\n"
+                "- `supersedes`: `[]`\n"
+                "- `superseded_by`: `[]`\n"
+            )
+            roadmap_path.write_text(roadmap_text, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--dry-run",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "high-blast-promotion",
+                        "--status",
+                        "accepted",
+                    ]
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-high-blast-human-gate", dry_rendered)
+            self.assertIn("stage=fan-in-review-high-blast", dry_rendered)
+            self.assertIn("readiness='blocked-before-plan'", dry_rendered)
+            self.assertIn("high-blast human gate marker", dry_rendered)
+            self.assertNotIn("readiness='ready-to-plan'", dry_rendered)
+
+            roadmap_path.write_text(roadmap_text.replace("- `status`: `proposed`", "- `status`: `accepted`"), encoding="utf-8")
+            before_check = snapshot_tree(root)
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+            check_rendered = check_output.getvalue()
+            self.assertEqual(check_code, 0)
+            self.assertEqual(before_check, snapshot_tree(root))
+            self.assertIn("roadmap-high-blast-human-gate", check_rendered)
+            self.assertIn("stage=fan-in-review-high-blast", check_rendered)
+            self.assertIn("readiness='blocked-before-plan'", check_rendered)
+            self.assertIn("high-blast human gate marker", check_rendered)
+            self.assertNotIn("readiness='ready-to-plan'", check_rendered)
+
     def test_roadmap_normalize_dry_run_reports_physical_reorder_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -14448,6 +16448,8 @@ class CliTests(unittest.TestCase):
                 )
             rendered = output.getvalue()
             self.assertEqual(code, 0)
+            self.assertIn("writeback-batch-slice-gate", rendered)
+            self.assertIn("without explicit reviewed bundle or human-gate evidence", rendered)
             self.assertIn("writeback-roadmap-sync", rendered)
             self.assertIn("writeback-route-retarget", rendered)
             self.assertIn("roadmap-operationalization-rail", rendered)
@@ -15406,6 +17408,79 @@ class CliTests(unittest.TestCase):
                 main(["--root", str(root), "preflight", "--strict"])
             self.assertEqual(raised.exception.code, 2)
 
+    def test_hooks_doctor_install_and_run_warning_only_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / ".git").mkdir()
+
+            before_doctor = snapshot_tree_bytes(root)
+            doctor_output = io.StringIO()
+            with redirect_stdout(doctor_output):
+                self.assertEqual(main(["--root", str(root), "hooks", "--doctor"]), 0)
+            doctor_rendered = doctor_output.getvalue()
+            self.assertEqual(before_doctor, snapshot_tree_bytes(root))
+            self.assertIn("MyLittleHarness hooks --doctor", doctor_rendered)
+            self.assertIn("hooks-doctor-posture", doctor_rendered)
+            self.assertIn("hooks-git-dir", doctor_rendered)
+            self.assertIn("hooks-boundary", doctor_rendered)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                self.assertEqual(main(["--root", str(root), "hooks", "--dry-run", "--hook", "git-pre-commit"]), 0)
+            self.assertEqual(before_doctor, snapshot_tree_bytes(root))
+            self.assertIn("hooks-install-plan", dry_run_output.getvalue())
+            self.assertFalse((root / ".git/hooks/pre-commit").exists())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main(["--root", str(root), "hooks", "--apply", "--hook", "git-pre-commit"]), 0)
+            rendered_apply = apply_output.getvalue()
+            hook_path = root / ".git/hooks/pre-commit"
+            hook_text = hook_path.read_text(encoding="utf-8")
+            self.assertIn("hooks-install-written", rendered_apply)
+            self.assertIn('mylittleharness --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"', hook_text)
+            self.assertIn("warning-only hook shim", hook_text)
+
+            before_run = snapshot_tree_bytes(root)
+            run_output = io.StringIO()
+            with redirect_stdout(run_output):
+                self.assertEqual(main(["--root", str(root), "hooks", "--run", "git-pre-commit", "--", "--cached"]), 0)
+            run_rendered = run_output.getvalue()
+            self.assertEqual(before_run, snapshot_tree_bytes(root))
+            self.assertIn("hooks-run-event", run_rendered)
+            self.assertIn("preflight-boundary", run_rendered)
+            self.assertIn("hooks are sensors", run_rendered)
+
+    def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            (root / ".git").mkdir()
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "hooks", "--apply", "--hook", "git-pre-commit"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertFalse((root / ".git/hooks/pre-commit").exists())
+            self.assertIn("hook install apply requires a live operating root", output.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            hook_path = root / ".git/hooks/pre-commit"
+            hook_path.parent.mkdir(parents=True)
+            hook_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "hooks", "--apply", "--hook", "git-pre-commit"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("hook target already exists; rerun with --force", output.getvalue())
+
     def test_semantic_inspect_product_fixture_no_active_plan_no_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -15819,6 +17894,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(result["isError"])
             structured = result["structuredContent"]
             self.assertEqual("mcp-read-projection", structured["adapter"]["id"])
+            self.assertEqual([], sorted(set(structured) - set(tool["outputSchema"]["properties"])))
+            for required_key in ("runtime", "cachePosture", "rootSelection", "tools"):
+                self.assertIn(required_key, tool["outputSchema"]["required"])
             self.assertEqual(str(root), structured["root"]["path"])
             self.assertEqual(str(root), structured["rootSelection"]["defaultRoot"])
             self.assertEqual(str(root), structured["rootSelection"]["selectedRoot"])
@@ -17781,6 +19859,7 @@ class CliTests(unittest.TestCase):
             agents_text = target.read_text(encoding="utf-8")
             self.assertIn("# MyLittleHarness Operator Contract", agents_text)
             self.assertIn("Agent navigation reflex", agents_text)
+            self.assertIn("dashboard --inspect", agents_text)
             self.assertIn("intelligence --query", agents_text)
             self.assertIn("mylittleharness.read_projection", agents_text)
             self.assertIn("Agent behavior defaults", agents_text)
@@ -18182,6 +20261,355 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("state-frontmatter-refused", output.getvalue())
 
+    def test_dashboard_json_includes_agent_packet_cache_posture_and_lifecycle_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "dashboard", "--inspect", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual("mylittleharness.dashboard-agent-packet.v1", payload["agentPacket"]["schema"])
+            self.assertIn("project/project-state.md", payload["agentPacket"]["source_refs"])
+            self.assertIn("mylittleharness --root <root> intelligence --query", payload["agentPacket"]["recommendedCommands"][1])
+            self.assertIn("writeback --dry-run --phase-status complete", payload["agentPacket"]["nextLegalDryRun"]["command"])
+            self.assertFalse(payload["agentPacket"]["nextLegalDryRun"]["approves_git"])
+            self.assertEqual("mylittleharness.projection-cache-posture.v1", payload["cachePosture"]["schema"])
+            section_names = [section["name"] for section in payload["sections"]]
+            self.assertIn("Lifecycle Provenance", section_names)
+
+    def test_adapter_mcp_payload_exposes_cache_posture_without_refresh_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            message = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "mylittleharness.read_projection", "arguments": {}},
+            }
+            output = io.StringIO()
+            with patch("sys.stdin", io.StringIO(json.dumps(message) + "\n")), redirect_stdout(output):
+                code = main(["--root", str(root), "adapter", "--serve", "--target", "mcp-read-projection", "--transport", "stdio"])
+
+            self.assertEqual(code, 0)
+            structured = jsonrpc_lines(output.getvalue())[0]["result"]["structuredContent"]
+            self.assertEqual("mylittleharness.projection-cache-posture.v1", structured["cachePosture"]["schema"])
+            self.assertFalse(structured["cachePosture"]["refreshable_by_adapter"])
+            self.assertIn("recommended_refresh_commands", structured["cachePosture"])
+
+    def test_suggest_start_pass_prefers_dashboard_then_intelligence_and_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "fuzzy mlh task"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("dashboard --inspect", rendered)
+            self.assertIn("intelligence --query", rendered)
+            self.assertIn("adapter --client-config --target mcp-read-projection", rendered)
+
+    def test_plan_cancel_dry_run_and_apply_clear_accidental_activation_without_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            write_sample_roadmap(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            roadmap_text = roadmap_text.replace("- `status`: `accepted`", "- `status`: `active`", 1)
+            roadmap_text = roadmap_text.replace("- `related_plan`: ``", "- `related_plan`: `project/implementation-plan.md`", 1)
+            roadmap_path.write_text(roadmap_text, encoding="utf-8")
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "plan-cancel", "--dry-run", "--roadmap-item", "roadmap-operationalization-rail"])
+            dry_rendered = dry_output.getvalue()
+            source_hash = re.search(r"--source-hash ([a-f0-9]{64})", dry_rendered)
+            self.assertEqual(dry_code, 0)
+            self.assertTrue((root / "project/implementation-plan.md").exists())
+            self.assertIsNotNone(source_hash)
+            assert source_hash is not None
+            self.assertIn("plan-cancel-route-write", dry_rendered)
+            self.assertIn("would restore roadmap item", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan-cancel",
+                        "--apply",
+                        "--roadmap-item",
+                        "roadmap-operationalization-rail",
+                        "--source-hash",
+                        source_hash.group(1),
+                    ]
+                )
+
+            rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn('active_plan: ""', state_text)
+            self.assertIn('active_phase: ""', state_text)
+            self.assertIn('phase_status: ""', state_text)
+            self.assertIn("Current focus: no active implementation plan is open.", state_text)
+            restored = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            block = restored.split("### Roadmap Operationalization Rail", 1)[1].split("### Minimal Roadmap Mutation Rail", 1)[0]
+            self.assertIn("- `status`: `accepted`", block)
+            self.assertNotIn("- `related_plan`: `project/implementation-plan.md`", block)
+            self.assertIn("no closeout, archive", rendered)
+
+    def test_plan_cancel_refuses_without_reviewed_source_hash_or_after_hash_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "plan-cancel", "--dry-run"])
+            source_hash = re.search(r"--source-hash ([a-f0-9]{64})", dry_output.getvalue())
+            self.assertEqual(dry_code, 0)
+            self.assertIsNotNone(source_hash)
+            assert source_hash is not None
+
+            missing_output = io.StringIO()
+            with redirect_stdout(missing_output):
+                missing_code = main(["--root", str(root), "plan-cancel", "--apply"])
+            self.assertEqual(missing_code, 2)
+            self.assertTrue((root / "project/implementation-plan.md").exists())
+            self.assertIn("--source-hash is required for plan-cancel apply", missing_output.getvalue())
+
+            (root / "project/implementation-plan.md").write_text("# Plan\n\nImplementation evidence started.\n", encoding="utf-8")
+            drift_output = io.StringIO()
+            with redirect_stdout(drift_output):
+                drift_code = main(["--root", str(root), "plan-cancel", "--apply", "--source-hash", source_hash.group(1)])
+            self.assertEqual(drift_code, 2)
+            self.assertTrue((root / "project/implementation-plan.md").exists())
+            self.assertIn("activation source hash changed after review", drift_output.getvalue())
+
+    def test_plan_cancel_refuses_non_pending_or_active_evidence_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan-cancel", "--dry-run"])
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "project/implementation-plan.md").exists())
+            self.assertIn("simple activation cancel is allowed only for pending plans", output.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            session_dir = root / "project/verification/session-active-work"
+            session_dir.mkdir(parents=True)
+            (session_dir / "active.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.session-active-work.v1",
+                        "session_id": "s1",
+                        "run_id": "r1",
+                        "agent_id": "a1",
+                        "status": "active",
+                        "active_plan": "project/implementation-plan.md",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan-cancel", "--dry-run"])
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "project/implementation-plan.md").exists())
+            self.assertIn("session active work evidence references project/implementation-plan.md", output.getvalue())
+
+    def test_plan_cancel_detaches_active_source_incubation_related_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            source_rel = "project/plan-incubation/cancel-source.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "Cancel Source"\n'
+                'related_plan: "project/implementation-plan.md"\n'
+                "---\n"
+                "# Cancel Source\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'source_incubation: "project/plan-incubation/cancel-source.md"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "plan-cancel", "--dry-run"])
+            dry_rendered = dry_output.getvalue()
+            source_hash = re.search(r"--source-hash ([a-f0-9]{64})", dry_rendered)
+            self.assertEqual(dry_code, 0)
+            self.assertIsNotNone(source_hash)
+            assert source_hash is not None
+            self.assertIn("would clear active related_plan metadata from source incubation", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "plan-cancel", "--apply", "--source-hash", source_hash.group(1)])
+            self.assertEqual(apply_code, 0)
+            self.assertIn("cleared active related_plan metadata from source incubation", apply_output.getvalue())
+            source_text = source_path.read_text(encoding="utf-8")
+            self.assertNotIn('related_plan: "project/implementation-plan.md"', source_text)
+
+    def test_preflight_orchestrator_workspace_excludes_live_and_product_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "coordination")
+            disposable = Path(tmp) / "worker"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "preflight",
+                        "--orchestrator-workspace",
+                        str(disposable),
+                        "--product-root",
+                        str(root / "product-source"),
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("orchestrator-preflight-live-root-excluded", rendered)
+            self.assertIn("git preflight", rendered)
+            self.assertIn("Linear/Symphony status alone is not MLH closeout", rendered)
+
+            live_output = io.StringIO()
+            with redirect_stdout(live_output):
+                live_code = main(["--root", str(root), "preflight", "--orchestrator-workspace", str(root)])
+            self.assertEqual(live_code, 0)
+            self.assertIn("orchestrator-preflight-live-root", live_output.getvalue())
+
+            nested_live_output = io.StringIO()
+            with redirect_stdout(nested_live_output):
+                nested_live_code = main(["--root", str(root), "preflight", "--orchestrator-workspace", str(root / "nested-worker")])
+            self.assertEqual(nested_live_code, 0)
+            self.assertIn("inside the live coordination root", nested_live_output.getvalue())
+
+            product_output = io.StringIO()
+            with redirect_stdout(product_output):
+                product_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "preflight",
+                        "--orchestrator-workspace",
+                        str(root / "product-source" / "worker"),
+                        "--product-root",
+                        str(root / "product-source"),
+                    ]
+                )
+            self.assertEqual(product_code, 0)
+            self.assertIn("inside the configured product source root", product_output.getvalue())
+
+    def test_research_generated_metadata_omits_empty_optional_relationship_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/research/import.md"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(
+                "---\n"
+                'status: "imported"\n'
+                'title: "Import"\n'
+                "---\n"
+                "# Import\n\n"
+                "## Gate Coverage\n\n"
+                "- Gate question: covered.\n\n"
+                "## Source-Bound Claims\n\n"
+                "- Claim: source-bound.\n\n"
+                "## Confidence\n\n"
+                "- Confidence: reviewed.\n",
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "research-distill",
+                            "--apply",
+                            "--source",
+                            "project/research/import.md",
+                            "--target",
+                            "project/research/distillate.md",
+                        ]
+                    ),
+                    0,
+                )
+            distill_text = (root / "project/research/distillate.md").read_text(encoding="utf-8")
+            self.assertNotIn('superseded_by: ""', distill_text)
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "research-compare",
+                            "--apply",
+                            "--source",
+                            "project/research/import.md",
+                            "--source",
+                            "project/research/distillate.md",
+                            "--target",
+                            "project/research/comparison.md",
+                        ]
+                    ),
+                    0,
+                )
+            compare_text = (root / "project/research/comparison.md").read_text(encoding="utf-8")
+            self.assertIn('status: "compared"', compare_text)
+            self.assertNotIn('superseded_by: ""', compare_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertNotIn("route-metadata-status", check_rendered)
+
+    def test_check_surfaces_lifecycle_provenance_unknown_owner_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            session_dir = root / "project/verification/session-active-work"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / "active.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.session-active-work.v1",
+                        "record_type": "session-active-work",
+                        "session_id": "session-active",
+                        "run_id": "run-active",
+                        "agent_id": "codex",
+                        "status": "active",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("check-lifecycle-provenance-active-lifecycle", rendered)
+            self.assertIn("check-lifecycle-provenance-unknown-owner", rendered)
+
 
 class EncodingLimitedTextStream:
     def __init__(self, encoding: str) -> None:
@@ -18308,6 +20736,61 @@ def make_active_live_root(root: Path, phase_status: str = "in_progress") -> Path
     )
     (root / "project/implementation-plan.md").write_text("# Plan\n", encoding="utf-8")
     return root
+
+
+def make_product_diff_scope_fixture(tmp: Path) -> tuple[Path, Path]:
+    root = make_active_live_root(tmp / "operator", phase_status="pending")
+    product_root = tmp / "product"
+    product_root.mkdir()
+    state_path = root / "project/project-state.md"
+    state_path.write_text(
+        state_path.read_text(encoding="utf-8")
+        .replace(
+            'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+            'active_phase: "phase-1-implementation"\nphase_status: "pending"',
+        )
+        .replace('phase_status: "pending"\n---', f'phase_status: "pending"\nproduct_source_root: "{product_root}"\n---'),
+        encoding="utf-8",
+    )
+    (root / "project/implementation-plan.md").write_text(
+        "---\n"
+        'plan_id: "product-diff-scope-plan"\n'
+        'title: "Product Diff Scope Gate"\n'
+        'execution_slice: "product-diff-scope-gate"\n'
+        'primary_roadmap_item: "product-diff-scope-gate"\n'
+        'deliverable_class: "implementation"\n'
+        "target_artifacts:\n"
+        '  - "src/allowed.py"\n'
+        '  - "tests/test_cli.py"\n'
+        'active_phase: "phase-1-implementation"\n'
+        'phase_status: "pending"\n'
+        "---\n"
+        "# Product Diff Scope Gate\n\n"
+        "## Phases\n\n"
+        "### phase-1-implementation\n\n"
+        "- id: `phase-1-implementation`\n"
+        "- status: `pending`\n"
+        "- write_scope: `src/allowed.py`, `tests/test_cli.py`\n",
+        encoding="utf-8",
+    )
+    return root, product_root
+
+
+def product_diff_scope_posture(product_root: Path) -> VcsPosture:
+    changed = (
+        VcsChangedPath("M", "src/allowed.py"),
+        VcsChangedPath("M", "docs/out.md"),
+    )
+    return VcsPosture(
+        root=product_root,
+        git_available=True,
+        is_worktree=True,
+        state="dirty",
+        top_level=str(product_root),
+        changed_count=len(changed),
+        changed_samples=changed,
+        changed_paths=changed,
+    )
 
 
 def write_sample_roadmap(root: Path) -> None:

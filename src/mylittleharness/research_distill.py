@@ -381,7 +381,6 @@ def _render_research_distill(root: Path, target: ResearchDistillTarget) -> tuple
         *_yaml_list_lines(target.extraction.quality.quality_gate_issues or ("none",), indent="  "),
         "source_hashes:",
         f'  - "{_yaml_double_quoted_value(f"{target.source_rel} sha256={target.source_hash}")}"',
-        'superseded_by: ""',
         "---",
     ]
     lines = [

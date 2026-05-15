@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
@@ -47,6 +47,7 @@ class WorkClaimRequest:
     claimed_paths: tuple[str, ...]
     claimed_resources: tuple[str, ...]
     lease_expires_at: str
+    ttl: str
     release_condition: str
 
 
@@ -98,6 +99,7 @@ def make_work_claim_request(args: object) -> WorkClaimRequest:
         claimed_paths=_tuple_values(getattr(args, "claimed_paths", ())),
         claimed_resources=_tuple_values(getattr(args, "claimed_resources", ())),
         lease_expires_at=str(getattr(args, "lease_expires_at", "") or "").strip(),
+        ttl=str(getattr(args, "ttl", "") or "").strip(),
         release_condition=str(getattr(args, "release_condition", "") or "").strip(),
     )
 
@@ -117,6 +119,11 @@ def work_claim_dry_run_findings(inventory: Inventory, request: WorkClaimRequest)
         current = _load_claim_record(inventory.root, request.claim_id)
         text = _claim_json({**current.data, **_release_fields(request)})
         findings.append(Finding("info", "work-claim-target", f"would release work claim: {_claim_rel_path(request.claim_id)}", _claim_rel_path(request.claim_id)))
+        findings.append(_route_write_finding(_claim_rel_path(request.claim_id), current.data, json.loads(text), apply=False))
+    elif request.action == "extend":
+        current = _load_claim_record(inventory.root, request.claim_id)
+        text = _claim_json({**current.data, **_extend_fields(request)})
+        findings.append(Finding("info", "work-claim-target", f"would extend work claim: {_claim_rel_path(request.claim_id)}", _claim_rel_path(request.claim_id)))
         findings.append(_route_write_finding(_claim_rel_path(request.claim_id), current.data, json.loads(text), apply=False))
     else:
         record = _created_claim_record(request)
@@ -157,6 +164,10 @@ def work_claim_apply_findings(inventory: Inventory, request: WorkClaimRequest) -
         current = _load_claim_record(inventory.root, request.claim_id)
         before_data = current.data
         after_data = {**before_data, **_release_fields(request)}
+    elif request.action == "extend":
+        current = _load_claim_record(inventory.root, request.claim_id)
+        before_data = current.data
+        after_data = {**before_data, **_extend_fields(request)}
     else:
         before_data = None
         after_data = _created_claim_record(request)
@@ -180,6 +191,8 @@ def work_claim_apply_findings(inventory: Inventory, request: WorkClaimRequest) -
 
     if request.action == "release":
         findings.append(Finding("info", "work-claim-released", f"released work claim: {rel_path}", rel_path))
+    elif request.action == "extend":
+        findings.append(Finding("info", "work-claim-extended", f"extended work claim lease: {rel_path}", rel_path))
     else:
         findings.append(Finding("info", "work-claim-written", f"created work claim: {rel_path}", rel_path))
     findings.append(_route_write_finding(rel_path, before_data, after_data, apply=True))
@@ -336,16 +349,33 @@ def _request_findings(inventory: Inventory, request: WorkClaimRequest, *, apply:
     findings: list[Finding] = []
     if inventory.root_kind != "live_operating_root":
         findings.append(Finding(severity, "work-claim-refused", f"target root kind is {inventory.root_kind}; work claim writes require a live operating root"))
-    if request.action not in {"create", "release"}:
-        findings.append(Finding("error", "work-claim-refused", "--action must be create or release"))
+    if request.action not in {"create", "extend", "release"}:
+        findings.append(Finding("error", "work-claim-refused", "--action must be create, extend, or release"))
     if not request.claim_id:
         findings.append(Finding("error", "work-claim-refused", "--claim-id is required"))
     elif not ID_RE.match(request.claim_id):
         findings.append(Finding("error", "work-claim-refused", "--claim-id may contain only letters, digits, dot, underscore, or dash"))
+    lease_findings = _lease_request_findings(request)
+    findings.extend(lease_findings)
     if request.action == "release":
         target = inventory.root / _claim_rel_path(request.claim_id)
         if request.claim_id and not target.exists():
             findings.append(Finding(severity, "work-claim-refused", "cannot release a missing work claim", _claim_rel_path(request.claim_id)))
+        return findings
+    if request.action == "extend":
+        if request.claim_id:
+            rel_path = _claim_rel_path(request.claim_id)
+            target = inventory.root / rel_path
+            if not target.exists():
+                findings.append(Finding(severity, "work-claim-refused", "cannot extend a missing work claim", rel_path))
+            elif not lease_findings:
+                current = _load_claim_record(inventory.root, request.claim_id)
+                if current.status != "active":
+                    findings.append(Finding(severity, "work-claim-refused", "can only extend an active work claim", rel_path))
+                elif _claim_is_stale(current):
+                    findings.append(Finding(severity, "work-claim-refused", "cannot extend stale work claim; release it or create a new reviewed claim", rel_path))
+        if not (request.lease_expires_at or request.ttl):
+            findings.append(Finding("error", "work-claim-refused", "extend requires --ttl or --lease-expires-at"))
         return findings
 
     for field, value in (
@@ -501,7 +531,7 @@ def _created_claim_record(request: WorkClaimRequest) -> dict[str, object]:
         "claimed_routes": list(request.claimed_routes),
         "claimed_paths": list(request.claimed_paths),
         "claimed_resources": list(request.claimed_resources),
-        "lease_expires_at": request.lease_expires_at,
+        "lease_expires_at": _lease_expires_at_for_request(request),
         "status": "active",
         "release_condition": request.release_condition,
         "created_at_utc": _utc_timestamp(),
@@ -515,6 +545,16 @@ def _release_fields(request: WorkClaimRequest) -> dict[str, object]:
         "released_at_utc": _utc_timestamp(),
         "release_condition": request.release_condition or "explicit release command",
     }
+
+
+def _extend_fields(request: WorkClaimRequest) -> dict[str, object]:
+    data: dict[str, object] = {
+        "lease_expires_at": _lease_expires_at_for_request(request),
+        "extended_at_utc": _utc_timestamp(),
+    }
+    if request.release_condition:
+        data["extension_note"] = request.release_condition
+    return data
 
 
 def _scope_findings(request: WorkClaimRequest) -> list[Finding]:
@@ -558,6 +598,45 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _lease_request_findings(request: WorkClaimRequest) -> list[Finding]:
+    findings: list[Finding] = []
+    if request.lease_expires_at and _parse_utc_timestamp(request.lease_expires_at) is None:
+        findings.append(Finding("error", "work-claim-refused", "--lease-expires-at must be a valid UTC timestamp"))
+    if request.ttl and _parse_ttl_delta(request.ttl) is None:
+        findings.append(Finding("error", "work-claim-refused", "--ttl must be a positive duration such as 900s, 30m, 2h, or 1d"))
+    if request.lease_expires_at and request.ttl:
+        findings.append(Finding("error", "work-claim-refused", "use either --ttl or --lease-expires-at, not both"))
+    return findings
+
+
+def _lease_expires_at_for_request(request: WorkClaimRequest) -> str:
+    if request.lease_expires_at:
+        parsed = _parse_utc_timestamp(request.lease_expires_at)
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ") if parsed is not None else request.lease_expires_at
+    if request.ttl:
+        delta = _parse_ttl_delta(request.ttl)
+        if delta is not None:
+            return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ""
+
+
+def _parse_ttl_delta(value: str) -> timedelta | None:
+    match = re.fullmatch(r"([1-9][0-9]*)([smhd]?)", value.strip().lower())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2) or "s"
+    if unit == "s":
+        return timedelta(seconds=amount)
+    if unit == "m":
+        return timedelta(minutes=amount)
+    if unit == "h":
+        return timedelta(hours=amount)
+    if unit == "d":
+        return timedelta(days=amount)
+    return None
 
 
 def _claim_rel_path(claim_id: str) -> str:

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .inventory import Inventory
+from .models import Finding, SessionActiveWorkRecord
 
 
 CURRENT_FOCUS_BEGIN = "<!-- BEGIN mylittleharness-current-focus v1 -->"
@@ -9,6 +15,157 @@ MEMORY_ROADMAP_BEGIN = "<!-- BEGIN mylittleharness-memory-routing-roadmap v1 -->
 MEMORY_ROADMAP_END = "<!-- END mylittleharness-memory-routing-roadmap v1 -->"
 DEFAULT_ACTIVE_PLAN_REL = "project/implementation-plan.md"
 STATE_HISTORY_REFERENCE_LABEL = "Older prose and archived state history are reference context, not lifecycle authority."
+SESSION_ACTIVE_WORK_SCHEMA = "mylittleharness.session-active-work.v1"
+SESSION_ACTIVE_WORK_DIR_REL = "project/verification/session-active-work"
+SESSION_ACTIVE_WORK_STATUSES = {"active", "blocked", "complete", "released", "stale", "expired", "unknown"}
+SESSION_ACTIVE_WORK_REQUIRED_SCALARS = ("session_id", "run_id", "agent_id", "status")
+SESSION_ACTIVE_WORK_STALE_AFTER = timedelta(hours=4)
+
+
+def session_active_work_findings(inventory: Inventory, code_prefix: str = "session-active-work") -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return [
+            Finding(
+                "info",
+                f"{code_prefix}-non-authority",
+                f"session active work diagnostics are live-root only; root kind is {inventory.root_kind}",
+                SESSION_ACTIVE_WORK_DIR_REL,
+            ),
+            *_session_active_work_boundary_findings(code_prefix),
+        ]
+
+    records, warnings = _load_session_active_work_records(inventory.root)
+    findings: list[Finding] = [*warnings]
+    if not records:
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-records",
+                f"no session-scoped active work records found at {SESSION_ACTIVE_WORK_DIR_REL}/*.json",
+                SESSION_ACTIVE_WORK_DIR_REL,
+            )
+        )
+        findings.extend(_session_active_work_boundary_findings(code_prefix))
+        return findings
+
+    now = datetime.now(timezone.utc)
+    for record in records:
+        posture = _session_active_work_posture(record, now)
+        severity = "warn" if posture in {"expired", "stale", "unknown-status"} else "info"
+        code = f"{code_prefix}-{posture}" if posture != "record" else f"{code_prefix}-record"
+        effective_status = "unknown" if posture == "unknown-status" else posture if posture in {"expired", "stale"} else record.status
+        findings.append(
+            Finding(
+                severity,
+                code,
+                (
+                    f"session_id={record.session_id or '<missing>'}; run_id={record.run_id or '<missing>'}; "
+                    f"agent_id={record.agent_id or '<missing>'}; status={effective_status or '<missing>'}; "
+                    f"active_plan={record.active_plan or '<none>'}; active_phase={record.active_phase or '<none>'}; "
+                    f"execution_slice={record.execution_slice or '<none>'}; read-only session active work evidence only"
+                ),
+                record.rel_path,
+            )
+        )
+        findings.extend(_session_active_work_metadata_findings(record, code_prefix))
+    findings.extend(_session_active_work_boundary_findings(code_prefix))
+    return findings
+
+
+def _load_session_active_work_records(root: Path) -> tuple[list[SessionActiveWorkRecord], list[Finding]]:
+    directory = root / SESSION_ACTIVE_WORK_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return [], []
+    records: list[SessionActiveWorkRecord] = []
+    findings: list[Finding] = []
+    for path in sorted(directory.glob("*.json")):
+        rel_path = _to_rel_path(root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", "session-active-work-malformed", "session active work record path is not a regular file", rel_path))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            findings.append(Finding("warn", "session-active-work-malformed", f"session active work record could not be read as JSON: {exc}", rel_path))
+            continue
+        if not isinstance(data, dict):
+            findings.append(Finding("warn", "session-active-work-malformed", "session active work record JSON must be an object", rel_path))
+            continue
+        records.append(SessionActiveWorkRecord(rel_path=rel_path, data=data))
+    return records, findings
+
+
+def _session_active_work_posture(record: SessionActiveWorkRecord, now: datetime) -> str:
+    if record.status not in SESSION_ACTIVE_WORK_STATUSES:
+        return "unknown-status"
+    if record.status in {"active", "blocked"}:
+        expires_at = _parse_utc_timestamp(record.lease_expires_at)
+        if expires_at is not None and expires_at <= now:
+            return "expired"
+        heartbeat_at = _parse_utc_timestamp(record.last_heartbeat_at_utc)
+        if heartbeat_at is not None and now - heartbeat_at > SESSION_ACTIVE_WORK_STALE_AFTER:
+            return "stale"
+    return "record"
+
+
+def _session_active_work_metadata_findings(record: SessionActiveWorkRecord, code_prefix: str) -> list[Finding]:
+    findings: list[Finding] = []
+    if record.data.get("schema") not in (None, SESSION_ACTIVE_WORK_SCHEMA):
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-schema",
+                f"session active work schema is {record.data.get('schema')!r}; expected {SESSION_ACTIVE_WORK_SCHEMA}",
+                record.rel_path,
+            )
+        )
+    for field in SESSION_ACTIVE_WORK_REQUIRED_SCALARS:
+        if not str(record.data.get(field) or "").strip():
+            findings.append(Finding("warn", f"{code_prefix}-metadata-missing", f"session active work missing required field {field}", record.rel_path))
+    return findings
+
+
+def _session_active_work_boundary_findings(code_prefix: str) -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-boundary",
+            (
+                "session active work records provide parallel visibility only; project-state lifecycle stays global authority "
+                "and no session record approves closeout, archive, roadmap status, staging, commit, rollback, or release"
+            ),
+            SESSION_ACTIVE_WORK_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-route",
+            (
+                f"session active work records live under {SESSION_ACTIVE_WORK_DIR_REL}/*.json as repo-visible coordination evidence; "
+                "no daemon, dashboard, queue, cache, adapter state, or provider state is authority"
+            ),
+            SESSION_ACTIVE_WORK_DIR_REL,
+        ),
+    ]
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_rel_path(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def sync_current_focus_block(text: str) -> str:

@@ -19,9 +19,10 @@ RELEASE_BOUNDARY = "no automatic release removal, lifecycle movement, closeout, 
 CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
 META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
 AGENT_OPERABILITY_SIGNAL_TYPES = {"agent-operability", "agent-operability-micro-friction"}
-AGENT_OPERABILITY_OWNER_COMMANDS = "meta-feedback, check, writeback, and the mlh-meta-feedback skill"
+AGENT_OPERABILITY_OWNER_COMMANDS = "meta-feedback, check, writeback, and the route-specific owner command"
 AGENT_OPERABILITY_FRICTION_SCOPE = (
-    "command ergonomics, route discovery, dry-run/apply wording, docs_decision pressure, and state-transfer hesitation"
+    "command ergonomics, route discovery, dry-run/apply wording, docs_decision pressure, and state-transfer hesitation "
+    "when they obscure lifecycle authority, required evidence, recovery, root boundaries, or reviewability"
 )
 CLUSTER_BEGIN = "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->"
 CLUSTER_END = "<!-- END mylittleharness-meta-feedback-cluster v1 -->"

@@ -242,6 +242,7 @@ They are **not** authority.
 Deleting generated projection output must not change what the repository is allowed to treat as true.
 
 - Generated state is build-to-delete.
+- Refreshes preserve old-good artifacts and indexes when a publish fails.
 - Reports are diagnostics, not decisions.
 - Snapshots are safety evidence, not authority.
 
@@ -289,6 +290,47 @@ MyLittleHarness is built around a few safety rules:
 Any shell-capable or file-reading agent can use the repo-visible state.
 
 No hidden service is required.
+
+---
+
+## First-Run Operator Path
+
+```bash
+python -m mylittleharness --root $ProductRoot bootstrap --package-smoke
+python -m mylittleharness --root $TargetRoot init --dry-run
+python -m mylittleharness --root $TargetRoot check
+python -m mylittleharness --root $TargetRoot repair --dry-run
+python -m mylittleharness --root $TargetRoot detach --dry-run
+```
+
+Apply modes stay explicit and target-bound after dry-run review. `bootstrap --inspect`, `tasks --inspect`, hooks, CI, MCP clients, semantic providers, global installation, and workstation adoption can help later; they are not required first-contact steps.
+
+Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible files plus CLI reports. Start with `AGENTS.md`, `.codex/project-workflow.toml`, and `project/project-state.md`; read `project/implementation-plan.md` only when `plan_status = "active"` or the user asks about plan, phase, or closeout. When a plan is active, `active_phase` and `phase_status` are first-class continuation pointers. `status`/`check` report a compact lifecycle route table for live roots, and `intelligence --focus routes` prints the same read-only route table for the `project/roadmap.md` sequencing route, decision/do-not-revisit records, ADR records, and optional `project/verification/*.md` proof/evidence records. For fuzzy repo, lifecycle, impact, or product-source navigation, start with `dashboard --inspect` or `dashboard --inspect --json` as the cockpit packet, then use `intelligence --query`, optional `adapter --client-config --target mcp-read-projection`, and `rg` or direct file reads for exact verification. Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow, but no Codex skill or generated docs-impact report is required for v1.
+
+Treat `dashboard --inspect` output as a read-only projection: it starts no daemon, listener, hook, dispatcher, worker, cache refresh, or product mutation; it cannot approve lifecycle movement, repair, archive, staging, commit, push, release, roadmap status, or product-diff acceptance; and any `mlhd` runtime/cache fields are disposable diagnostics only. The JSON payload includes source refs and a `nextLegalDryRun` candidate so an agent can see the next legal preview route, but the dashboard does not approve running or applying that route.
+
+`meta-feedback` is opt-in and is not part of the default start pass. Keep opt-in `meta-feedback` for concrete MLH rough edges after the active task is safe.
+
+---
+
+## Diagnostics And Closeout
+
+Docs decisions use the portable vocabulary `updated`, `not-needed`, or `uncertain`. Consider docs when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, `audit-links`, or `check` output changes.
+
+bare `evidence`, `evidence --record`, and `closeout` are separate surfaces: bare `evidence` is a terminal-only read-only report, while `evidence --record` is an explicit source-bound record rail. Route output is advisory only, and diagnostics must not store the only copy of accepted decisions, current focus, docs decisions, repair approval, verification, or closeout evidence.
+
+`check` keeps common drift compact: primary instruction-surface size warnings, link/docmap/stale-root/rule-context/remainder drift, route metadata, and lifecycle posture stay in the report. Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics. `check --deep` adds links, context, hygiene, and report-only grain diagnostics. Grain diagnostics inspect active-plan slice size. `active-plan-auto-continue`, current-phase-only, `auto_continue`, and `stop_conditions` keep phase movement explicit until a writeback or transition rail changes lifecycle state.
+
+---
+
+## Local Release Checklist
+
+The local release checklist is:
+
+- package metadata and runtime version agree on `1.0.0`
+- `bootstrap --package-smoke` passes from temporary source/build/install locations outside the product source checkout
+- Wheel, build, and install artifacts are verification outputs only
+- the CLI rejects standalone `bootstrap --apply`
 
 ---
 

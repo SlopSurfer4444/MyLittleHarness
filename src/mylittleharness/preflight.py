@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 from pathlib import Path
 
 from .checks import (
@@ -47,6 +48,41 @@ def preflight_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
         ("Checks", checks),
         ("Closeout Readiness", closeout),
         ("Boundary", _boundary_findings()),
+    ]
+
+
+def orchestrator_workspace_preflight_sections(
+    inventory: Inventory,
+    workspace: str,
+    product_root: str = "",
+) -> list[tuple[str, list[Finding]]]:
+    workspace_path = Path(workspace).expanduser()
+    product_path = Path(product_root).expanduser() if product_root else _configured_product_root(inventory)
+    findings = [
+        Finding(
+            "info",
+            "orchestrator-preflight-boundary",
+            "external orchestrator workspace preflight is read-only; it creates no clone, shell, Linear issue, provider state, lifecycle write, claim, commit, or cleanup",
+        ),
+        Finding("info", "orchestrator-preflight-root", f"coordination root: {inventory.root}; root_kind={inventory.root_kind}"),
+        Finding("info", "orchestrator-preflight-workspace", f"candidate disposable workspace: {workspace_path}"),
+    ]
+    findings.extend(_workspace_exclusion_findings(inventory.root, workspace_path, product_path))
+    findings.extend(_workspace_shape_findings(workspace_path))
+    findings.extend(_tool_findings())
+    findings.extend(_orchestrator_command_findings(workspace_path))
+    return [
+        ("Orchestrator Workspace", findings),
+        (
+            "Boundary",
+            [
+                Finding(
+                    "info",
+                    "orchestrator-preflight-no-authority",
+                    "passing this preflight cannot approve worker launch, lifecycle movement, roadmap status, source edits, staging, commit, push, release, or Linear/Symphony completion claims",
+                )
+            ],
+        ),
     ]
 
 
@@ -152,3 +188,73 @@ def _boundary_findings() -> list[Finding]:
             "preflight does not format, repair, write reports, create generated artifacts, stage files, commit, archive, change target roots, or mutate workflow state",
         ),
     ]
+
+
+def _workspace_exclusion_findings(root: Path, workspace: Path, product_root: Path | None) -> list[Finding]:
+    findings: list[Finding] = []
+    resolved_workspace = _safe_resolve(workspace)
+    resolved_root = _safe_resolve(root)
+    if resolved_workspace == resolved_root:
+        findings.append(Finding("warn", "orchestrator-preflight-live-root", "candidate workspace is the live coordination root; use a disposable clone/worktree outside the live root", str(workspace)))
+    elif _is_within(resolved_workspace, resolved_root):
+        findings.append(Finding("warn", "orchestrator-preflight-live-root", "candidate workspace is inside the live coordination root; avoid live-root nested worker debris", str(workspace)))
+    if product_root:
+        resolved_product = _safe_resolve(product_root)
+        if resolved_workspace == resolved_product:
+            findings.append(Finding("warn", "orchestrator-preflight-product-root", "candidate workspace is the configured product source root; use a disposable clone/worktree instead", str(workspace)))
+        elif _is_within(resolved_workspace, resolved_product):
+            findings.append(Finding("warn", "orchestrator-preflight-product-root", "candidate workspace is inside the configured product source root; avoid live-root nested worker debris", str(workspace)))
+    if not findings:
+        findings.append(Finding("info", "orchestrator-preflight-live-root-excluded", "candidate workspace is distinct from the live coordination root and configured product source root", str(workspace)))
+    return findings
+
+
+def _workspace_shape_findings(workspace: Path) -> list[Finding]:
+    if workspace.exists() and workspace.is_symlink():
+        return [Finding("warn", "orchestrator-preflight-workspace-shape", "candidate workspace is a symlink; choose a normal disposable directory", str(workspace))]
+    if workspace.exists() and not workspace.is_dir():
+        return [Finding("warn", "orchestrator-preflight-workspace-shape", "candidate workspace exists but is not a directory", str(workspace))]
+    if not workspace.exists():
+        return [Finding("info", "orchestrator-preflight-workspace-shape", "candidate workspace does not exist yet; create it through the external orchestrator setup, not this read-only preflight", str(workspace))]
+    examples = [path.name for path in sorted(workspace.iterdir(), key=lambda item: item.name.lower())[:5]]
+    return [Finding("info", "orchestrator-preflight-workspace-shape", f"candidate workspace exists; sample_entries={', '.join(examples) or 'empty'}", str(workspace))]
+
+
+def _tool_findings() -> list[Finding]:
+    findings = []
+    for tool in ("git", "mylittleharness"):
+        path = shutil.which(tool)
+        severity = "info" if path else "warn"
+        findings.append(Finding(severity, "orchestrator-preflight-tool", f"{tool}={'available at ' + path if path else 'not found on PATH'}"))
+    return findings
+
+
+def _orchestrator_command_findings(workspace: Path) -> list[Finding]:
+    root_literal = str(workspace)
+    return [
+        Finding("info", "orchestrator-preflight-command", f"shell preflight: cd {root_literal}"),
+        Finding("info", "orchestrator-preflight-command", "git preflight: git status --short --branch"),
+        Finding("info", "orchestrator-preflight-command", "MLH preflight after scaffold/clone: mylittleharness --root <disposable-root> check"),
+        Finding("info", "orchestrator-preflight-completion-policy", "external orchestrator completion claims must cite repo-visible handoff/claim/agent-run evidence; Linear/Symphony status alone is not MLH closeout"),
+    ]
+
+
+def _configured_product_root(inventory: Inventory) -> Path | None:
+    data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    value = str(data.get("product_source_root") or data.get("projection_root") or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def _safe_resolve(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False

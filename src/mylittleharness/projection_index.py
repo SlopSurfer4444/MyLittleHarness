@@ -8,6 +8,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from . import __version__
 from .inventory import Inventory
@@ -35,6 +36,11 @@ INDEX_SIDECAR_NAMES = (
     f"{INDEX_NAME}-shm",
     f"{INDEX_NAME}-wal",
     INDEX_DIRTY_MARKER_NAME,
+)
+INDEX_PUBLISH_SIDECAR_NAMES = (
+    f"{INDEX_NAME}-journal",
+    f"{INDEX_NAME}-shm",
+    f"{INDEX_NAME}-wal",
 )
 
 
@@ -79,12 +85,12 @@ def build_projection_index(inventory: Inventory) -> list[Finding]:
         ]
 
     operation_findings = write_projection_cache_operation_marker(inventory.root, "projection-index-build")
+    tmp_path = _temporary_index_path(inventory.root)
     try:
         projection = build_projection(inventory)
         shape = _index_shape(projection)
         path = index_path(inventory.root)
-        _delete_known_index_paths(inventory.root)
-        with closing(sqlite3.connect(path)) as connection:
+        with closing(sqlite3.connect(tmp_path)) as connection:
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             _create_schema(connection)
@@ -93,19 +99,44 @@ def build_projection_index(inventory: Inventory) -> list[Finding]:
             _write_fts_rows(connection, shape.fts_rows)
             _write_path_rows(connection, shape.path_rows)
             connection.commit()
+        _delete_index_publish_sidecars(inventory.root)
+        tmp_path.replace(path)
         clear_projection_cache_dirty_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)
     except sqlite3.Error as exc:
-        _delete_known_index_paths(inventory.root)
+        _delete_temporary_index_paths(inventory.root, tmp_path.name)
         return [
             Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
-            Finding("warn", "projection-index-build-failed", f"SQLite index build failed; direct source reads remain authoritative: {exc}", INDEX_REL_PATH),
+            Finding(
+                "warn",
+                "projection-index-build-failed",
+                f"SQLite index build failed before publishing a partial index; old-good index, if present, remains advisory: {exc}",
+                INDEX_REL_PATH,
+            ),
+        ]
+    except OSError as exc:
+        _delete_temporary_index_paths(inventory.root, tmp_path.name)
+        return [
+            Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding(
+                "warn",
+                "projection-index-build-failed",
+                f"SQLite index publish failed before completing refresh; old-good index, if present, remains advisory: {exc}",
+                INDEX_REL_PATH,
+            ),
         ]
     finally:
+        _delete_temporary_index_paths(inventory.root, tmp_path.name)
         clear_projection_cache_operation_marker(inventory.root)
 
     return [
         *operation_findings,
         Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+        Finding(
+            "info",
+            "projection-index-atomic-refresh",
+            "built SQLite index in a temporary file and published it only after commit; readers keep old-good index on failed refresh",
+            INDEX_REL_PATH,
+        ),
         Finding("info", "projection-index-build", f"wrote disposable SQLite FTS/BM25 index: {INDEX_REL_PATH}", INDEX_REL_PATH),
         Finding(
             "info",
@@ -972,6 +1003,38 @@ def _delete_known_index_paths(root: Path) -> tuple[list[str], list[str]]:
         path.unlink()
         deleted.append(path.relative_to(root).as_posix())
     return deleted, skipped
+
+
+def _delete_index_publish_sidecars(root: Path) -> None:
+    projection_dir = artifact_dir(root)
+    if not projection_dir.exists():
+        return
+    for name in INDEX_PUBLISH_SIDECAR_NAMES:
+        path = projection_dir / name
+        if not path.exists() or not _is_under_artifact_dir(root, path):
+            continue
+        if path.is_dir() and not path.is_symlink():
+            continue
+        path.unlink()
+
+
+def _temporary_index_path(root: Path) -> Path:
+    return artifact_dir(root) / f".{INDEX_NAME}.{uuid4().hex}.tmp"
+
+
+def _delete_temporary_index_paths(root: Path, tmp_name: str) -> None:
+    projection_dir = artifact_dir(root)
+    if not projection_dir.exists():
+        return
+    for path in projection_dir.glob(f"{tmp_name}*"):
+        if not _is_under_artifact_dir(root, path):
+            continue
+        if path.is_dir() and not path.is_symlink():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _boundary_preflight(root: Path, create: bool) -> list[Finding]:

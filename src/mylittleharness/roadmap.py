@@ -125,10 +125,78 @@ HUMAN_REVIEW_GATE_FIELDS = (
 )
 HUMAN_REVIEW_GATE_TRUTHY = {"1", "true", "yes", "required", "needs-human-review", "human-review", "deep-research", "reflection"}
 HUMAN_REVIEW_GATE_FALSEY = {"", "0", "false", "no", "none", "not-needed", "not needed", "resolved"}
+HIGH_BLAST_GATE_FIELDS = ("stage", "gate_class", "review_class", "risk_class", "blast_radius", "promotion_gate")
+BATCH_AUTHORIZATION_FIELDS = (
+    "bundle_authorization",
+    "bundle_reviewed",
+    "reviewed_bundle",
+    "explicit_bundle",
+    "human_gate_required",
+    "needs_human_review",
+)
+BATCH_AUTHORIZATION_TRUTHY = {
+    "1",
+    "true",
+    "yes",
+    "required",
+    "reviewed",
+    "approved",
+    "authorized",
+    "explicit",
+    "human-reviewed",
+    "human-gate",
+}
 IMPLEMENTATION_STAGE_VALUES = {"implementation", "implement", "fix", "bugfix", "feature", "product-implementation"}
+NON_IMPLEMENTATION_DELIVERABLE_CLASSES = {
+    "audit",
+    "cleanup",
+    "diagnostic",
+    "evidence",
+    "fan-in-review",
+    "proposal",
+    "research",
+}
+IMPLEMENTATION_DELIVERABLE_VALUES = {
+    "implementation",
+    "implement",
+    "product-implementation",
+    "product",
+    "source",
+    "source-change",
+    "code",
+}
+NON_IMPLEMENTATION_WORK_VALUES = {
+    "audit",
+    "cleanup",
+    "diagnostic",
+    "diagnostics",
+    "evidence",
+    "fan-in",
+    "fan-in-review",
+    "non-implementation",
+    "nonimplementation",
+    "proposal",
+    "research",
+    "review",
+}
+DELIVERABLE_CLASS_FIELDS = ("deliverable_class", "deliverable_type", "work_class")
+IMPLEMENTATION_PROMOTION_FIELDS = (
+    "promoted_to_implementation",
+    "implementation_promoted",
+    "product_implementation",
+)
+IMPLEMENTATION_PROMOTION_TRUTHY = {"1", "true", "yes", "promoted", "implementation", "product-implementation"}
+IMPLEMENTATION_ALLOWED_TRUTHY = {"1", "true", "yes", "allowed", "implementation", "product-implementation"}
+IMPLEMENTATION_ALLOWED_FALSEY = {"", "0", "false", "no", "none", "blocked", "forbidden", "not-allowed"}
+PROMOTION_REQUIRED_TRUTHY = {"1", "true", "yes", "required", "promotion-required"}
+PROMOTION_REQUIRED_FALSEY = {"", "0", "false", "no", "none", "not-needed", "not-required"}
 IMPLEMENTATION_SCOPE_NEXT_SAFE_TEMPLATE = (
     "mylittleharness --root <root> roadmap --dry-run --action update "
     "--item-id {item_id} --target-artifact <rel-path>"
+)
+DELIVERABLE_CLASS_PROMOTION_NEXT_SAFE_TEMPLATE = (
+    "mylittleharness --root <root> roadmap --dry-run --action update "
+    "--item-id {item_id} --field deliverable_class=implementation"
 )
 
 
@@ -202,6 +270,10 @@ class RoadmapSliceContract:
     source_research: str
     related_specs: tuple[str, ...]
     related_incubation: str = ""
+    work_class: str = "implementation"
+    deliverable_class: str = "implementation"
+    implementation_allowed: bool = True
+    promotion_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -402,6 +474,118 @@ def roadmap_plan_scope_next_safe_command(item_id: str) -> str:
     return IMPLEMENTATION_SCOPE_NEXT_SAFE_TEMPLATE.format(item_id=_normalized_item_id(item_id) or "<item-id>")
 
 
+def roadmap_plan_deliverable_class_blockers(
+    inventory: Inventory,
+    item_id: str,
+    fields: dict[str, object] | None = None,
+) -> tuple[str, ...]:
+    normalized_item_id = _normalized_item_id(item_id)
+    if not normalized_item_id:
+        return ()
+    item_fields = fields if fields is not None else roadmap_item_fields(inventory, normalized_item_id)
+    if not item_fields:
+        return ()
+    status = _normalized_status(item_fields.get("status"))
+    if status not in {"accepted", "active"}:
+        return ()
+    deliverable_class = roadmap_item_deliverable_class(inventory, item_fields)
+    if deliverable_class not in NON_IMPLEMENTATION_DELIVERABLE_CLASSES:
+        return ()
+    if roadmap_item_explicitly_promotes_implementation(item_fields):
+        return ()
+
+    explicit_targets = tuple(_dedupe_nonempty(_field_list(item_fields, "target_artifacts")))
+    source_hint_targets = tuple(_target_artifact_routes_from_scope_text(_roadmap_scope_source_text(inventory, item_fields)))
+    candidate_targets = explicit_targets or source_hint_targets
+    product_targets = tuple(target for target in candidate_targets if _looks_like_product_implementation_route(target))
+    if not product_targets:
+        return ()
+    summarized_targets = _summarize_values(product_targets)
+    return (
+        (
+            f"roadmap item {normalized_item_id!r} has {deliverable_class} deliverable intent but product "
+            f"implementation target_artifacts or route hints ({summarized_targets}); retarget the work to "
+            "audit/proposal/evidence artifacts or explicitly promote the roadmap metadata before opening a "
+            "product implementation plan"
+        ),
+    )
+
+
+def roadmap_plan_deliverable_class_next_safe_command(item_id: str) -> str:
+    return DELIVERABLE_CLASS_PROMOTION_NEXT_SAFE_TEMPLATE.format(item_id=_normalized_item_id(item_id) or "<item-id>")
+
+
+def roadmap_item_deliverable_class(inventory: Inventory, fields: dict[str, object]) -> str:
+    explicit = _explicit_deliverable_class(fields)
+    if explicit:
+        return explicit
+    stage = _normalized_status(_field_scalar(fields, "stage"))
+    if stage in IMPLEMENTATION_STAGE_VALUES:
+        return "implementation"
+    stage_class = _text_signals_deliverable_class(stage, source="stage")
+    if stage_class:
+        return stage_class
+    text_fields = " ".join(
+        _field_scalar(fields, key)
+        for key in ("slice_closeout_boundary", "slice_goal", "verification_summary", "carry_forward")
+        if _field_scalar(fields, key)
+    )
+    direct_class = _text_signals_deliverable_class(text_fields, source="roadmap")
+    if direct_class:
+        return direct_class
+    return ""
+
+
+def roadmap_item_work_class(inventory: Inventory, fields: dict[str, object], deliverable_class: str | None = None) -> str:
+    explicit = _normalized_status(_field_scalar(fields, "work_class"))
+    if explicit in IMPLEMENTATION_DELIVERABLE_VALUES:
+        return "implementation"
+    if explicit in NON_IMPLEMENTATION_WORK_VALUES or explicit in NON_IMPLEMENTATION_DELIVERABLE_CLASSES:
+        return "non_implementation"
+    normalized_deliverable = _normalized_status(deliverable_class or roadmap_item_deliverable_class(inventory, fields))
+    if normalized_deliverable in NON_IMPLEMENTATION_DELIVERABLE_CLASSES:
+        return "non_implementation"
+    return "implementation"
+
+
+def roadmap_item_implementation_allowed(fields: dict[str, object], deliverable_class: str | None = None) -> bool:
+    raw = _field_scalar(fields, "implementation_allowed")
+    explicit = _normalized_status(raw)
+    if raw:
+        if explicit in IMPLEMENTATION_ALLOWED_TRUTHY:
+            return True
+        if explicit in IMPLEMENTATION_ALLOWED_FALSEY:
+            return False
+    if roadmap_item_explicitly_promotes_implementation(fields):
+        return True
+    return _normalized_status(deliverable_class) not in NON_IMPLEMENTATION_DELIVERABLE_CLASSES
+
+
+def roadmap_item_promotion_required(fields: dict[str, object], work_class: str | None = None) -> bool:
+    raw = _field_scalar(fields, "promotion_required")
+    explicit = _normalized_status(raw)
+    if raw:
+        if explicit in PROMOTION_REQUIRED_TRUTHY:
+            return True
+        if explicit in PROMOTION_REQUIRED_FALSEY:
+            return False
+    return str(work_class or "").strip().casefold() == "non_implementation"
+
+
+def roadmap_item_explicitly_promotes_implementation(fields: dict[str, object]) -> bool:
+    explicit = _explicit_deliverable_class(fields)
+    if explicit == "implementation":
+        return True
+    stage = _normalized_status(_field_scalar(fields, "stage"))
+    if stage in IMPLEMENTATION_STAGE_VALUES:
+        return True
+    for field in IMPLEMENTATION_PROMOTION_FIELDS:
+        value = _normalized_status(_field_scalar(fields, field))
+        if value in IMPLEMENTATION_PROMOTION_TRUTHY:
+            return True
+    return False
+
+
 def roadmap_items_for_diagnostics(inventory: Inventory) -> tuple[dict[str, RoadmapItem], list[Finding]]:
     target_path = inventory.root / ROADMAP_REL
     if not target_path.is_file():
@@ -594,6 +778,55 @@ def roadmap_human_review_gate_findings(
     except OSError:
         return []
 
+    return _roadmap_human_review_gate_findings_from_text(inventory, text, item_ids=item_ids)
+
+
+def roadmap_batch_slice_gate_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...],
+    *,
+    route: str,
+    source: str,
+    apply: bool = False,
+) -> list[Finding]:
+    ids = tuple(_dedupe_nonempty(_normalized_item_id(item_id) for item_id in item_ids))
+    if inventory.root_kind != "live_operating_root" or len(ids) <= 1:
+        return []
+
+    markers = _roadmap_batch_authorization_markers(inventory, ids)
+    prefix = "" if apply else "would "
+    if markers:
+        return [
+            Finding(
+                "info",
+                f"{route}-batch-slice-authorized",
+                (
+                    f"{prefix}cover multiple roadmap items {list(ids)!r}; explicit reviewed bundle/human-gate "
+                    f"marker(s) are present: {', '.join(markers)}"
+                ),
+                source,
+            )
+        ]
+    return [
+        Finding(
+            "warn",
+            f"{route}-batch-slice-gate",
+            (
+                f"{prefix}cover multiple roadmap items {list(ids)!r} through one {route} route without explicit "
+                "reviewed bundle or human-gate evidence; use --only-requested-item for one-slice plan work, "
+                "or record bundle_authorization/reviewed_bundle/human_gate_required before intentional batching"
+            ),
+            source,
+        )
+    ]
+
+
+def _roadmap_human_review_gate_findings_from_text(
+    inventory: Inventory,
+    text: str,
+    *,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
     parse_result = _parse_roadmap_items_for_sync(text)
     if parse_result[1]:
         return []
@@ -610,27 +843,40 @@ def roadmap_human_review_gate_findings(
             continue
 
         markers = tuple(field for field in HUMAN_REVIEW_GATE_FIELDS if _human_review_gate_enabled(item.fields.get(field)))
-        if not markers:
-            continue
-        findings.append(
-            Finding(
-                "warn",
-                "roadmap-research-human-gate",
-                (
-                    f"roadmap item {item_id!r} declares needs-human-review research marker(s): {', '.join(markers)}; "
-                    "pause autonomous implementation, draft the external research request manually outside MyLittleHarness, "
-                    "then `research-import`/`research-distill` or an explicit roadmap update before opening or continuing implementation"
-                ),
-                ROADMAP_REL,
-                item.start + 1,
+        if markers:
+            findings.append(
+                Finding(
+                    "warn",
+                    "roadmap-research-human-gate",
+                    (
+                        f"roadmap item {item_id!r} declares needs-human-review research marker(s): {', '.join(markers)}; "
+                        "pause autonomous implementation, draft the external research request manually outside MyLittleHarness, "
+                        "then `research-import`/`research-distill` or an explicit roadmap update before opening or continuing implementation"
+                    ),
+                    ROADMAP_REL,
+                    item.start + 1,
+                )
             )
-        )
+        high_blast_marker = _roadmap_high_blast_gate_marker(item.fields)
+        if high_blast_marker:
+            findings.append(
+                Finding(
+                    "warn",
+                    "roadmap-high-blast-human-gate",
+                    (
+                        f"roadmap item {item_id!r} declares high-blast promotion marker {high_blast_marker}; "
+                        "pause autonomous promotion or implementation until explicit human acceptance is repo-visible"
+                    ),
+                    ROADMAP_REL,
+                    item.start + 1,
+                )
+            )
     if findings:
         findings.append(
             Finding(
                 "info",
                 "roadmap-research-human-gate-boundary",
-                "research human-gate diagnostics are read-only and cannot call a model, import research, block via hidden state, move lifecycle, archive, stage, commit, or mutate roadmap status",
+                "research/high-blast human-gate diagnostics are read-only and cannot call a model, import research, block via hidden state, move lifecycle, archive, stage, commit, or mutate roadmap status",
                 ROADMAP_REL,
             )
         )
@@ -945,6 +1191,8 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
         _field_scalar(primary_fields, "slice_closeout_boundary") or "explicit-closeout-required",
     )
     domain_context = slice_goal or execution_slice or primary.title or normalized_item_id
+    deliverable_class = roadmap_item_deliverable_class(inventory, primary_fields) or "implementation"
+    work_class = roadmap_item_work_class(inventory, primary_fields, deliverable_class)
     return RoadmapSliceContract(
         primary_roadmap_item=normalized_item_id,
         execution_slice=execution_slice,
@@ -958,6 +1206,10 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
         source_research=_first_value_from_items(covered_items or [primary], "source_research"),
         related_specs=tuple(_dedupe_nonempty(_values_from_items(covered_items or [primary], "related_specs"))),
         related_incubation=_first_value_from_items([primary], RELATED_INCUBATION_FIELD),
+        work_class=work_class,
+        deliverable_class=deliverable_class,
+        implementation_allowed=roadmap_item_implementation_allowed(primary_fields, deliverable_class),
+        promotion_required=roadmap_item_promotion_required(primary_fields, work_class),
     )
 
 
@@ -1110,6 +1362,7 @@ def roadmap_dry_run_findings(inventory: Inventory, request: RoadmapRequest) -> l
     findings.append(Finding("info", "roadmap-action", f"requested action: {request.action or '<empty>'}; item_id: {request.item_id or '<empty>'}", ROADMAP_REL))
     if plan:
         findings.extend(_plan_findings(inventory, plan, apply=False))
+        findings.extend(_roadmap_human_review_gate_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)))
         findings.extend(_roadmap_acceptance_readiness_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)))
         findings.extend(_route_write_findings(inventory, plan, apply=False))
     if errors:
@@ -1152,6 +1405,7 @@ def roadmap_apply_findings(
             _root_posture_finding(inventory),
             Finding("info", "roadmap-noop", "roadmap item already matches requested fields; no file was rewritten", plan.target_rel),
             *_plan_findings(inventory, plan, apply=True),
+            *_roadmap_human_review_gate_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)),
             *_roadmap_acceptance_readiness_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)),
             *_route_write_findings(inventory, plan, apply=True),
             *_boundary_findings(),
@@ -1197,6 +1451,7 @@ def roadmap_apply_findings(
         _root_posture_finding(inventory),
         Finding("info", "roadmap-written", f"updated roadmap item {plan.item_id!r} with action {plan.action!r}", plan.target_rel),
         *_plan_findings(inventory, plan, apply=True),
+        *_roadmap_human_review_gate_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)),
         *_roadmap_acceptance_readiness_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)),
         *route_write_findings("roadmap-route-write", route_writes, apply=True),
         *guard_findings,
@@ -2828,6 +3083,9 @@ def _roadmap_readiness_blockers(
     markers = tuple(field for field in HUMAN_REVIEW_GATE_FIELDS if _human_review_gate_enabled(fields.get(field)))
     if markers:
         blockers.append(f"human review marker(s): {', '.join(markers)}")
+    high_blast_marker = _roadmap_high_blast_gate_marker(fields)
+    if high_blast_marker:
+        blockers.append(f"high-blast human gate marker: {high_blast_marker}")
 
     dependencies = tuple(
         _dedupe_nonempty(
@@ -3252,6 +3510,86 @@ def _implementation_scope_reason(fields: dict[str, object], source_text: str) ->
     return ""
 
 
+def _explicit_deliverable_class(fields: dict[str, object]) -> str:
+    for field in DELIVERABLE_CLASS_FIELDS:
+        value = _normalized_status(_field_scalar(fields, field))
+        if not value:
+            continue
+        if value in IMPLEMENTATION_DELIVERABLE_VALUES:
+            return "implementation"
+        if value in NON_IMPLEMENTATION_DELIVERABLE_CLASSES:
+            return value
+        if value in {"diagnostics", "diagnostic-report", "diagnostic-matrix"}:
+            return "diagnostic"
+        if value in {"research-only", "research-report", "research-synthesis"}:
+            return "research"
+        if value in {"cleanup-only", "cleanup-review"}:
+            return "cleanup"
+        if value in {"review", "fan-in", "fan-in-diagnostic", "fan-in-review-diagnostic"}:
+            return "fan-in-review"
+        if value in {"proof", "verification", "verification-evidence"}:
+            return "evidence"
+        if value in {"proposal-only", "proposed"}:
+            return "proposal"
+        if value in {"audit-only", "audit-proposal", "audit-and-proposal"}:
+            return "audit"
+    return ""
+
+
+def _text_signals_deliverable_class(value: str, *, source: str) -> str:
+    text = str(value or "").strip().casefold().replace("_", "-")
+    if not text:
+        return ""
+    if source == "stage":
+        if "diagnostic" in text or "diagnostics" in text:
+            return "diagnostic"
+        if "research" in text:
+            return "research"
+        if "cleanup" in text:
+            return "cleanup"
+        if "fan-in" in text and "review" in text:
+            return "fan-in-review"
+        if "audit" in text:
+            return "audit"
+        if "proposal" in text or "propose" in text:
+            return "proposal"
+        if "evidence" in text or "proof" in text or "verification" in text:
+            return "evidence"
+        return ""
+    if re.search(r"\bdiagnostic[- ]only\b|\bdiagnostic\s+only\b|\bdiagnostic\s+matrix\b|\bdiagnostic\s+report\b", text):
+        return "diagnostic"
+    if re.search(r"\bresearch[- ]only\b|\bresearch\s+only\b|\bresearch\s+synthesis\b|\bresearch\s+report\b", text):
+        return "research"
+    if re.search(r"\bcleanup[- ]only\b|\bcleanup\s+only\b|\bcleanup\s+review\b", text):
+        return "cleanup"
+    if re.search(r"\bfan[- ]in\s+review\b|\bfan[- ]in\s+diagnostic\b", text):
+        return "fan-in-review"
+    if re.search(r"\baudit(?:\s+and\s+proposal)?\s+only\b", text):
+        return "audit"
+    if re.search(r"\baudit[- ]only\b", text):
+        return "audit"
+    if re.search(r"^\s*audit\b", text):
+        return "audit"
+    if re.search(r"\baudit evidence\b", text):
+        return "audit"
+    if re.search(r"\bproposal[- ]only\b|\bproposal\s+only\b", text):
+        return "proposal"
+    if re.search(r"\bevidence[- ]only\b|\bevidence\s+only\b|\bproof[- ]only\b|\bproof\s+only\b", text):
+        return "evidence"
+    if re.search(r"\bverification evidence\b|\bdurable proof\b", text):
+        return "evidence"
+    return ""
+
+
+def _looks_like_product_implementation_route(value: str) -> bool:
+    route = _normalize_rel(value).casefold()
+    if not route:
+        return False
+    if route.startswith(("src/", "tests/", "apps/", "packages/", "build_backend/")):
+        return True
+    return route in {"pyproject.toml", "uv.lock", "package.json", "pytest.ini", "tox.ini"}
+
+
 def _source_scope_is_recovery_only(value: str) -> bool:
     text = str(value or "").casefold()
     return any(
@@ -3337,6 +3675,62 @@ def _human_review_gate_enabled(value: object) -> bool:
     if normalized in HUMAN_REVIEW_GATE_FALSEY:
         return False
     return normalized in HUMAN_REVIEW_GATE_TRUTHY
+
+
+def _roadmap_high_blast_gate_marker(fields: dict[str, object]) -> str:
+    for field in HIGH_BLAST_GATE_FIELDS:
+        marker = _high_blast_marker_text(field, fields.get(field))
+        if marker:
+            return marker
+    return ""
+
+
+def _high_blast_marker_text(field: str, value: object) -> str:
+    if value in (None, [], ()):
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            marker = _high_blast_marker_text(field, item)
+            if marker:
+                return marker
+        return ""
+    normalized = str(value or "").strip().casefold().replace("_", "-")
+    compact = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    if not compact:
+        return ""
+    if "high-blast" in compact:
+        return f"{field}={compact}"
+    if "fan-in" in compact and "high" in compact:
+        return f"{field}={compact}"
+    if field == "blast_radius" and compact in {"high", "large", "wide"}:
+        return f"{field}={compact}"
+    return ""
+
+
+def _roadmap_batch_authorization_markers(inventory: Inventory, item_ids: tuple[str, ...]) -> tuple[str, ...]:
+    markers: list[str] = []
+    for item_id in item_ids:
+        fields = roadmap_item_fields(inventory, item_id)
+        if not fields:
+            continue
+        for field in BATCH_AUTHORIZATION_FIELDS:
+            if _batch_authorization_enabled(fields.get(field)):
+                markers.append(f"{item_id}:{field}")
+        high_blast_marker = _roadmap_high_blast_gate_marker(fields)
+        if high_blast_marker:
+            markers.append(f"{item_id}:{high_blast_marker}")
+    return tuple(_dedupe_nonempty(markers))
+
+
+def _batch_authorization_enabled(value: object) -> bool:
+    if value in (None, [], ()):
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_batch_authorization_enabled(item) for item in value)
+    normalized = str(value or "").strip().casefold().replace("_", "-")
+    if normalized in HUMAN_REVIEW_GATE_FALSEY:
+        return False
+    return normalized in BATCH_AUTHORIZATION_TRUTHY
 
 
 def _values_from_items(items: list[RoadmapItem], key: str) -> list[str]:

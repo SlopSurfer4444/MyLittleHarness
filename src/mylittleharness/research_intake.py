@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, apply_file_transaction
+from .evidence import lifecycle_mutation_provenance_findings
 from .inventory import Inventory
 from .models import Finding
 from .reporting import RouteWriteEvidence, route_write_findings
@@ -85,6 +86,7 @@ def research_import_dry_run_findings(inventory: Inventory, request: ResearchImpo
     findings = [
         Finding("info", "research-import-dry-run", "research import proposal only; no files were written"),
         _root_posture_finding(inventory),
+        *lifecycle_mutation_provenance_findings(inventory, "research-import-lifecycle-provenance"),
     ]
     errors = _research_import_preflight_errors(inventory, request, target)
     if target:
@@ -133,6 +135,7 @@ def research_import_apply_findings(inventory: Inventory, request: ResearchImport
     findings = [
         Finding("info", "research-import-apply", "research import apply started"),
         _root_posture_finding(inventory),
+        *lifecycle_mutation_provenance_findings(inventory, "research-import-lifecycle-provenance"),
         *_target_findings(target, apply=True),
         *render_findings,
         Finding("info", "research-import-written", "created imported research artifact", target.rel_path),

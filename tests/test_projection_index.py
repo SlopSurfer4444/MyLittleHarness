@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness.cli import main
-from mylittleharness.projection_artifacts import ARTIFACT_DIR_REL
+from mylittleharness.projection_artifacts import ARTIFACT_DIR_REL, INDEX_DIRTY_MARKER_NAME
 from mylittleharness.projection_index import INDEX_NAME, INDEX_REL_PATH, INDEX_SCHEMA_VERSION
 from tests.test_cli import make_operating_root, make_root
 
@@ -55,6 +55,7 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertEqual("true", metadata["fts5_available"])
             self.assertEqual("true", metadata["bm25_available"])
             self.assertEqual("mylittleharness-sqlite-fts-bm25-projection", metadata["index_kind"])
+            self.assertIn("projection-index-atomic-refresh", output.getvalue())
             self.assertTrue({"path_rows", "path_fts"}.issubset(table_names))
             self.assertGreater(source_count, 0)
             self.assertGreater(path_count, 0)
@@ -193,6 +194,45 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertTrue(directory_sidecar.is_dir())
             self.assertIn("projection-index-delete-skipped", rendered)
             self.assertIn("directory-shaped SQLite index sidecar", rendered)
+
+    def test_projection_index_refresh_failure_keeps_old_good_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+            index_path = root / INDEX_REL_PATH
+            before_bytes = index_path.read_bytes()
+            (root / "README.md").write_text("# Changed\nMyLittleHarness changed after old-good index.\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with patch("mylittleharness.projection_index._write_fts_rows", side_effect=sqlite3.Error("boom")), redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_bytes, index_path.read_bytes())
+            self.assertIn("projection-index-build-failed", output.getvalue())
+            self.assertIn("old-good index", output.getvalue())
+
+    def test_projection_index_publish_failure_keeps_old_good_index_and_dirty_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+            index_path = root / INDEX_REL_PATH
+            dirty_path = root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME
+            dirty_path.write_text('{"marker_kind":"mylittleharness-projection-cache-dirty"}\n', encoding="utf-8")
+            before_bytes = index_path.read_bytes()
+            (root / "README.md").write_text("# Changed\nMyLittleHarness changed before publish failure.\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with patch.object(Path, "replace", side_effect=OSError("publish boom")), redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_bytes, index_path.read_bytes())
+            self.assertTrue(dirty_path.is_file())
+            self.assertIn("projection-index-build-failed", output.getvalue())
+            self.assertIn("old-good index", output.getvalue())
 
     def test_full_text_search_auto_refreshes_source_verified_index_and_exact_search_survives_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

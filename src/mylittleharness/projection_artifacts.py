@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
 from .models import Finding
 from .projection import Projection, build_projection
@@ -54,19 +55,39 @@ def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
 
     projection_dir = artifact_dir(inventory.root)
     operation_findings = write_projection_cache_operation_marker(inventory.root, "projection-artifacts-build")
+    cleanup_warnings: tuple[str, ...] = ()
     try:
         projection = build_projection(inventory)
         payloads = artifact_payloads(inventory, projection)
-        for name in ARTIFACT_NAMES:
-            path = projection_dir / name
-            _write_json(path, payloads[name])
+        cleanup_warnings = _write_json_payloads_transactionally(projection_dir, payloads)
         clear_projection_cache_dirty_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME)
+    except (OSError, FileTransactionError) as exc:
+        return [
+            *operation_findings,
+            Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding(
+                "warn",
+                "projection-artifact-refresh-degraded",
+                (
+                    "projection artifact refresh failed before publishing a partial cache; "
+                    f"old-good artifacts, if present, remain the only generated artifact input: {exc}; "
+                    f"{PROJECTION_REBUILD_NEXT_SAFE_COMMAND}"
+                ),
+                ARTIFACT_DIR_REL,
+            ),
+        ]
     finally:
         clear_projection_cache_operation_marker(inventory.root)
 
-    return [
+    result = [
         *operation_findings,
         Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+        Finding(
+            "info",
+            "projection-artifact-atomic-refresh",
+            "published projection artifacts through a rollback-capable file transaction; readers keep old-good cache on failed refresh",
+            ARTIFACT_DIR_REL,
+        ),
         Finding("info", "projection-artifact-build", f"wrote {len(ARTIFACT_NAMES)} rebuildable projection artifacts"),
         Finding(
             "info",
@@ -78,13 +99,24 @@ def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
             ),
         ),
     ]
+    for warning in cleanup_warnings:
+        result.append(Finding("warn", "projection-artifact-backup-cleanup", warning, ARTIFACT_DIR_REL))
+    return result
 
 
 def rebuild_projection_artifacts(inventory: Inventory) -> list[Finding]:
-    findings = delete_projection_artifacts(inventory)
+    findings = _boundary_preflight(inventory.root, create=True)
     if _has_errors(findings):
         return findings
-    return findings + build_projection_artifacts(inventory)
+    return [
+        Finding(
+            "info",
+            "projection-artifact-rebuild",
+            "rebuild uses the same old-good transactional publish path as build; stale artifacts are replaced only after a complete payload is ready",
+            ARTIFACT_DIR_REL,
+        ),
+        *build_projection_artifacts(inventory),
+    ]
 
 
 def delete_projection_artifacts(inventory: Inventory) -> list[Finding]:
@@ -344,6 +376,43 @@ def projection_cache_dirty_marker_findings(root: Path, marker_name: str, code: s
             marker_rel,
         )
     ]
+
+
+def projection_cache_posture_payload(
+    artifact_findings: list[Finding],
+    index_findings: list[Finding],
+) -> dict[str, object]:
+    artifact = _cache_component_posture(
+        "artifacts",
+        artifact_findings,
+        current_code="projection-artifact-current",
+        missing_code="projection-artifact-missing",
+    )
+    index = _cache_component_posture(
+        "sqlite_index",
+        index_findings,
+        current_code="projection-index-current",
+        missing_code="projection-index-missing",
+    )
+    return {
+        "schema": "mylittleharness.projection-cache-posture.v1",
+        "read_only": True,
+        "authority": "repo-visible source files and in-memory projection remain authoritative",
+        "refreshable_by_adapter": False,
+        "components": {
+            "artifacts": artifact,
+            "sqlite_index": index,
+        },
+        "source_refs": [
+            ARTIFACT_DIR_REL,
+            f"{ARTIFACT_DIR_REL}/manifest.json",
+            f"{ARTIFACT_DIR_REL}/search-index.sqlite3",
+            f"{ARTIFACT_DIR_REL}/{ARTIFACT_DIRTY_MARKER_NAME}",
+            f"{ARTIFACT_DIR_REL}/{INDEX_DIRTY_MARKER_NAME}",
+            f"{ARTIFACT_DIR_REL}/{CACHE_OPERATION_MARKER_NAME}",
+        ],
+        "recommended_refresh_commands": _cache_refresh_commands(artifact, index),
+    }
 
 
 def projection_cache_operation_marker_findings(root: Path) -> list[Finding]:
@@ -935,11 +1004,32 @@ def _replace_with_retry(source: Path, target: Path) -> None:
         raise last_error
 
 
+def _write_json_payloads_transactionally(projection_dir: Path, payloads: dict[str, Any]) -> tuple[str, ...]:
+    nonce = uuid4().hex
+    operations = []
+    for name in ARTIFACT_NAMES:
+        path = projection_dir / name
+        operations.append(
+            AtomicFileWrite(
+                path,
+                path.with_name(f".{name}.{nonce}.tmp"),
+                _json_text(payloads[name]),
+                path.with_name(f".{name}.{nonce}.bak"),
+            )
+        )
+    return apply_file_transaction(operations)
+
+
+def _json_text(payload: Any) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
 def _dirty_marker_payload(command: str, paths: tuple[str, ...]) -> dict[str, Any]:
     return {
         "schema_version": DIRTY_MARKER_SCHEMA_VERSION,
         "marker_kind": "mylittleharness-projection-cache-dirty",
         "command": command,
+        "dirty_since_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "changed_paths": list(paths),
         "authority": "repo-visible source files remain authoritative; this marker only invalidates disposable generated navigation cache",
     }
@@ -970,3 +1060,71 @@ def _normalize_path_text(value: str) -> str:
 
 def _has_errors(findings: list[Finding]) -> bool:
     return any(finding.severity == "error" for finding in findings)
+
+
+def _cache_component_posture(
+    component: str,
+    findings: list[Finding],
+    *,
+    current_code: str,
+    missing_code: str,
+) -> dict[str, object]:
+    codes = [finding.code for finding in findings]
+    degraded = [
+        finding
+        for finding in findings
+        if finding.severity in {"warn", "error"} or finding.code == missing_code
+    ]
+    if current_code in codes and not degraded:
+        status = "current"
+    elif "projection-cache-operation-in-progress" in codes:
+        status = "updating-or-interrupted"
+    elif missing_code in codes:
+        status = "missing"
+    elif any(finding.severity == "error" for finding in degraded):
+        status = "error"
+    elif degraded:
+        status = "stale-or-degraded"
+    else:
+        status = "current"
+    sample = degraded[:3] if degraded else [finding for finding in findings if finding.code == current_code][:1]
+    return {
+        "component": component,
+        "status": status,
+        "stale_reason": sample[0].code if sample else "none",
+        "finding_codes": _unique_codes(codes),
+        "sample_findings": [
+            {
+                "severity": finding.severity,
+                "code": finding.code,
+                "message": finding.message,
+                **({"source": finding.source} if finding.source else {}),
+            }
+            for finding in sample
+        ],
+    }
+
+
+def _cache_refresh_commands(artifact: dict[str, object], index: dict[str, object]) -> list[str]:
+    commands: list[str] = []
+    artifact_status = str(artifact.get("status") or "")
+    index_status = str(index.get("status") or "")
+    if artifact_status != "current" and index_status != "current":
+        commands.append("mylittleharness --root <root> projection --rebuild --target all")
+    elif artifact_status != "current":
+        commands.append("mylittleharness --root <root> projection --rebuild --target artifacts")
+    elif index_status != "current":
+        commands.append("mylittleharness --root <root> projection --rebuild --target index")
+    commands.append("mylittleharness --root <root> projection --inspect --target all")
+    return commands
+
+
+def _unique_codes(codes: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        if code in seen:
+            continue
+        seen.add(code)
+        unique.append(code)
+    return unique

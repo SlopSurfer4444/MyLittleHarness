@@ -45,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manifest.add_argument("--inspect", action="store_true", required=True, help="Inspect the route and role manifest without writing files.")
     manifest.add_argument("--json", action="store_true", help="Emit the route and role manifest as structured JSON.")
+    dashboard = subparsers.add_parser(
+        "dashboard",
+        help=argparse.SUPPRESS,
+        description="Advanced diagnostic: inspect the read-only local coordination dashboard without starting a runtime.",
+    )
+    dashboard.add_argument("--inspect", action="store_true", required=True, help="Inspect dashboard data without writing files or starting a server.")
+    dashboard.add_argument("--json", action="store_true", help="Emit the dashboard cockpit payload as structured JSON.")
     suggest = subparsers.add_parser(
         "suggest",
         help=argparse.SUPPRESS,
@@ -78,13 +85,22 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--role", dest="agent_role", help="Agent role that produced the work, such as coder, reviewer, or verifier.")
     evidence.add_argument("--actor", help="Human, agent, or tool actor label.")
     evidence.add_argument("--task", help="One-line task summary for the run record.")
+    evidence.add_argument("--assigned-scope", dest="assigned_scope", help="Assigned scope or slice this run was responsible for.")
+    evidence.add_argument("--runtime", help="Runtime or adapter surface used for the run, such as local-shell, codex, or mlhd.")
+    evidence.add_argument("--worktree-id", dest="worktree_id", help="Worktree or checkout identity used by the run.")
     evidence.add_argument("--status", choices=("succeeded", "failed", "blocked", "skipped", "needs-refinement", "needs-human-review"), help="Run outcome status.")
     evidence.add_argument("--stop-reason", dest="stop_reason", help="Why the run stopped.")
     evidence.add_argument("--attempt-budget", dest="attempt_budget", help="Attempt budget posture, such as 1/3 or exhausted.")
     evidence.add_argument("--input-ref", dest="input_refs", action="append", default=[], help="Root-relative input route or source path. May be repeated.")
     evidence.add_argument("--output-ref", dest="output_refs", action="append", default=[], help="Root-relative output evidence or source path. May be repeated.")
     evidence.add_argument("--claimed-path", dest="claimed_paths", action="append", default=[], help="Root-relative path claimed or changed by the run. May be repeated.")
+    evidence.add_argument("--changed-file", dest="changed_files", action="append", default=[], help="Root-relative file changed by the run. May be repeated.")
     evidence.add_argument("--command", dest="commands", action="append", default=[], help="Command run or intentionally recorded by the agent. May be repeated.")
+    evidence.add_argument("--verification-ref", dest="verification_refs", action="append", default=[], help="Root-relative verification evidence path. May be repeated.")
+    evidence.add_argument("--docs-decision", dest="docs_decision", choices=("updated", "not-needed", "uncertain"), help="Docs decision observed by the run.")
+    evidence.add_argument("--residual-risk", dest="residual_risk", help="Residual risk summary for the run.")
+    evidence.add_argument("--handoff-ref", dest="handoff_refs", action="append", default=[], help="Root-relative handoff packet reference. May be repeated.")
+    evidence.add_argument("--claim-ref", dest="claim_refs", action="append", default=[], help="Root-relative work claim reference. May be repeated.")
     evidence.add_argument("--repeated-failure-signature", dest="repeated_failure_signature", help="Optional repeated failure or no-progress loop signature.")
     evidence.add_argument("--provider", help="Optional model/provider provenance.")
     evidence.add_argument("--model-id", dest="model_id", help="Optional model identifier provenance.")
@@ -98,7 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     claim_mode.add_argument("--dry-run", action="store_true", help="Preview a work claim create/release without writing files.")
     claim_mode.add_argument("--apply", action="store_true", help="Write or release one repo-visible work claim in an eligible live operating root.")
     claim_mode.add_argument("--status", action="store_true", help="Inspect work claim records without writing files.")
-    claim.add_argument("--action", choices=("create", "release"), default="create", help="Work claim mutation action. Defaults to create.")
+    claim.add_argument("--json", action="store_true", help="Emit a structured JSON report.")
+    claim.add_argument("--action", choices=("create", "extend", "release"), default="create", help="Work claim mutation action. Defaults to create.")
     claim.add_argument("--claim-id", dest="claim_id", help="Stable claim id used as the JSON filename under project/verification/work-claims/.")
     claim.add_argument("--claim-kind", dest="claim_kind", help="Claim kind such as read, write, lifecycle, route, path, port, database, or resource.")
     claim.add_argument("--owner-role", dest="owner_role", help="Role that owns the claim, such as coder or verifier.")
@@ -110,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("--claimed-path", dest="claimed_paths", action="append", default=[], help="Claimed root-relative path. May be repeated.")
     claim.add_argument("--claimed-resource", dest="claimed_resources", action="append", default=[], help="Claimed resource such as port:3000. May be repeated.")
     claim.add_argument("--lease-expires-at", dest="lease_expires_at", help="Optional ISO UTC timestamp after which an active claim reports stale.")
+    claim.add_argument("--ttl", dest="ttl", help="Optional lease duration such as 900s, 30m, 2h, or 1d.")
     claim.add_argument("--release-condition", dest="release_condition", help="Release condition or release note.")
     handoff = subparsers.add_parser(
         "handoff",
@@ -119,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_mode = handoff.add_mutually_exclusive_group(required=True)
     handoff_mode.add_argument("--dry-run", action="store_true", help="Preview a handoff packet without writing files.")
     handoff_mode.add_argument("--apply", action="store_true", help="Write one repo-visible handoff packet in an eligible live operating root.")
+    handoff_mode.add_argument("--status", action="store_true", help="Inspect handoff packets without writing files.")
+    handoff.add_argument("--action", choices=("create", "accept"), default="create", help="Handoff mutation action. Defaults to create.")
     handoff.add_argument("--handoff-id", dest="handoff_id", help="Stable handoff id used as the JSON filename under project/verification/handoffs/.")
     handoff.add_argument("--worker-id", dest="worker_id", help="Worker or actor receiving the handoff.")
     handoff.add_argument("--role-id", dest="role_id", help="Role profile id for the receiver.")
@@ -135,6 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--evidence-ref", dest="evidence_refs", action="append", default=[], help="Root-relative evidence reference. May be repeated.")
     handoff.add_argument("--approval-packet-ref", dest="approval_packet_refs", action="append", default=[], help="Root-relative approval packet reference. May be repeated.")
     handoff.add_argument("--claim-ref", dest="claim_refs", action="append", default=[], help="Root-relative work claim reference. May be repeated.")
+    handoff.add_argument("--accepted-by", dest="accepted_by", help="Actor accepting an existing handoff packet.")
+    handoff.add_argument("--acceptance-note", dest="acceptance_note", help="Optional acceptance note for --action accept.")
     approval_packet = subparsers.add_parser(
         "approval-packet",
         help=argparse.SUPPRESS,
@@ -265,6 +287,17 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--update-active", action="store_true", help="Replace the current default active plan when project-state already has plan_status active.")
     plan.add_argument("--roadmap-item", dest="roadmap_item", help="Optional existing roadmap item id to link to the active plan.")
     plan.add_argument("--only-requested-item", action="store_true", help="Limit roadmap sync and slice frontmatter to only --roadmap-item.")
+    plan_cancel = subparsers.add_parser(
+        "plan-cancel",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: cancel accidental active-plan activation without closeout or archive authority.",
+    )
+    plan_cancel_mode = plan_cancel.add_mutually_exclusive_group(required=True)
+    plan_cancel_mode.add_argument("--dry-run", action="store_true", help="Preview active-plan activation cancellation without writing files.")
+    plan_cancel_mode.add_argument("--apply", action="store_true", help="Clear active-plan lifecycle pointers and remove the active plan route in an eligible live operating root.")
+    plan_cancel.add_argument("--roadmap-item", dest="roadmap_item", help="Optional roadmap item to restore to accepted while clearing active related_plan metadata.")
+    plan_cancel.add_argument("--keep-plan", action="store_true", help="Keep project/implementation-plan.md while clearing lifecycle activation, for manual review cases.")
+    plan_cancel.add_argument("--source-hash", dest="source_hash", help="Full sha256 activation source hash reported by plan-cancel --dry-run; required for apply.")
     writeback = subparsers.add_parser(
         "writeback",
         help=argparse.SUPPRESS,
@@ -436,6 +469,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("git-pre-commit",),
         help="Print a warning-only local Git pre-commit hook template to stdout without installing it.",
     )
+    preflight.add_argument("--orchestrator-workspace", dest="orchestrator_workspace", help="Read-only disposable workspace preflight for external orchestrator launches.")
+    preflight.add_argument("--product-root", dest="product_root", help="Optional configured product source root used by --orchestrator-workspace live-root exclusion checks.")
+    hooks = subparsers.add_parser(
+        "hooks",
+        help=argparse.SUPPRESS,
+        description="Advanced diagnostic: inspect, install, or run warning-only MyLittleHarness hook shims.",
+    )
+    hooks_mode = hooks.add_mutually_exclusive_group(required=True)
+    hooks_mode.add_argument("--doctor", action="store_true", help="Inspect hook posture and supported events without writing files.")
+    hooks_mode.add_argument("--dry-run", action="store_true", help="Preview explicit hook shim installation without writing files.")
+    hooks_mode.add_argument("--apply", action="store_true", help="Install the selected warning-only hook shim after dry-run review.")
+    hooks_mode.add_argument("--run", choices=("git-pre-commit", "agent-status"), help="Run one hook event as a foreground read-only adapter.")
+    hooks.add_argument("--hook", choices=("git-pre-commit",), default="git-pre-commit", help="Hook shim to install. Defaults to git-pre-commit.")
+    hooks.add_argument("--force", action="store_true", help="Replace an existing non-MLH hook only after explicit review.")
+    hooks.add_argument("hook_args", nargs=argparse.REMAINDER, help="Optional raw hook arguments after --run.")
     tasks = subparsers.add_parser(
         "tasks",
         help=argparse.SUPPRESS,
@@ -521,14 +569,17 @@ def build_parser() -> argparse.ArgumentParser:
         "tasks",
         "bootstrap",
         "preflight",
+        "hooks",
         "semantic",
         "intelligence",
         "suggest",
         "manifest",
+        "dashboard",
         "intake",
         "incubate",
         "incubation-reconcile",
         "plan",
+        "plan-cancel",
         "writeback",
         "transition",
         "memory-hygiene",

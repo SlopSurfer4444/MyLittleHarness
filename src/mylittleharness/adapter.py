@@ -12,7 +12,7 @@ from .approval_packets import APPROVAL_PACKET_SCHEMA, APPROVAL_PACKETS_DIR_REL
 from .inventory import Inventory, RootLoadError, load_inventory
 from .models import Finding
 from .projection import Projection, build_projection
-from .projection_artifacts import inspect_projection_artifacts
+from .projection_artifacts import inspect_projection_artifacts, projection_cache_posture_payload
 from .projection_index import inspect_projection_index, source_verified_full_text_results
 
 
@@ -319,6 +319,9 @@ def mcp_read_projection_payload(
     runtime = _adapter_runtime_payload(inventory, root_selection)
     sections = mcp_read_projection_sections(inventory, default_root=default_root, requested_root=requested_root)
     findings = [finding for _, section_findings in sections for finding in section_findings]
+    projection = build_projection(inventory)
+    artifact_findings = inspect_projection_artifacts(inventory, projection)
+    index_findings = inspect_projection_index(inventory, projection)
     return {
         "adapter": {
             "id": MCP_READ_PROJECTION_TARGET,
@@ -337,6 +340,7 @@ def mcp_read_projection_payload(
         "tools": list(MCP_TOOL_NAMES),
         "runtime": runtime,
         "rootSelection": root_selection,
+        "cachePosture": projection_cache_posture_payload(artifact_findings, index_findings),
         "status": _result_for(findings),
         "sources": inventory.sources_for_report(),
         "sections": [
@@ -590,14 +594,26 @@ def _source_findings(projection: Projection) -> list[Finding]:
 
 
 def _generated_input_findings(inventory: Inventory, projection: Projection) -> list[Finding]:
+    artifact_findings = inspect_projection_artifacts(inventory, projection)
+    index_findings = inspect_projection_index(inventory, projection)
+    posture = projection_cache_posture_payload(artifact_findings, index_findings)
+    refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
     return [
         Finding(
             "info",
             "adapter-generated-input-boundary",
             "generated projection artifacts and SQLite indexes are optional adapter inputs; direct repo files and the current in-memory projection remain authoritative",
         ),
-        _generated_posture("artifacts", inspect_projection_artifacts(inventory, projection)),
-        _generated_posture("index", inspect_projection_index(inventory, projection)),
+        Finding(
+            "info",
+            "adapter-cache-posture",
+            (
+                "cache_posture schema=mylittleharness.projection-cache-posture.v1; "
+                f"source_refs={len(posture['source_refs'])}; refresh_by_adapter=false; next_safe={refresh_commands}"
+            ),
+        ),
+        _generated_posture("artifacts", artifact_findings),
+        _generated_posture("index", index_findings),
     ]
 
 
@@ -865,13 +881,27 @@ def _read_projection_tool_definition() -> dict[str, object]:
                 "activation": {"type": "object"},
                 "root": {"type": "object"},
                 "tools": {"type": "array"},
+                "runtime": {"type": "object"},
                 "rootSelection": {"type": "object"},
+                "cachePosture": {"type": "object"},
                 "status": {"type": "string"},
                 "sources": {"type": "array"},
                 "sections": {"type": "array"},
                 "boundary": {"type": "object"},
             },
-            "required": ["adapter", "activation", "root", "status", "sources", "sections", "boundary"],
+            "required": [
+                "adapter",
+                "activation",
+                "root",
+                "tools",
+                "runtime",
+                "rootSelection",
+                "cachePosture",
+                "status",
+                "sources",
+                "sections",
+                "boundary",
+            ],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
         "execution": {"taskSupport": "forbidden"},

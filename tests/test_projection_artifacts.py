@@ -7,13 +7,23 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from mylittleharness.atomic_files import FileTransactionError
 from mylittleharness.cli import main
-from mylittleharness.projection_artifacts import ARTIFACT_DIR_REL, ARTIFACT_NAMES, ARTIFACT_SCHEMA_VERSION
-from tests.test_cli import make_root, snapshot_tree
+from mylittleharness.projection_artifacts import (
+    ARTIFACT_DIR_REL,
+    ARTIFACT_DIRTY_MARKER_NAME,
+    ARTIFACT_NAMES,
+    ARTIFACT_SCHEMA_VERSION,
+    CACHE_OPERATION_MARKER_NAME,
+    INDEX_DIRTY_MARKER_NAME,
+)
+from mylittleharness.projection_index import INDEX_REL_PATH
+from tests.test_cli import make_root, snapshot_tree, snapshot_tree_bytes
 
 
 class ProjectionArtifactTests(unittest.TestCase):
@@ -51,6 +61,25 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertNotIn("plan_status", combined)
             self.assertNotIn("active_plan", combined)
             self.assertIn("projection-artifact-build", output.getvalue())
+            self.assertIn("projection-artifact-atomic-refresh", output.getvalue())
+
+    def test_projection_artifact_refresh_failure_keeps_old_good_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build"]), 0)
+            manifest_path = root / ARTIFACT_DIR_REL / "manifest.json"
+            before = manifest_path.read_text(encoding="utf-8")
+            (root / "README.md").write_text("# Changed\nSee `.agents/docmap.yaml`.\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with patch("mylittleharness.projection_artifacts.apply_file_transaction", side_effect=FileTransactionError("boom")), redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--build"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, manifest_path.read_text(encoding="utf-8"))
+            self.assertIn("projection-artifact-refresh-degraded", output.getvalue())
+            self.assertIn("old-good artifacts", output.getvalue())
 
     def test_projection_inspect_reports_missing_artifacts_as_rebuildable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,6 +274,88 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertIn("projection-exact-search-source-only", rendered)
             self.assertIn("search-match", rendered)
             self.assertFalse((root / ARTIFACT_DIR_REL).exists())
+
+    def test_projection_warm_cache_target_all_refreshes_disposable_cache_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            before_authority = {
+                rel_path: content
+                for rel_path, content in snapshot_tree_bytes(root).items()
+                if rel_path != ".mylittleharness" and not rel_path.startswith(".mylittleharness/")
+            }
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--warm-cache", "--target", "all"])
+
+            after_authority = {
+                rel_path: content
+                for rel_path, content in snapshot_tree_bytes(root).items()
+                if rel_path != ".mylittleharness" and not rel_path.startswith(".mylittleharness/")
+            }
+            rendered = output.getvalue()
+            artifact_dir = root / ARTIFACT_DIR_REL
+            self.assertEqual(code, 0)
+            self.assertEqual(before_authority, after_authority)
+            for name in ARTIFACT_NAMES:
+                self.assertTrue((artifact_dir / name).is_file(), name)
+            self.assertTrue((root / INDEX_REL_PATH).is_file())
+            self.assertIn("projection --warm-cache --target all", rendered)
+            self.assertIn("projection-artifact-warm-cache", rendered)
+            self.assertIn("projection-index-warm-cache", rendered)
+            self.assertIn("cannot affect lifecycle authority", rendered)
+
+    def test_dashboard_projection_pulse_reports_dirty_and_operation_markers_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=True, mirrors=True)
+            projection_dir = root / ARTIFACT_DIR_REL
+            projection_dir.mkdir(parents=True)
+            dirty_payload = {
+                "schema_version": 1,
+                "marker_kind": "mylittleharness-projection-cache-dirty",
+                "command": "plan --apply",
+                "dirty_since_utc": "2026-05-12T01:02:03Z",
+                "changed_paths": ["project/implementation-plan.md"],
+                "authority": "repo-visible source files remain authoritative",
+            }
+            (projection_dir / ARTIFACT_DIRTY_MARKER_NAME).write_text(json.dumps(dirty_payload), encoding="utf-8")
+            (projection_dir / INDEX_DIRTY_MARKER_NAME).write_text(json.dumps(dirty_payload), encoding="utf-8")
+            before = snapshot_tree(root)
+
+            warmable_output = io.StringIO()
+            with redirect_stdout(warmable_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree(root))
+            warmable_payload = json.loads(warmable_output.getvalue())
+            pulse = warmable_payload["mlhd"]["projection_pulse"]
+            self.assertEqual("mylittleharness.projection-pulse.v1", pulse["schema"])
+            self.assertEqual("warmable", pulse["status"])
+            self.assertTrue(pulse["dirty"])
+            self.assertEqual("2026-05-12T01:02:03Z", pulse["dirty_since_utc"])
+            self.assertEqual(2, pulse["dirty_marker_count"])
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", pulse["warm_cache_command"])
+            self.assertIn("lifecycle routes remain authoritative", pulse["authority"])
+
+            operation_payload = {
+                "schema_version": 1,
+                "marker_kind": "mylittleharness-projection-cache-operation",
+                "operation": "projection-index-build",
+                "created_at_utc": "2026-05-12T02:03:04Z",
+                "authority": "repo-visible source files remain authoritative",
+            }
+            (projection_dir / CACHE_OPERATION_MARKER_NAME).write_text(json.dumps(operation_payload), encoding="utf-8")
+            operation_before = snapshot_tree(root)
+
+            updating_output = io.StringIO()
+            with redirect_stdout(updating_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            self.assertEqual(operation_before, snapshot_tree(root))
+            updating_pulse = json.loads(updating_output.getvalue())["mlhd"]["projection_pulse"]
+            self.assertEqual("updating-or-interrupted", updating_pulse["status"])
+            self.assertEqual("projection-index-build", updating_pulse["operation"])
+            self.assertEqual("2026-05-12T02:03:04Z", updating_pulse["operation_created_at_utc"])
 
 
 if __name__ == "__main__":

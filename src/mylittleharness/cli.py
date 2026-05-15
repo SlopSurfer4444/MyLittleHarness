@@ -65,6 +65,7 @@ from .command_discovery import (
     command_suggestions_to_dict,
     rails_not_cognition_boundary_finding,
 )
+from .dashboard import dashboard_payload, dashboard_sections
 from .evidence import (
     agent_run_record_apply_findings,
     agent_run_record_dry_run_findings,
@@ -82,12 +83,21 @@ from .incubate import (
 )
 from .grain import grain_findings
 from .handoff import (
+    dispatcher_launch_status_findings,
     handoff_packet_apply_findings,
     handoff_packet_dry_run_findings,
     handoff_packet_status_findings,
     make_handoff_packet_request,
 )
+from .hooks import (
+    hook_install_apply_findings,
+    hook_install_dry_run_findings,
+    hook_run_sections,
+    hooks_doctor_sections,
+    make_hook_install_request,
+)
 from .inventory import RootLoadError
+from .lifecycle_focus import session_active_work_findings
 from .meta_feedback import (
     META_FEEDBACK_ROOT_ENV_VAR,
     is_central_meta_feedback_inventory,
@@ -102,8 +112,17 @@ from .memory_hygiene import (
 )
 from .models import Finding
 from .parsing import extract_headings, extract_path_refs, parse_frontmatter
-from .planning import make_plan_request, plan_apply_findings, plan_dry_run_findings, resolve_plan_request_from_roadmap
+from .planning import (
+    make_plan_cancel_request,
+    make_plan_request,
+    plan_apply_findings,
+    plan_cancel_apply_findings,
+    plan_cancel_dry_run_findings,
+    plan_dry_run_findings,
+    resolve_plan_request_from_roadmap,
+)
 from .projection_artifacts import (
+    ARTIFACT_DIR_REL,
     build_projection_artifacts,
     delete_projection_artifacts,
     inspect_projection_artifacts,
@@ -117,7 +136,8 @@ from .projection_index import (
     rebuild_projection_index,
     warm_projection_index,
 )
-from .preflight import preflight_sections, render_git_pre_commit_template
+from .preflight import orchestrator_workspace_preflight_sections, preflight_sections, render_git_pre_commit_template
+from .vcs import dispatcher_worktree_coordination_findings, worktree_coordination_findings
 from .reconcile import reconcile_findings
 from .reporting import emit_text, render_intelligence_report, render_json_report, render_report, render_sectioned_report
 from .relationship_drift import (
@@ -149,6 +169,7 @@ COMMANDS = (
     "check",
     "suggest",
     "manifest",
+    "dashboard",
     "repair",
     "detach",
     "status",
@@ -157,6 +178,7 @@ COMMANDS = (
     "audit-links",
     "doctor",
     "preflight",
+    "hooks",
     "tasks",
     "bootstrap",
     "semantic",
@@ -305,6 +327,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         return 0
+    if command == "dashboard":
+        sections = dashboard_sections(inventory)
+        findings = flatten_sections(sections)
+        result = _result_for(findings)
+        suggestions = _suggestions(command, findings)
+        if args.json:
+            emit_text(json.dumps(dashboard_payload(inventory, sections), sort_keys=True, indent=2, ensure_ascii=True))
+        else:
+            emit_text(render_sectioned_report("dashboard --inspect", inventory.root, result, inventory.sources_for_report(), sections, suggestions))
+        return 1 if any(finding.severity == "error" for finding in findings) else 0
     if command == "check":
         report_name, sections = _check_report(args, inventory)
         findings = flatten_sections(sections)
@@ -355,11 +387,35 @@ def main(argv: list[str] | None = None) -> int:
         if args.template == "git-pre-commit":
             emit_text(render_git_pre_commit_template(inventory.root))
             return 0
-        sections = preflight_sections(inventory)
+        if args.orchestrator_workspace:
+            sections = orchestrator_workspace_preflight_sections(inventory, args.orchestrator_workspace, args.product_root or "")
+            report_name = "preflight --orchestrator-workspace"
+        else:
+            sections = preflight_sections(inventory)
+            report_name = "preflight"
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        emit_text(render_sectioned_report("preflight", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
+    if command == "hooks":
+        if args.doctor:
+            sections = hooks_doctor_sections(inventory)
+            findings = flatten_sections(sections)
+            result = _result_for(findings)
+            emit_text(render_sectioned_report("hooks --doctor", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+            return 0
+        if args.run:
+            sections = hook_run_sections(inventory, args.run, args.hook_args)
+            findings = flatten_sections(sections)
+            result = _result_for(findings)
+            emit_text(render_sectioned_report(f"hooks --run {args.run}", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+            return 0
+        request = make_hook_install_request(args)
+        report_name = "hooks --apply" if args.apply else "hooks --dry-run"
+        findings = hook_install_apply_findings(inventory, request) if args.apply else hook_install_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "tasks":
         sections = tasks_sections(inventory)
         findings = flatten_sections(sections)
@@ -429,16 +485,33 @@ def main(argv: list[str] | None = None) -> int:
         if args.status:
             findings = work_claim_status_findings(inventory)
             result = _result_for(findings)
-            emit_text(render_report("claim --status", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            suggestions = _suggestions(command, findings)
+            if args.json:
+                emit_text(render_json_report("claim --status", inventory.root, result, inventory.sources_for_report(), findings, suggestions, [("Work Claims", findings)], route_manifest()))
+            else:
+                emit_text(render_report("claim --status", inventory.root, result, inventory.sources_for_report(), findings, suggestions))
             return 1 if any(finding.severity == "error" for finding in findings) else 0
         request = make_work_claim_request(args)
         report_name = "claim --apply" if args.apply else "claim --dry-run"
         findings = work_claim_apply_findings(inventory, request) if args.apply else work_claim_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
-        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        suggestions = _suggestions(command, findings)
+        if args.json:
+            emit_text(render_json_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions, [("Work Claims", findings)], route_manifest()))
+        else:
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions))
         return 2 if args.apply and result == "error" else 0
     if command == "handoff":
+        if args.status:
+            findings = [
+                *handoff_packet_status_findings(inventory),
+                *dispatcher_launch_status_findings(inventory),
+                *dispatcher_worktree_coordination_findings(inventory),
+            ]
+            result = _result_for(findings)
+            emit_text(render_report("handoff --status", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            return 1 if any(finding.severity == "error" for finding in findings) else 0
         request = make_handoff_packet_request(args)
         report_name = "handoff --apply" if args.apply else "handoff --dry-run"
         findings = handoff_packet_apply_findings(inventory, request) if args.apply else handoff_packet_dry_run_findings(inventory, request)
@@ -591,6 +664,14 @@ def main(argv: list[str] | None = None) -> int:
         request = make_plan_request(args.title, args.objective, args.task, args.update_active, args.roadmap_item, args.only_requested_item)
         report_name = "plan --apply" if args.apply else "plan --dry-run"
         findings = plan_apply_findings(inventory, request) if args.apply else plan_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "plan-cancel":
+        request = make_plan_cancel_request(args.roadmap_item, args.keep_plan, args.source_hash)
+        report_name = "plan-cancel --apply" if args.apply else "plan-cancel --dry-run"
+        findings = plan_cancel_apply_findings(inventory, request) if args.apply else plan_cancel_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -1652,6 +1733,8 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
 
     sections = [
         ("Status", status_findings(inventory)),
+        ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
+        ("Worktree Coordination", worktree_coordination_findings(inventory, code_prefix="check-worktree-coordination")),
         ("Validation", validation_findings(inventory)),
         ("Agent Run Evidence", agent_run_record_findings(inventory, "check-agent-run")),
         ("Work Claims", work_claim_status_findings(inventory, "check-work-claim")),
@@ -2073,8 +2156,8 @@ def _suggestions(command: str, findings) -> list[str]:
                 return ["claim dry-run was refused before any work-claim evidence was written or released."]
             return ["claim apply was refused before any work-claim evidence was written or released."]
         if is_dry_run:
-            return ["claim dry-run reported the work-claim create/release target and overlap posture without writing files."]
-        if any(finding.code in {"work-claim-written", "work-claim-released"} for finding in findings):
+            return ["claim dry-run reported the work-claim create/extend/release target and overlap posture without writing files."]
+        if any(finding.code in {"work-claim-written", "work-claim-extended", "work-claim-released"} for finding in findings):
             return ["claim apply updated only repo-visible work-claim evidence; fan-in, lifecycle, archive, staging, commit, and release decisions remain explicit."]
         if any(finding.severity == "warn" for finding in findings):
             return ["Review claim warnings manually; claim status is evidence only and cannot release claims or approve lifecycle movement."]
@@ -2087,7 +2170,13 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["handoff apply was refused before any handoff packet was written."]
         if is_dry_run:
             return ["handoff dry-run reported the packet target, scope, and evidence refs without writing files."]
-        return ["handoff apply wrote only one repo-visible handoff packet; worker fan-in and lifecycle decisions remain explicit."]
+        if any(finding.code in {"handoff-packet-written", "handoff-packet-accepted"} for finding in findings):
+            return ["handoff apply wrote only one repo-visible handoff packet update; worker fan-in and lifecycle decisions remain explicit."]
+        if any(finding.code == "dispatcher-launch-ready" for finding in findings):
+            return ["handoff status reported dispatcher launch-ready refs from repo-visible handoff, claim, and evidence paths; it did not start workers or approve lifecycle movement."]
+        if any(finding.code == "dispatcher-launch-refused" for finding in findings):
+            return ["handoff status refused dispatcher launch readiness until a handoff packet, compatible active claim, and planned agent-run evidence path are repo-visible."]
+        return ["handoff status completed as a terminal-only read-only handoff packet report; it did not spawn workers or approve lifecycle movement."]
     if command == "approval-packet":
         is_dry_run = any(finding.code == "approval-packet-dry-run" for finding in findings)
         is_approved_status = any(finding.code == "approval-packet-shape" and "status=approved" in finding.message for finding in findings)
@@ -2230,6 +2319,14 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.severity in {"warn", "error"} for finding in findings):
             return ["Use preflight findings as optional warning inputs; source files, observed verification, and operator decisions remain authority."]
         return ["preflight completed as a terminal-only optional report; it did not install hooks, add CI, write reports, or approve lifecycle decisions."]
+    if command == "hooks":
+        if any(finding.code == "hooks-install-written" for finding in findings):
+            return ["hooks apply installed only the selected warning-only shim; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
+        if any(finding.code == "hooks-install-refused" for finding in findings):
+            return ["hooks apply was refused before writing a hook shim; fix root or target posture and rerun hooks --dry-run before apply."]
+        if any(finding.code == "hooks-run-event" for finding in findings):
+            return ["hooks run completed as a foreground read-only adapter; repo-visible files remain authority."]
+        return ["hooks doctor/dry-run reported hook posture without installing hooks, mutating Git config, or approving lifecycle decisions."]
     if command == "tasks":
         return ["tasks inspection completed as a terminal-only read-only task map; existing commands and repo files remain authoritative."]
     if command == "bootstrap":

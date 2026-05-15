@@ -269,6 +269,9 @@ class PackageMetadataTests(unittest.TestCase):
             "decision/do-not-revisit records",
             "ADR records",
             "`intelligence --focus routes` prints the same read-only route table",
+            "start with `dashboard --inspect` or `dashboard --inspect --json` as the cockpit packet",
+            "`adapter --client-config --target mcp-read-projection`",
+            "`rg` or direct file reads for exact verification",
             "Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow",
         ):
             self.assertIn(expected, readme)
@@ -420,6 +423,41 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("without spawning workers or granting direct apply authority", artifact_model)
         self.assertIn("manifest fields are verification inputs rather than runtime proof", closeout)
         self.assertIn("route manifest orchestration fields and role manifest coordination fields", capability)
+
+    def test_multi_agent_coordination_direction_keeps_adapters_subordinate(self) -> None:
+        authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        adapter = (ROOT / "docs/specs/adapter-boundary.md").read_text(encoding="utf-8")
+        layer_model = (ROOT / "docs/architecture/layer-model.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "coordination-first",
+            "repo-visible routes stay the durable authority",
+            "claims, agent-run records, handoff packets, and session-scoped active work",
+            "hooks are sensors, blockers, and context injectors",
+            "dashboard and `mlhd` runtime surfaces are cockpit projections",
+            "dispatcher cannot start work until a handoff packet, active claim, and evidence path exist",
+        ):
+            self.assertIn(expected, authority)
+        for expected in (
+            "project/verification/work-claims/*.json",
+            "project/verification/agent-runs/*.md",
+            "project/verification/handoffs/*.json",
+            "project/verification/session-work/*.json",
+            "runtime cache is disposable",
+            "claims, runs, handoffs, and session state are coordination evidence",
+        ):
+            self.assertIn(expected, metadata)
+        for expected in (
+            "Hooks are sensors, blockers, and context injectors",
+            "Read-only dashboards are cockpit projections",
+            "`mlhd` is an optional runtime cache and notification/process helper",
+            "Dispatchers and launchers are last-mile adapters",
+        ):
+            self.assertIn(expected, adapter)
+        self.assertIn("Coordination substrate", layer_model)
+        self.assertIn("claims, runs, handoffs, session work, worktree coordination, and route receipts", layer_model)
+        self.assertIn("dashboard, daemon, hook, dispatcher, MCP, or A2A adapter", layer_model)
 
     def test_route_manifest_protocol_shape_is_package_stable(self) -> None:
         manifest = {row["route_id"]: row for row in route_manifest()}
@@ -587,6 +625,13 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn('intelligence --query "<audit-topic-or-route-question>"', " ".join(audit.follow_up_commands))
         self.assertIn('meta-feedback --dry-run --from-root <observed-root> --topic "<topic>" --note "<note>"', " ".join(audit.follow_up_commands))
         self.assertIn("audit loop is read-only", audit.boundary)
+
+        navigation = command_suggestions_for_intent("agent navigation route discovery reflex", limit=1)[0]
+        self.assertEqual("agent-navigation-reflex", navigation.intent_id)
+        self.assertIn("dashboard --inspect", navigation.first_safe_command)
+        self.assertIn('intelligence --query "<topic-or-route-question>"', " ".join(navigation.follow_up_commands))
+        self.assertIn("adapter --client-config --target mcp-read-projection", " ".join(navigation.follow_up_commands))
+        self.assertIn("rg/direct file reads", navigation.root_posture)
 
         claim_review = command_suggestions_for_intent("stale claim cleanup missing run evidence", limit=1)[0]
         self.assertEqual("work-claim-review", claim_review.intent_id)

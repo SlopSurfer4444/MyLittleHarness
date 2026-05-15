@@ -42,3 +42,45 @@ class Finding:
             "allowed_decisions": list(self.allowed_decisions),
             "advisory": self.advisory,
         }
+
+
+@dataclass(frozen=True)
+class SessionActiveWorkRecord:
+    rel_path: str
+    data: dict[str, object]
+
+    @property
+    def session_id(self) -> str:
+        return str(self.data.get("session_id") or "")
+
+    @property
+    def run_id(self) -> str:
+        return str(self.data.get("run_id") or "")
+
+    @property
+    def agent_id(self) -> str:
+        return str(self.data.get("agent_id") or "")
+
+    @property
+    def status(self) -> str:
+        return str(self.data.get("status") or "")
+
+    @property
+    def active_plan(self) -> str:
+        return str(self.data.get("active_plan") or "")
+
+    @property
+    def active_phase(self) -> str:
+        return str(self.data.get("active_phase") or "")
+
+    @property
+    def execution_slice(self) -> str:
+        return str(self.data.get("execution_slice") or "")
+
+    @property
+    def last_heartbeat_at_utc(self) -> str:
+        return str(self.data.get("last_heartbeat_at_utc") or "")
+
+    @property
+    def lease_expires_at(self) -> str:
+        return str(self.data.get("lease_expires_at") or "")

@@ -33,11 +33,14 @@ from .roadmap import (
     RoadmapPlan,
     active_plan_roadmap_item_ids,
     make_roadmap_request,
+    roadmap_batch_slice_gate_findings,
     roadmap_item_fields,
+    roadmap_items_for_diagnostics,
     roadmap_plans_for_requests,
     roadmap_source_incubation_consumers,
     roadmap_text_with_terminal_related_plan_retargets,
 )
+from .vcs import product_diff_write_scope_findings
 
 
 WRITEBACK_BEGIN = "<!-- BEGIN mylittleharness-closeout-writeback v1 -->"
@@ -69,6 +72,36 @@ PHASE_BODY_STATUS_VALUES = {*PHASE_STATUS_VALUES, PHASE_BODY_COMPLETE_STATUS}
 PHASE_HANDOFF_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
 COMPLETED_CLOSEOUT_REQUIRED_FIELDS = ("docs_decision", "state_writeback", "verification", "commit_decision")
 INCOMPLETE_CLOSEOUT_VALUES = {"", "pending", "uncertain", "unknown", "tbd", "todo"}
+GENERIC_ACCEPTANCE_EVIDENCE_VALUES = {
+    "complete",
+    "completed",
+    "done",
+    "focused tests passed",
+    "passed",
+    "tests passed",
+    "unit suite passed",
+    "validation passed",
+    "verification passed",
+}
+NON_IMPLEMENTATION_DELIVERABLE_CLASSES = {"audit", "proposal", "diagnostic", "evidence", "fan-in-review", "review", "research"}
+FAN_IN_REVIEW_REQUIRED_EVIDENCE_MARKERS = (
+    ("source snapshot", ("source snapshot", "source hash", "source ref", "source reference")),
+    ("cluster disposition", ("cluster disposition", "disposition matrix", "disposition rationale")),
+    ("missing evidence", ("missing evidence", "evidence gap", "evidence gaps")),
+    ("forbidden shortcuts", ("forbidden shortcut", "forbidden shortcuts", "forbidden write", "forbidden writes")),
+    ("owner route", ("owner route", "owner command", "expected owner command")),
+    ("follow-up slice", ("follow up slice", "follow up slices", "followup slice", "followup slices", "next slice", "next slices")),
+    (
+        "no implicit product-diff acceptance",
+        (
+            "no implicit product diff acceptance",
+            "no product diff acceptance",
+            "product diff remains unaccepted",
+            "dirty product diff remains unaccepted",
+            "without accepting product diff",
+        ),
+    ),
+)
 DEFAULT_PLAN_REL = "project/implementation-plan.md"
 DEFAULT_ARCHIVE_DIR_REL = "project/archive/plans"
 DEFAULT_STATE_REL = "project/project-state.md"
@@ -146,6 +179,15 @@ class CloseoutWritebackPlan:
     decision: str
     message: str
     errors: tuple[Finding, ...] = ()
+
+
+@dataclass(frozen=True)
+class AcceptanceEvidenceContract:
+    deliverable_class: str
+    item_ids: tuple[str, ...]
+    target_artifacts: tuple[str, ...]
+    acceptance_terms: tuple[str, ...]
+    source: str
 
 
 @dataclass(frozen=True)
@@ -532,6 +574,26 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
     planned = closeout_plan.values
     findings.append(_planned_closeout_finding(planned))
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=False))
+    completion_reason = _writeback_acceptance_completion_reason(inventory, request, planned)
+    findings.extend(
+        acceptance_evidence_findings(
+            inventory,
+            planned,
+            completion_reason=completion_reason,
+            apply=False,
+            code_prefix="writeback",
+            include_success=True,
+        )
+    )
+    findings.extend(
+        product_diff_write_scope_findings(
+            inventory,
+            planned,
+            completion_reason=completion_reason,
+            apply=False,
+            code_prefix="writeback",
+        )
+    )
     planned_lifecycle = _planned_lifecycle_values(
         request,
         archive_plan.archive_rel_path if archive_plan else None,
@@ -549,6 +611,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
             )
         )
         return findings
+    findings.extend(_writeback_batch_slice_gate_findings(inventory, request, apply=False))
     incubation_plan, incubation_errors = _writeback_incubation_plan(inventory, request, archive_context_rel)
     if incubation_errors:
         findings.extend(_with_severity(incubation_errors, "warn"))
@@ -695,6 +758,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
     roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, archive_context_rel)
     if roadmap_errors:
         return roadmap_errors
+    batch_gate_findings = _writeback_batch_slice_gate_findings(inventory, request, apply=True)
     incubation_plan, incubation_errors = _writeback_incubation_plan(inventory, request, archive_context_rel)
     if incubation_errors:
         return incubation_errors
@@ -774,6 +838,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         _planned_closeout_finding(planned),
     ]
     findings.extend(harvest_findings)
+    findings.extend(batch_gate_findings)
     findings.extend(
         active_plan_completed_phase_handoff_findings(
             inventory,
@@ -782,6 +847,26 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         )
     )
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=True))
+    completion_reason = _writeback_acceptance_completion_reason(inventory, request, planned)
+    findings.extend(
+        acceptance_evidence_findings(
+            inventory,
+            planned,
+            completion_reason=completion_reason,
+            apply=True,
+            code_prefix="writeback",
+            include_success=True,
+        )
+    )
+    findings.extend(
+        product_diff_write_scope_findings(
+            inventory,
+            planned,
+            completion_reason=completion_reason,
+            apply=True,
+            code_prefix="writeback",
+        )
+    )
     if request.lifecycle:
         findings.append(
             Finding(
@@ -963,7 +1048,28 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
     errors.extend(_writeback_root_state_preflight_errors(inventory))
     if request.compact_only:
         return errors
-    errors.extend(_closeout_writeback_plan(inventory, request, request.archived_plan or None).errors)
+    closeout_plan = _closeout_writeback_plan(inventory, request, request.archived_plan or None)
+    errors.extend(closeout_plan.errors)
+    completion_reason = _writeback_acceptance_completion_reason(inventory, request, closeout_plan.values)
+    errors.extend(
+        acceptance_evidence_findings(
+            inventory,
+            closeout_plan.values,
+            completion_reason=completion_reason,
+            apply=True,
+            code_prefix="writeback",
+        )
+    )
+    errors.extend(
+        product_diff_write_scope_findings(
+            inventory,
+            closeout_plan.values,
+            completion_reason=completion_reason,
+            apply=True,
+            code_prefix="writeback",
+            preflight=True,
+        )
+    )
 
     plan = inventory.active_plan_surface
     if plan and plan.exists:
@@ -1113,6 +1219,109 @@ def state_writeback_identity_matches_current_plan(inventory: Inventory) -> bool:
     existing_identity = _identity_from_facts(state_writeback_identity_facts(inventory.state))
     current_identity = _current_closeout_identity(inventory, None)
     return _closeout_identity_matches(existing_identity, current_identity)
+
+
+def current_state_writeback_facts(inventory: Inventory) -> dict[str, WritebackFact]:
+    facts = state_writeback_facts(inventory.state)
+    if _satisfied_post_archive_carry_forward_fact(inventory, facts.get("carry_forward")):
+        facts = dict(facts)
+        facts.pop("carry_forward", None)
+    return facts
+
+
+def satisfied_post_archive_carry_forward_finding(inventory: Inventory, code: str) -> Finding | None:
+    fact = state_writeback_facts(inventory.state).get("carry_forward")
+    if not _satisfied_post_archive_carry_forward_fact(inventory, fact):
+        return None
+    return Finding(
+        "info",
+        code,
+        (
+            "historical satisfied carry-forward only: "
+            f"{fact.value}; not a current closeout candidate or next action"
+        ),
+        fact.source,
+        fact.line,
+    )
+
+
+def _satisfied_post_archive_carry_forward_fact(inventory: Inventory, fact: WritebackFact | None) -> bool:
+    if fact is None or fact.field != "carry_forward":
+        return False
+    state = inventory.state
+    if state is None or not state.exists or not state.frontmatter.has_frontmatter or state.frontmatter.errors:
+        return False
+    state_data = state.frontmatter.data
+    plan_status = str(state_data.get("plan_status") or "").strip().casefold()
+    active_plan = _normalize_rel(str(state_data.get("active_plan") or ""))
+    last_archived_plan = _normalize_rel(str(state_data.get("last_archived_plan") or ""))
+    if plan_status != "none" or active_plan or not last_archived_plan:
+        return False
+    if not state_writeback_identity_matches_current_plan(inventory):
+        return False
+    if not _carry_forward_mentions_completed_archive_action(fact.value):
+        return False
+    return _roadmap_archive_done_item_exists(inventory, last_archived_plan)
+
+
+def _carry_forward_mentions_completed_archive_action(value: str) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "").casefold())
+    archive_action = (
+        "archive active plan" in text
+        or "archive this active plan" in text
+        or "active plan archive" in text
+        or "plan will be archived" in text
+    )
+    roadmap_done = "roadmap item" in text and ("done" in text or "mark" in text)
+    return archive_action and roadmap_done
+
+
+def _roadmap_archive_done_item_exists(inventory: Inventory, archived_plan: str) -> bool:
+    items, errors = roadmap_items_for_diagnostics(inventory)
+    if errors:
+        return False
+    archived_item_ids = set(_archived_plan_roadmap_item_ids(inventory, archived_plan))
+    for item in items.values():
+        fields = item.fields
+        status = _normalized_status(_scalar_field_value(fields.get("status")))
+        if status != "done":
+            continue
+        item_archived_plan = _normalize_rel(_scalar_field_value(fields.get("archived_plan")))
+        item_related_plan = _normalize_rel(_scalar_field_value(fields.get("related_plan")))
+        if archived_plan in {item_archived_plan, item_related_plan}:
+            return True
+        if _normalized_item_id(fields.get("id")) in archived_item_ids:
+            return True
+    return False
+
+
+def _archived_plan_roadmap_item_ids(inventory: Inventory, archived_plan: str) -> tuple[str, ...]:
+    path = inventory.root / archived_plan
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    frontmatter = parse_frontmatter(text)
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return ()
+    data = frontmatter.data
+    return tuple(
+        _dedupe_nonempty(
+            (
+                _normalized_item_id(data.get("primary_roadmap_item")),
+                _normalized_item_id(data.get("related_roadmap_item")),
+                *_frontmatter_item_list(data.get("covered_roadmap_items")),
+            )
+        )
+    )
+
+
+def _scalar_field_value(value: object) -> str:
+    if value in (None, "", [], ()):
+        return ""
+    if isinstance(value, list):
+        return str(value[0]).strip() if value else ""
+    return str(value).strip()
 
 
 def _writeback_root_state_preflight_errors(inventory: Inventory) -> list[Finding]:
@@ -1382,6 +1591,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
     roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, archive_plan.archive_rel_path)
     if roadmap_errors:
         return roadmap_errors
+    batch_gate_findings = _writeback_batch_slice_gate_findings(inventory, request, apply=True)
     incubation_plan, incubation_errors = _writeback_incubation_plan(inventory, request, archive_plan.archive_rel_path)
     if incubation_errors:
         return incubation_errors
@@ -1403,6 +1613,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
         Finding("info", "writeback-apply", "closeout/state writeback apply started"),
         _planned_closeout_finding(planned),
     ]
+    findings.extend(batch_gate_findings)
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=True))
     findings.extend(_archive_plan_findings(inventory, archive_plan, apply=True))
     findings.append(
@@ -1634,11 +1845,484 @@ def _should_carry_current_closeout_values(request: WritebackRequest) -> bool:
 def _is_phase_only_uncertain_docs_writeback(request: WritebackRequest) -> bool:
     if request.archive_active_plan or request.roadmap_item or request.roadmap_status:
         return False
-    if request.closeout != {"docs_decision": "uncertain"}:
+    if request.closeout.get("docs_decision") != "uncertain":
         return False
-    if request.lifecycle.get("phase_status") != "complete":
+    if not set(request.lifecycle).issubset({"active_phase", "phase_status"}):
         return False
-    return set(request.lifecycle).issubset({"active_phase", "phase_status"})
+    phase_status = request.lifecycle.get("phase_status")
+    if request.closeout == {"docs_decision": "uncertain"}:
+        return phase_status == "complete"
+    return phase_status in {"complete", "pending"} and _has_provisional_phase_evidence(request.closeout)
+
+
+def _has_provisional_phase_evidence(values: dict[str, str]) -> bool:
+    if not values.get("verification"):
+        return False
+    return bool(values.get("state_writeback") or values.get("work_result"))
+
+
+def _writeback_acceptance_completion_reason(
+    inventory: Inventory,
+    request: WritebackRequest,
+    closeout_values: dict[str, str],
+) -> str:
+    if request.archive_active_plan:
+        return "archive-active-plan closeout"
+    if request.roadmap_status in {"done", "complete"}:
+        return f"roadmap status {request.roadmap_status}"
+    phase_status = request.lifecycle.get("phase_status", "")
+    if phase_status == "complete":
+        return "phase_status complete"
+    completed_phase = _phase_advancement_completed_phase(inventory, request.lifecycle)
+    if completed_phase:
+        return f"phase advancement completes {completed_phase}"
+    state_data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    if str(state_data.get("phase_status") or "") == "complete" and closeout_values:
+        return "completed-phase closeout writeback"
+    if closeout_values_are_complete(closeout_values):
+        return "complete closeout facts"
+    return ""
+
+
+def acceptance_evidence_findings(
+    inventory: Inventory,
+    closeout_values: dict[str, str],
+    *,
+    completion_reason: str,
+    apply: bool = False,
+    code_prefix: str = "writeback",
+    include_success: bool = False,
+) -> list[Finding]:
+    if not completion_reason:
+        return []
+    contract = _active_acceptance_evidence_contract(inventory)
+    if contract is None:
+        return []
+
+    severity = "error" if apply else "warn"
+    findings: list[Finding] = []
+    missing = _missing_acceptance_evidence_fields(closeout_values)
+    if missing:
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-acceptance-evidence-missing",
+                (
+                    f"{completion_reason} would complete a {contract.deliverable_class} deliverable, but "
+                    f"acceptance evidence is missing field(s): {', '.join(missing)}; record docs_decision, "
+                    "state_writeback, verification, and residual_risk before lifecycle acceptance"
+                ),
+                contract.source,
+            )
+        )
+
+    verification = closeout_values.get("verification", "")
+    if verification and _verification_evidence_is_generic(verification):
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-acceptance-evidence-generic",
+                (
+                    f"{completion_reason} evidence is too generic for the acceptance claim: "
+                    "verification must name a concrete command, artifact, target path, or route-specific proof"
+                ),
+                contract.source,
+            )
+        )
+
+    evidence_text = _acceptance_evidence_text(closeout_values)
+    if evidence_text and not _acceptance_evidence_matches_contract(evidence_text, contract):
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-acceptance-evidence-mismatch",
+                (
+                    f"{completion_reason} evidence does not match the active acceptance claim; mention the roadmap "
+                    "item, execution slice, declared target artifact, or concrete acceptance terms before closeout"
+                ),
+                contract.source,
+            )
+        )
+
+    class_mismatch = _acceptance_deliverable_class_mismatch(contract, evidence_text)
+    if class_mismatch:
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-acceptance-evidence-class-mismatch",
+                f"{completion_reason} evidence has the wrong deliverable class: {class_mismatch}",
+                contract.source,
+            )
+        )
+
+    fan_in_missing = _fan_in_review_disposition_missing_fields(inventory, contract, evidence_text)
+    if fan_in_missing:
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-fan-in-review-disposition-missing",
+                (
+                    f"{completion_reason} would complete fan-in review evidence without required disposition field(s): "
+                    f"{', '.join(fan_in_missing)}; fan-in review artifacts must name source snapshot, cluster disposition, "
+                    "missing evidence, forbidden shortcuts, owner route, follow-up slice, and no implicit product-diff "
+                    "acceptance before lifecycle acceptance"
+                ),
+                contract.source,
+            )
+        )
+
+    docs_risk = _docs_decision_residual_risk_mismatch(closeout_values)
+    if docs_risk:
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-acceptance-evidence-docs-risk",
+                f"{completion_reason} evidence does not reconcile docs_decision with residual risk: {docs_risk}",
+                contract.source,
+            )
+        )
+
+    if findings or not include_success:
+        return findings
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-acceptance-evidence",
+            (
+                f"{completion_reason} has acceptance-aligned evidence for "
+                f"deliverable_class={contract.deliverable_class}; item(s)={', '.join(contract.item_ids) or '<none>'}"
+            ),
+            contract.source,
+        )
+    ]
+
+
+def _active_acceptance_evidence_contract(inventory: Inventory) -> AcceptanceEvidenceContract | None:
+    plan = inventory.active_plan_surface
+    if plan is None or not plan.exists or not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return None
+    data = plan.frontmatter.data
+    plan_ids = (
+        _normalized_item_id(data.get("primary_roadmap_item")),
+        _normalized_item_id(data.get("related_roadmap_item")),
+        *(_normalized_item_id(value) for value in _metadata_list_values(data.get("covered_roadmap_items"))),
+        *active_plan_roadmap_item_ids(inventory),
+    )
+    item_ids = tuple(_dedupe_nonempty(plan_ids))
+    roadmap_fields = [roadmap_item_fields(inventory, item_id) for item_id in item_ids]
+    target_artifacts = tuple(
+        _dedupe_nonempty(
+            (
+                *(_normalize_rel(value) for value in _metadata_list_values(data.get("target_artifacts"))),
+                *(
+                    _normalize_rel(value)
+                    for fields in roadmap_fields
+                    for value in _metadata_list_values(fields.get("target_artifacts"))
+                ),
+            )
+        )
+    )
+    has_explicit_contract = bool(
+        data.get("execution_slice")
+        or data.get("deliverable_class")
+        or data.get("work_class")
+        or target_artifacts
+        or any(fields.get("deliverable_class") or fields.get("work_class") for fields in roadmap_fields)
+    )
+    if not has_explicit_contract:
+        return None
+    deliverable_class = _acceptance_deliverable_class(data, roadmap_fields, target_artifacts)
+    text_parts = [
+        str(data.get("plan_id") or ""),
+        str(data.get("title") or ""),
+        str(data.get("execution_slice") or ""),
+        str(data.get("objective") or ""),
+        str(data.get("closeout_boundary") or ""),
+        plan.content,
+    ]
+    for fields in roadmap_fields:
+        text_parts.extend(
+            str(_scalar_field_value(fields.get(field)) or "")
+            for field in ("slice_goal", "verification_summary", "carry_forward", "slice_closeout_boundary")
+        )
+    acceptance_terms = _acceptance_terms((*item_ids, *text_parts))
+    if not item_ids and not target_artifacts and not acceptance_terms:
+        return None
+    return AcceptanceEvidenceContract(
+        deliverable_class=deliverable_class,
+        item_ids=item_ids,
+        target_artifacts=target_artifacts,
+        acceptance_terms=acceptance_terms,
+        source=plan.rel_path,
+    )
+
+
+def _acceptance_deliverable_class(
+    plan_data: dict[str, object],
+    roadmap_fields: list[dict[str, object]],
+    target_artifacts: tuple[str, ...],
+) -> str:
+    candidates = [
+        plan_data.get("deliverable_class"),
+        plan_data.get("work_class"),
+        *(fields.get("deliverable_class") for fields in roadmap_fields),
+        *(fields.get("work_class") for fields in roadmap_fields),
+    ]
+    for candidate in candidates:
+        normalized = _normalize_deliverable_class(str(candidate or ""))
+        if normalized:
+            return normalized
+    combined = " ".join(
+        str(value or "")
+        for value in (
+            plan_data.get("title"),
+            plan_data.get("objective"),
+            plan_data.get("closeout_boundary"),
+            *(fields.get("slice_goal") for fields in roadmap_fields),
+            *(fields.get("slice_closeout_boundary") for fields in roadmap_fields),
+        )
+    ).casefold()
+    if ("fan-in" in combined or "fan in" in combined) and "review" in combined:
+        return "fan-in-review"
+    for marker in ("audit", "proposal", "diagnostic", "evidence", "review", "research"):
+        if marker in combined:
+            return marker
+    if any(_normalize_rel(path).startswith(("src/", "tests/")) for path in target_artifacts):
+        return "implementation"
+    return "implementation"
+
+
+def _normalize_deliverable_class(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().casefold()).strip("-")
+    aliases = {
+        "impl": "implementation",
+        "implement": "implementation",
+        "implementation-work": "implementation",
+        "diagnostics": "diagnostic",
+        "audit-only": "audit",
+        "fan-in": "fan-in-review",
+        "fan-in-diagnostic": "fan-in-review",
+        "fan-in-review-diagnostic": "fan-in-review",
+        "fan_in": "fan-in-review",
+        "fan_in_diagnostic": "fan-in-review",
+        "fan_in_review": "fan-in-review",
+        "fan_in_review_diagnostic": "fan-in-review",
+        "proposal-only": "proposal",
+        "review-only": "review",
+    }
+    normalized = aliases.get(normalized, normalized)
+    allowed = {"implementation", "audit", "proposal", "diagnostic", "evidence", "fan-in-review", "review", "research", "documentation"}
+    return normalized if normalized in allowed else ""
+
+
+def _metadata_list_values(value: object) -> tuple[str, ...]:
+    if value in (None, "", [], ()):
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip().strip("`\"'") for item in value if str(item).strip())
+    text = str(value).strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+        return tuple(part.strip().strip("`\"'") for part in text.split(",") if part.strip().strip("`\"'"))
+    return (text.strip("`\"'"),) if text.strip("`\"'") else ()
+
+
+def _acceptance_terms(values: tuple[str, ...]) -> tuple[str, ...]:
+    stop_words = {
+        "active",
+        "artifact",
+        "artifacts",
+        "class",
+        "closeout",
+        "complete",
+        "current",
+        "decision",
+        "deliverable",
+        "docs",
+        "implementation",
+        "mylittleharness",
+        "phase",
+        "plan",
+        "project",
+        "route",
+        "slice",
+        "source",
+        "status",
+        "target",
+        "workflow",
+    }
+    terms: list[str] = []
+    for value in values:
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_/-]{4,}", str(value or "").casefold()):
+            token = token.strip("_/-")
+            if token and token not in stop_words:
+                terms.append(token)
+    return tuple(_dedupe_nonempty(terms[:80]))
+
+
+def _missing_acceptance_evidence_fields(values: dict[str, str]) -> tuple[str, ...]:
+    missing: list[str] = []
+    docs_decision = str(values.get("docs_decision") or "").strip().casefold()
+    if docs_decision not in DOCS_DECISION_VALUES:
+        missing.append("docs_decision")
+    for field in ("state_writeback", "verification", "residual_risk"):
+        if not _acceptance_evidence_value_is_present(values.get(field, "")):
+            missing.append(field)
+    return tuple(missing)
+
+
+def _acceptance_evidence_value_is_present(value: object) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).rstrip(".").casefold()
+    return normalized not in INCOMPLETE_CLOSEOUT_VALUES
+
+
+def _verification_evidence_is_generic(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).rstrip(".").casefold()
+    if normalized in GENERIC_ACCEPTANCE_EVIDENCE_VALUES:
+        return True
+    concrete_markers = (
+        " exit 0",
+        " passed with ",
+        "--root ",
+        "mylittleharness ",
+        "project/verification/",
+        "pytest ",
+        "pythonpath=src",
+        "status ok",
+        "status: ok",
+        "tests/",
+        "uv run ",
+    )
+    if any(marker in f" {normalized} " for marker in concrete_markers):
+        return False
+    generic_words = {"focused", "full", "suite", "test", "tests", "unit", "validation", "verification", "passed", "complete"}
+    tokens = re.findall(r"[a-z0-9_-]+", normalized)
+    return bool(tokens) and len(tokens) <= 5 and all(token in generic_words for token in tokens)
+
+
+def _acceptance_evidence_text(values: dict[str, str]) -> str:
+    return "\n".join(
+        str(values.get(field) or "")
+        for field in ("state_writeback", "verification", "residual_risk", "carry_forward", "work_result")
+        if values.get(field)
+    )
+
+
+def _acceptance_evidence_matches_contract(text: str, contract: AcceptanceEvidenceContract) -> bool:
+    normalized = _normalized_evidence_text(text)
+    for item_id in contract.item_ids:
+        if item_id and item_id.casefold() in normalized:
+            return True
+    for target in contract.target_artifacts:
+        target_norm = _normalize_rel(target).casefold()
+        target_name = Path(target_norm).name
+        if target_norm and target_norm in normalized:
+            return True
+        if target_name and target_name in normalized:
+            return True
+    matched_terms = [term for term in contract.acceptance_terms if term and term in normalized]
+    return len(matched_terms) >= min(2, max(1, len(contract.acceptance_terms)))
+
+
+def _acceptance_deliverable_class_mismatch(contract: AcceptanceEvidenceContract, evidence_text: str) -> str:
+    if not evidence_text:
+        return ""
+    normalized = _normalized_evidence_text(evidence_text)
+    deliverable_class = contract.deliverable_class
+    has_command_or_path = any(
+        marker in normalized
+        for marker in ("pytest", "mylittleharness", "project/verification/", "tests/", "src/", ".py", "status: ok", "exit 0")
+    )
+    if deliverable_class == "implementation":
+        non_implementation_markers = ("audit only", "proposal only", "diagnostic only", "review only")
+        implementation_markers = ("implemented", "changed", "tests/", "src/", "pytest", "product", "code")
+        if any(marker in normalized for marker in non_implementation_markers) and not any(
+            marker in normalized for marker in implementation_markers
+        ):
+            return "implementation closeout cites only audit/proposal/diagnostic evidence"
+        return ""
+    if deliverable_class in NON_IMPLEMENTATION_DELIVERABLE_CLASSES:
+        missing_artifact_markers = (
+            "artifact not produced",
+            "artifact was not produced",
+            "no artifact",
+            "without artifact",
+            "report not produced",
+            "matrix not produced",
+        )
+        if any(marker in normalized for marker in missing_artifact_markers):
+            return f"{deliverable_class} deliverable explicitly says the required artifact/report was not produced"
+        class_markers = (
+            deliverable_class,
+            "artifact",
+            "matrix",
+            "report",
+            "project/verification/",
+            "route-by-route",
+            "analysis",
+        )
+        if has_command_or_path and not any(marker in normalized for marker in class_markers):
+            return f"{deliverable_class} deliverable cites implementation/test evidence without the required artifact or report proof"
+    return ""
+
+
+def _fan_in_review_disposition_missing_fields(
+    inventory: Inventory,
+    contract: AcceptanceEvidenceContract,
+    evidence_text: str,
+) -> tuple[str, ...]:
+    if contract.deliverable_class != "fan-in-review":
+        return ()
+    corpus = _fan_in_review_evidence_corpus(inventory, contract, evidence_text)
+    if not corpus.strip():
+        return tuple(label for label, _markers in FAN_IN_REVIEW_REQUIRED_EVIDENCE_MARKERS)
+    normalized = _normalized_fan_in_review_text(corpus)
+    missing: list[str] = []
+    for label, markers in FAN_IN_REVIEW_REQUIRED_EVIDENCE_MARKERS:
+        if not any(marker in normalized for marker in markers):
+            missing.append(label)
+    return tuple(missing)
+
+
+def _fan_in_review_evidence_corpus(
+    inventory: Inventory,
+    contract: AcceptanceEvidenceContract,
+    evidence_text: str,
+) -> str:
+    parts = [str(evidence_text or "")]
+    for target in contract.target_artifacts:
+        rel = _normalize_rel(str(target or ""))
+        if not rel.startswith(("project/verification/", "project/research/")):
+            continue
+        path = inventory.root / rel
+        if _path_escapes_root(inventory.root, path) or not path.is_file():
+            continue
+        try:
+            parts.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            continue
+    return "\n".join(part for part in parts if part)
+
+
+def _normalized_fan_in_review_text(text: str) -> str:
+    normalized = _normalized_evidence_text(text)
+    return re.sub(r"[-_]+", " ", normalized)
+
+
+def _docs_decision_residual_risk_mismatch(values: dict[str, str]) -> str:
+    docs_decision = str(values.get("docs_decision") or "").strip().casefold()
+    if docs_decision != "uncertain":
+        return ""
+    risk_text = _normalized_evidence_text(
+        "\n".join(str(values.get(field) or "") for field in ("residual_risk", "carry_forward", "work_result"))
+    )
+    if any(marker in risk_text for marker in ("docs", "documentation", "uncertain", "provisional", "impact", "risk")):
+        return ""
+    return "docs_decision is uncertain, but residual_risk/carry_forward/work_result does not explain the uncertainty"
+
+
+def _normalized_evidence_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").replace("\\", "/").casefold())
 
 
 def _closeout_writeback_plan(inventory: Inventory, request: WritebackRequest, archive_rel_path: str | None) -> CloseoutWritebackPlan:
@@ -1709,11 +2393,21 @@ def _closeout_writeback_plan(inventory: Inventory, request: WritebackRequest, ar
             f"replace existing closeout facts because recorded identity {_closeout_identity_summary(existing_identity)} does not match current identity {_closeout_identity_summary(identity)}",
         )
     if _is_phase_only_uncertain_docs_writeback(request):
+        message = (
+            "replace existing closeout facts with same-request docs_decision uncertain for phase-only "
+            "ready-for-closeout writeback; existing project-state closeout facts are not carried"
+        )
+        if _has_provisional_phase_evidence(request.closeout):
+            message = (
+                "replace existing closeout facts with same-request provisional phase evidence for phase-only "
+                "lifecycle writeback; docs_decision remains uncertain and existing project-state closeout facts "
+                "are not carried"
+            )
         return CloseoutWritebackPlan(
             _ordered_closeout_values(request.closeout),
             identity,
             "replace",
-            "replace existing closeout facts with same-request docs_decision uncertain for phase-only ready-for-closeout writeback; existing project-state closeout facts are not carried",
+            message,
         )
 
     source = inventory.state.rel_path if inventory.state else DEFAULT_STATE_REL
@@ -2039,6 +2733,16 @@ def _writeback_roadmap_item_ids(inventory: Inventory, request: WritebackRequest)
     if covered and requested in {*covered, primary}:
         return tuple(_dedupe_nonempty((requested, *covered)))
     return (requested,)
+
+
+def _writeback_batch_slice_gate_findings(inventory: Inventory, request: WritebackRequest, *, apply: bool) -> list[Finding]:
+    return roadmap_batch_slice_gate_findings(
+        inventory,
+        _writeback_roadmap_item_ids(inventory, request),
+        route="writeback",
+        source=DEFAULT_PLAN_REL,
+        apply=apply,
+    )
 
 
 def _roadmap_writeback_tmp(plan: RoadmapWritebackPlan | None) -> Path | None:

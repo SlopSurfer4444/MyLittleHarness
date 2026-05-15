@@ -42,6 +42,13 @@ The first v2-compatible adapter contract is read/projection and report legibilit
 
 Do not add a hidden swarm runtime, background daemon, provider credential store, webhook tunnel, workstation install, or autonomous worker supervisor as part of v2 foundation. Future orchestration remains an external client of MLH until route manifests, role profiles, run evidence, claims, review tokens, and reconcile diagnostics are reliable.
 
+The multi-agent adapter ladder stays subordinate to repo-visible coordination records:
+
+- Hooks are sensors, blockers, and context injectors. They may warn about stale claims, missing handoffs, unsafe paths, or out-of-scope writes, but they do not approve repair, closeout, archive, roadmap movement, staging, commit, push, or release.
+- Read-only dashboards are cockpit projections. They may summarize project-state, roadmap, claims, agent-run records, handoffs, worktrees, checks, and alerts, but the route files remain truth.
+- `mlhd` is an optional runtime cache and notification/process helper. It may stream logs, watch processes, refresh projections, and notify humans, but deleting its cache must not change what the repository treats as active, accepted, verified, blocked, or closeable.
+- Dispatchers and launchers are last-mile adapters. They must create or reference a repo-visible handoff, active claim, and evidence path before starting work, and they cannot grant lifecycle authority to the worker they launch.
+
 ## Adapter Groups
 
 | Adapter group | Product role | Boundary |
@@ -61,7 +68,7 @@ Hooks are the strictest adapter lane.
 They may remind, warn, or run visible preflight checks.
 They must not silently mutate files, repair workflow state, commit changes, archive plans, or become a hidden condition for correctness.
 
-The implemented `preflight` command is a terminal-only warning feed that wrapper scripts may consume explicitly. `preflight --template git-pre-commit` prints a local Git pre-commit wrapper template to stdout, but it does not install that wrapper. Neither mode blocks by itself, writes reports, or becomes correctness authority.
+The implemented `preflight` command is a terminal-only warning feed that wrapper scripts may consume explicitly. `preflight --template git-pre-commit` prints a local Git pre-commit wrapper template to stdout, but it does not install that wrapper. The implemented `hooks` command is the explicit hook ergonomics rail: `hooks --doctor` and `hooks --dry-run` are read-only, `hooks --apply --hook git-pre-commit` may write only the selected warning-only shim under `.git/hooks/` in a live operating root, and `hooks --run <event>` is a foreground sensor/context adapter. None of these modes blocks correctness by itself, writes reports, mutates Git config, installs CI/GitHub workflows, or becomes lifecycle authority.
 
 ## Product Gates
 
@@ -94,6 +101,7 @@ The inspect report and stdio tool payloads expose:
 - source-verified search rows from direct exact text search, projection path/reference search, and a current SQLite FTS/BM25 index when available
 - nearby route/source bundles for a root-relative projection source, including outbound links, inbound links, fan-in rows, relationship graph rows, and adjacent source records without source bodies
 - optional generated artifact and SQLite index posture as degraded input when missing, stale, corrupt, or unavailable
+- structured `cachePosture` with component statuses, source refs, and recommended `projection --inspect` or `projection --rebuild` commands; adapters expose this posture read-only and never refresh caches themselves
 - no-authority and no-mutation reminders
 
 The stdio server supports only `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`.
@@ -147,6 +155,62 @@ The command returns `0` after a successful report even when findings include war
 Root-load failures and parser usage failures remain exit `2`.
 
 It must not install hooks, create CI/GitHub workflows, use network calls, write generated preflight reports, block by itself, repair files, archive, commit, change target roots, create lifecycle state, or store accepted decisions.
+
+`preflight --orchestrator-workspace <path>` is a read-only workspace-preflight variant for external launchers. It reports whether the proposed disposable worker workspace is outside the live operating root and configured product source root, whether local Git/MyLittleHarness tooling is discoverable, and which first safe shell commands an orchestrator should run for repo-visible MLH posture. It must not create the workspace, clone repositories, mutate Git, install dependencies, start workers, approve Linear/Symphony issue-board state, or convert an orchestrator status into MLH closeout.
+
+## Implemented Hook Shim And Doctor Slice
+
+`hooks --doctor` inspects hook posture without writing files. It reports the root kind, supported runnable hook events, the local `.git/hooks/pre-commit` target posture when present, and no-authority boundaries.
+
+`hooks --dry-run --hook git-pre-commit` previews the explicit install target without creating directories or files. `hooks --apply --hook git-pre-commit` is the only implemented hook-install mutation. It is allowed only in a live operating root with an existing local `.git` directory, refuses product-source fixtures and archive roots, refuses unsafe or non-regular targets, and refuses to replace an existing non-MLH hook unless the operator supplies `--force` after review.
+
+The installed shim is warning-only. It invokes `mylittleharness --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"`, warns if the command is unavailable or fails to complete, and exits `0`. `hooks --run git-pre-commit` delegates to the same read-only preflight report; `hooks --run agent-status` reports root posture only until a later accepted slice defines richer agent lifecycle inputs.
+
+Hook outputs may warn, block inside a local tool by convention, or inject context into a visible operator flow, but they cannot approve repair, closeout, archive, roadmap status, staging, commit, push, rollback, release, next-plan opening, worker spawning, dispatcher decisions, or daemon truth. Hook installation creates no hidden runtime, cache authority, provider gateway, dashboard, queue, or accepted decision store.
+
+## Implemented Multi-Agent Security Threat Model Slice
+
+`check` now includes read-only multi-agent security posture findings under the validation report. The findings do not create a new adapter, daemon, dashboard, hook, provider gateway, worker process, network listener, or runtime cache mutation. They make the accepted threat model visible before later runtime expansion:
+
+- claims, agent-run evidence, handoff packets, and session active-work records remain the repo-visible coordination authority;
+- hooks stay explicit opt-in sensors, blockers, or context injectors and cannot approve dispatcher or daemon truth;
+- dashboards are projection/cockpit context only, with route files and lifecycle writeback facts remaining truth;
+- `mlhd` runtime cache, local process observations, logs, and notifications are disposable;
+- dispatchers cannot start work without a repo-visible handoff packet, compatible active claim, and planned agent-run evidence path;
+- MCP/A2A/relay/provider adapters remain transport or projection helpers by default and must not store secrets, choose providers, open background servers, or approve lifecycle movement;
+- repo text, hook args, dashboard inputs, adapter payloads, and logs are untrusted context until reconciled against route manifests, write scope, allowed routes, claims, handoffs, and explicit evidence.
+
+Security-sensitive adapter output should name root-relative refs, hashes, and bounded summaries instead of copying environment variables, credentials, provider payloads, log bodies, or source bodies into runtime state.
+
+## Implemented Read-Only Dashboard Prototype Slice
+
+`dashboard --inspect` is a terminal-only local cockpit over repo-visible coordination inputs. It renders project-state lifecycle posture, roadmap queue/counts, work-claim records, agent-run records, handoff packets, session active-work records, worktree diagnostics, check posture, lifecycle provenance, projection cache posture, and an in-memory projection summary. `dashboard --inspect --json` exposes the same posture as a structured `mylittleharness.dashboard.v1` payload for read-only tooling, including source refs, an `agentPacket` with the portable first-pass command order, a `nextLegalDryRun` route candidate, and a `cachePosture` object that mirrors the adapter/check cache boundary.
+
+The dashboard starts no server, daemon, watcher, dispatcher, worker, hook install, network listener, or cache refresh. Optional generated projection artifacts and any future runtime cache are degraded inputs only; the command rebuilds its current view from source files and in-memory projection data when they are absent or stale.
+
+Dashboard stale/conflict signals are findings only. They may highlight expired session leases, worktree-root mismatches, malformed or overlapping coordination records, missing optional runtime data, next legal dry-run candidates, or other warnings, but they cannot approve lifecycle movement, archive, roadmap status changes, staging, commit, push, rollback, release, dispatcher work, product-diff acceptance, cache truth, provider output, or daemon truth.
+
+The dashboard has no mutation buttons. Source route files, project-state lifecycle fields, work claims, agent-run evidence, handoff packets, session records, and explicit writeback facts remain the authority.
+
+## Implemented mlhd Runtime Cockpit Slice
+
+`mlhd` is represented as optional runtime cockpit posture under `.mylittleharness/runtime/mlhd`. The implemented slice exposes that posture through the read-only dashboard: runtime cache present/absent state, bounded cache file examples, local-only default posture, and durable-mutation boundaries.
+
+The runtime cache is disposable adapter data. Deleting `.mylittleharness/runtime/mlhd` must not change what the repository treats as active, accepted, verified, blocked, closeable, archived, or ready for review. The dashboard continues from project-state, roadmap, claims, agent-run records, handoffs, session active-work records, worktree diagnostics, and source-backed projection data when the cache is absent. The runtime payload may include a projection pulse derived from dirty and operation markers, but that pulse is guidance for warm-cache commands only; it cannot become cache freshness authority by itself.
+
+This slice starts no server, daemon process, WebSocket listener, worker, dispatcher, provider gateway, hook install, or network listener. Any future serve rail must be explicit, local-only by default, and conservative around credentials and log bodies.
+
+Durable mutations stay delegated to MLH CLI rails with dry-run/apply semantics. Runtime cache, logs, notifications, process observations, attach/watch state, and WebSocket events cannot approve repair, closeout, archive, roadmap status, staging, commit, push, rollback, release, dispatcher work, or daemon truth.
+
+## Implemented Dispatcher Agent Launcher Slice
+
+The implemented dispatcher slice is a launcher-readiness adapter, not a background worker supervisor. The advisory role manifest now includes a `dispatcher` profile whose `may_spawn_workers` value is true only behind the explicit handoff, active-claim, and evidence-path preconditions. That role profile does not grant apply authority, lifecycle authority, queue authority, provider ownership, fan-in approval, or Git authority.
+
+`handoff --status` now reports dispatcher readiness from repo-visible records. It refuses readiness when no handoff packet exists, when claim refs are missing or incompatible, when active claims are stale or outside the handoff scope, when evidence refs are unsafe or outside `project/verification/agent-runs/*.md`, or when an existing evidence file is not a readable agent-run record. A safe missing agent-run file is treated as a planned evidence path for the external launcher to fill through the explicit `evidence --record` rail after work runs.
+
+The status report also renders worktree coordination diagnostics with dispatcher-specific codes. `MLH_COORDINATION_ROOT` remains only a routing hint to a live coordination root; claim and run records may name coordination/edit roots as evidence, but the dispatcher report does not create or clean worktrees.
+
+This slice starts no worker process, daemon, queue, provider gateway, hook install, network listener, or runtime cache mutation. External launch tooling may consume the readiness signal, but repo-visible handoffs, claims, and agent-run evidence remain the coordination authority, and lifecycle movement, archive, roadmap status, staging, commit, push, rollback, release, and fan-in approval stay on explicit MLH rails.
 
 ## Explicit Rejects
 

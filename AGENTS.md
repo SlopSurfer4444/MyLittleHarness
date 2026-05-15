@@ -18,6 +18,7 @@ For non-trivial product work in this directory:
 2. Read this `README.md` and `AGENTS.md`.
 3. Read the relevant `src/`, `tests/`, and product docs for the product change.
 4. Read `.agents/docmap.yaml`, `.codex/project-workflow.toml`, `project/project-state.md`, or `project/specs/workflow/*.md` only when changing CLI validation behavior or compatibility fixtures.
+5. When validating operating-root navigation behavior, prefer the shipped dashboard agent packet, intelligence query, and MCP read-projection paths before scattered manual route walking; keep `rg` for exact verification.
 
 There should be no active `project/implementation-plan.md` in this repository.
 

@@ -213,6 +213,23 @@ def build_projection(inventory: Inventory) -> Projection:
     )
 
 
+def projection_summary_to_dict(projection: Projection) -> dict[str, object]:
+    summary = projection.summary
+    return {
+        "rebuild_status": summary.rebuild_status,
+        "storage_boundary": summary.storage_boundary,
+        "source_count": summary.source_count,
+        "present_source_count": summary.present_source_count,
+        "readable_source_count": summary.readable_source_count,
+        "hashed_source_count": summary.hashed_source_count,
+        "missing_required_count": summary.missing_required_count,
+        "link_record_count": summary.link_record_count,
+        "fan_in_record_count": summary.fan_in_record_count,
+        "relationship_node_count": summary.relationship_node_count,
+        "relationship_edge_count": summary.relationship_edge_count,
+    }
+
+
 def _projection_surfaces(inventory: Inventory) -> list[Surface]:
     surfaces: list[Surface] = []
     seen: set[str] = set()

@@ -161,6 +161,15 @@ COMMON_ROLE_AUTHORITY_BOUNDARY = (
     "role profiles describe permission, context, and output packet shape only; they do not encode domain reasoning "
     "authority or approve lifecycle decisions"
 )
+DISPATCHER_LAUNCH_REQUIRED_REFS = (
+    "repo-visible handoff packet",
+    "compatible active work claim",
+    "planned or recorded agent-run evidence path",
+)
+DISPATCHER_LAUNCH_BOUNDARY = (
+    "dispatcher launch is optional adapter work: it may start external worker work only after matching repo-visible "
+    "handoff, claim, and evidence refs exist, and it cannot approve lifecycle, archive, Git, release, or fan-in decisions"
+)
 
 
 def _permissions(*rows: tuple[str, ...]) -> tuple[RolePermission, ...]:
@@ -463,6 +472,60 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         runtime_boundary="protocol/report data only; no worker lifecycle writes, hidden daemons, model calls, or provider gateway",
         coordination_budget="single lifecycle coordinator; fan-in requires evidence packet and matching review token",
     ),
+    RoleProfile(
+        role_id="dispatcher",
+        title="Dispatcher",
+        purpose="Prepare optional worker launch from repo-visible handoff, claim, and evidence records.",
+        default_inputs=("handoff_packet", "work_claim", "agent_run_evidence_path", "worktree_coordination_root"),
+        context_packet_requirements=COMMON_CONTEXT_PACKET
+        + (
+            "handoff_ref",
+            "claim_ref",
+            "agent_run_evidence_ref",
+            "worktree_coordination_root",
+        ),
+        required_outputs=("launch_refusal_or_command_packet", "handoff_ref", "claim_ref", "evidence_ref", "boundary_statement"),
+        output_packet_requirements=COMMON_OUTPUT_PACKET
+        + (
+            "handoff_ref",
+            "claim_ref",
+            "evidence_ref",
+            "launch_boundary",
+        ),
+        permissions=_permissions(
+            ("active-plan", "read"),
+            ("verification", "read"),
+            ("stable-specs", "read"),
+            ("product-docs", "read"),
+            ("unclassified", "read"),
+        ),
+        forbidden_actions=COMMON_FORBIDDEN_ACTIONS
+        + (
+            "start work without a repo-visible handoff packet, compatible active claim, and planned evidence path",
+            "store queue, daemon, provider, or runtime cache state as authority",
+            "grant fan-in or lifecycle authority to launched workers",
+        ),
+        stop_conditions=COMMON_STOP_CONDITIONS
+        + (
+            "handoff packet is missing or malformed",
+            "claim is missing, stale, released, conflicted, or outside the handoff scope",
+            "agent-run evidence path is missing from the handoff packet or outside the agent-run evidence route",
+        ),
+        orchestration_role="dispatcher",
+        may_spawn_workers=True,
+        worker_space_boundary="external worker launch only after handoff, active claim, and planned evidence path are repo-visible",
+        isolation_contract=COMMON_ISOLATION_CONTRACT
+        + (
+            "dispatcher launch readiness is derived from repo-visible packet refs only",
+            "runtime queue/cache state is disposable and cannot replace handoff, claim, or evidence refs",
+        ),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("handoff_ref", "claim_ref", "evidence_ref", "launch_boundary"),
+        work_claim_required=True,
+        work_claim_contract=COMMON_WORK_CLAIM_CONTRACT + ("coordination_root", "edit_worktree_root"),
+        fan_in_authority="dispatcher launch packets are evidence only; coordinator/governor retains lifecycle and fan-in authority",
+        runtime_boundary=DISPATCHER_LAUNCH_BOUNDARY,
+        coordination_budget="one reviewed handoff at a time; no hidden queue authority or autonomous retry loop",
+    ),
 )
 ROLE_PROFILE_BY_ID = {profile.role_id: profile for profile in ROLE_PROFILES}
 
@@ -477,3 +540,11 @@ def role_profile_for_id(role_id: str) -> RoleProfile | None:
 
 def roles_with_apply_authority() -> tuple[str, ...]:
     return tuple(profile.role_id for profile in ROLE_PROFILES if any(permission.apply for permission in profile.permissions))
+
+
+def dispatcher_launch_contract() -> dict[str, object]:
+    return {
+        "required_refs": list(DISPATCHER_LAUNCH_REQUIRED_REFS),
+        "authority_boundary": DISPATCHER_LAUNCH_BOUNDARY,
+        "advisory": True,
+    }

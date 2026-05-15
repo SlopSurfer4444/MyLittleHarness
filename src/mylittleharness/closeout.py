@@ -11,7 +11,13 @@ from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findin
 from .projection_artifacts import inspect_projection_artifacts
 from .projection_index import inspect_projection_index
 from .vcs import VcsPosture, parse_head_commit_trailers, probe_vcs
-from .writeback import WritebackFact, state_writeback_facts, state_writeback_identity_matches_current_plan
+from .writeback import (
+    WritebackFact,
+    current_state_writeback_facts,
+    satisfied_post_archive_carry_forward_finding,
+    state_writeback_facts,
+    state_writeback_identity_matches_current_plan,
+)
 
 
 RESIDUAL_RISK_PATTERNS = (r"\bresidual risks?\b", r"\brisk remains\b", r"\bremaining risk\b")
@@ -466,7 +472,12 @@ def _evidence_cue_findings(inventory: Inventory) -> list[Finding]:
     facts = _trusted_state_writeback_facts(inventory)
     findings.extend(_line_group_findings(active_plan, "closeout-residual-risk", "residual risk", RESIDUAL_RISK_PATTERNS, facts.get("residual_risk")))
     findings.extend(_line_group_findings(active_plan, "closeout-skip-rationale", "skip rationale", SKIP_RATIONALE_PATTERNS))
-    findings.extend(_line_group_findings(active_plan, "closeout-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS, facts.get("carry_forward")))
+    carry_forward_fact = facts.get("carry_forward")
+    if carry_forward_fact:
+        findings.extend(_line_group_findings(active_plan, "closeout-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS, carry_forward_fact))
+    else:
+        historical = satisfied_post_archive_carry_forward_finding(inventory, "closeout-carry-forward")
+        findings.extend([historical] if historical else _line_group_findings(active_plan, "closeout-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS))
     return findings
 
 
@@ -530,7 +541,7 @@ def _quality_gate_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
 
 
 def _trusted_state_writeback_facts(inventory: Inventory) -> dict[str, WritebackFact]:
-    facts = state_writeback_facts(inventory.state)
+    facts = current_state_writeback_facts(inventory)
     if not facts:
         return {}
     if state_writeback_identity_matches_current_plan(inventory):

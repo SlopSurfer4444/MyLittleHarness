@@ -101,6 +101,7 @@ MUTATING_REPORT_COMMANDS = {
     "memory-hygiene",
     "meta-feedback",
     "plan",
+    "plan-cancel",
     "projection",
     "research-compare",
     "research-distill",
@@ -129,20 +130,20 @@ ADD_CODE_MARKERS = ("created", "written", "wrote")
 REMOVE_CODE_MARKERS = ("archived", "deleted", "removed")
 NOOP_CODE_MARKERS = ("noop", "no-op", "unchanged")
 MESSAGE_OPERATION_WORDS = {
-    "applied": ("applied",),
-    "archived": ("archived",),
-    "changed": ("changed",),
-    "compacted": ("compacted",),
-    "copied": ("copied",),
-    "created": ("created",),
-    "deleted": ("deleted",),
-    "moved": ("moved",),
-    "removed": ("removed",),
+    "applied": ("applied", "apply"),
+    "archived": ("archived", "archive"),
+    "changed": ("changed", "change"),
+    "compacted": ("compacted", "compact"),
+    "copied": ("copied", "copy"),
+    "created": ("created", "create"),
+    "deleted": ("deleted", "delete"),
+    "moved": ("moved", "move"),
+    "removed": ("removed", "remove"),
     "retarget": ("retarget", "retargeted"),
-    "synchronized": ("synchronized",),
-    "updated": ("updated",),
-    "written": ("written",),
-    "wrote": ("wrote",),
+    "synchronized": ("synchronized", "synchronize"),
+    "updated": ("updated", "update"),
+    "written": ("written", "write"),
+    "wrote": ("wrote", "write"),
 }
 
 
@@ -657,7 +658,7 @@ def _finding_is_noop(finding: Finding) -> bool:
     message = str(finding.message or "").casefold()
     if any(code.endswith(marker) for marker in NOOP_CODE_MARKERS):
         return True
-    return "no-op" in message
+    return message.startswith("no-op") or "true no-op" in message
 
 
 def _has_change_evidence(findings: list[Finding]) -> bool:
