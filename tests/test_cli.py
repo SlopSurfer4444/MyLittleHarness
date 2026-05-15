@@ -851,6 +851,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
             (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
                 "# Roadmap\n\n"
                 "## Items\n\n"
                 "### Deep Research Guide\n\n"
@@ -886,6 +890,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
             (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
                 "# Roadmap\n\nDeep Research quality rubric work is active.\n",
                 encoding="utf-8",
             )
@@ -12441,6 +12449,10 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
                 "# Roadmap\n\n"
                 "## Items\n\n"
                 "### Ownership Slice\n\n"
@@ -15464,6 +15476,10 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
                 "# Roadmap\n\n"
                 "## Items\n\n"
                 "### Research-backed Item\n\n"
@@ -15537,6 +15553,10 @@ class CliTests(unittest.TestCase):
             )
             roadmap_path = root / "project/roadmap.md"
             roadmap_text = (
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
                 "# Roadmap\n\n"
                 "## Items\n\n"
                 "### High Blast Promotion\n\n"
@@ -21106,7 +21126,7 @@ class CliTests(unittest.TestCase):
             check_rendered = check_output.getvalue()
             self.assertNotIn("route-metadata-status", check_rendered)
 
-    def test_check_warns_for_lifecycle_markdown_missing_frontmatter(self) -> None:
+    def test_check_errors_for_lifecycle_markdown_missing_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
             examples = {
@@ -21127,7 +21147,8 @@ class CliTests(unittest.TestCase):
                 code = main(["--root", str(root), "check"])
 
             rendered = output.getvalue()
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 1)
+            self.assertIn("Result\n- status: error", rendered)
             self.assertIn("research-frontmatter", rendered)
             self.assertIn("research artifact has no frontmatter", rendered)
             self.assertIn("lifecycle-frontmatter", rendered)
@@ -21137,6 +21158,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("project/adrs/adr.md", rendered)
             self.assertIn("project/specs/workflow/manual-spec.md", rendered)
             self.assertIn("projection/SQLite cache can be marked dirty or rebuilt", rendered)
+
+    def test_check_errors_for_lifecycle_markdown_malformed_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            bad = root / "project/research/bad-frontmatter.md"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("---\nstatus: \"imported\"\n- dangling\n---\n# Bad\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertIn("frontmatter-parse", rendered)
+            self.assertIn("project/research/bad-frontmatter.md", rendered)
 
     def test_check_surfaces_lifecycle_provenance_unknown_owner_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -21450,7 +21487,14 @@ def write_terminal_history_stub_roadmap(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "project/research").mkdir(parents=True, exist_ok=True)
-    (root / "project/research/archive-audit.md").write_text("# Archive Audit\n", encoding="utf-8")
+    (root / "project/research/archive-audit.md").write_text(
+        "---\n"
+        'status: "imported"\n'
+        'title: "Archive Audit"\n'
+        "---\n"
+        "# Archive Audit\n",
+        encoding="utf-8",
+    )
 
 
 def write_meta_feedback_scope_gap_roadmap(root: Path, target_artifacts: str = "[]") -> str:
@@ -21470,6 +21514,10 @@ def write_meta_feedback_scope_gap_roadmap(root: Path, target_artifacts: str = "[
         encoding="utf-8",
     )
     (root / "project/roadmap.md").write_text(
+        "---\n"
+        'id: "memory-routing-roadmap"\n'
+        'status: "active"\n'
+        "---\n"
         "# Roadmap\n\n"
         "## Items\n\n"
         "### Meta Feedback Scope Gap\n\n"

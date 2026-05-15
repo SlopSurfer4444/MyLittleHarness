@@ -8045,18 +8045,23 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
     findings: list[Finding] = []
     for surface in inventory.present_surfaces:
         for error in surface.frontmatter.errors:
-            severity = "error" if surface.rel_path == "project/project-state.md" else "warn"
+            severity = (
+                "error"
+                if surface.rel_path == "project/project-state.md"
+                or (inventory.root_kind == "live_operating_root" and lifecycle_markdown_requires_frontmatter(surface))
+                else "warn"
+            )
             findings.append(Finding(severity, "frontmatter-parse", error, surface.rel_path))
         if inventory.root_kind != "live_operating_root":
             continue
         if not lifecycle_markdown_requires_frontmatter(surface) or surface.frontmatter.has_frontmatter:
             continue
         if surface.memory_route == "research":
-            findings.append(Finding("warn", "research-frontmatter", "research artifact has no frontmatter", surface.rel_path))
+            findings.append(Finding("error", "research-frontmatter", "research artifact has no frontmatter", surface.rel_path))
         else:
             findings.append(
                 Finding(
-                    "warn",
+                    "error",
                     "lifecycle-frontmatter",
                     (
                         f"{surface.memory_route or surface.role} lifecycle markdown artifact has no frontmatter; "
