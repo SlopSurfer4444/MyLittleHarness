@@ -17633,7 +17633,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("statusMessage", session_start[-1]["hooks"][0])
             script_text = script_path.read_text(encoding="utf-8")
             self.assertIn("MLH_IMPORT_ROOT", script_text)
-            self.assertIn("hooks\", \"--run\", \"session-start\", \"--json", script_text)
+            self.assertIn("codex_session_start_command_output", script_text)
+            self.assertIn("json.dump(payload, sys.stdout", script_text)
 
             script_output = io.StringIO()
             cwd = Path.cwd()
@@ -17645,9 +17646,12 @@ class CliTests(unittest.TestCase):
                 os.chdir(cwd)
             self.assertEqual(raised.exception.code, 0)
             payload = json.loads(script_output.getvalue())
-            self.assertEqual("session-start", payload["event"])
+            self.assertTrue(payload["continue"])
             self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
             self.assertIn("MyLittleHarness first-contact context", payload["hookSpecificOutput"]["additionalContext"])
+            self.assertNotIn("event", payload)
+            self.assertNotIn("statusMessage", payload)
+            self.assertNotIn("client_hints", payload)
 
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

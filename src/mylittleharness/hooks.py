@@ -275,6 +275,22 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str])
     }
 
 
+def codex_session_start_command_output(inventory: Inventory) -> dict[str, object]:
+    payload = hook_event_payload(inventory, HOOK_SESSION_START, [])
+    codex_hints = payload.get("client_hints")
+    codex_output = codex_hints.get(CODEX_CLIENT) if isinstance(codex_hints, dict) else {}
+    if not isinstance(codex_output, dict):
+        codex_output = {}
+    result: dict[str, object] = {"continue": bool(codex_output.get("continue", True))}
+    system_message = codex_output.get("systemMessage")
+    if isinstance(system_message, str) and system_message:
+        result["systemMessage"] = system_message
+    hook_specific = codex_output.get("hookSpecificOutput")
+    if isinstance(hook_specific, dict):
+        result["hookSpecificOutput"] = hook_specific
+    return result
+
+
 def render_codex_hooks_json(root: Path, request: CodexHookAdapterRequest | None = None) -> str:
     request = request or CodexHookAdapterRequest()
     config_path = _codex_hooks_config_path(root, request)
@@ -297,7 +313,10 @@ def render_codex_session_start_script() -> str:
             "if MLH_IMPORT_ROOT and MLH_IMPORT_ROOT not in sys.path:",
             "    sys.path.insert(0, MLH_IMPORT_ROOT)",
             "",
-            "from mylittleharness.cli import main",
+            "import json",
+            "",
+            "from mylittleharness.hooks import CODEX_SESSION_START_EVENT, codex_session_start_command_output",
+            "from mylittleharness.inventory import load_inventory",
             "",
             "",
             "def _operating_root() -> Path:",
@@ -306,7 +325,20 @@ def render_codex_session_start_script() -> str:
             "",
             "if __name__ == \"__main__\":",
             "    root = _operating_root()",
-            "    raise SystemExit(main([\"--root\", str(root), \"hooks\", \"--run\", \"session-start\", \"--json\"]))",
+            "    try:",
+            "        payload = codex_session_start_command_output(load_inventory(root))",
+            "    except Exception as exc:",
+            "        payload = {",
+            "            \"continue\": True,",
+            "            \"systemMessage\": f\"MLH SessionStart hook failed: {exc}\",",
+            "            \"hookSpecificOutput\": {",
+            "                \"hookEventName\": CODEX_SESSION_START_EVENT,",
+            "                \"additionalContext\": \"MyLittleHarness first-contact context unavailable; run `mylittleharness --root <root> check` before lifecycle-sensitive work.\",",
+            "            },",
+            "        }",
+            "    json.dump(payload, sys.stdout, ensure_ascii=True)",
+            "    sys.stdout.write(\"\\n\")",
+            "    raise SystemExit(0)",
         ]
     ) + "\n"
 
