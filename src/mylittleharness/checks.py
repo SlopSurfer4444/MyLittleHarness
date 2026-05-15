@@ -27,6 +27,13 @@ from .inventory import (
     load_inventory,
     target_artifact_ownerships,
 )
+from .lifecycle_metadata import (
+    LifecycleMarkdownFrontmatterPlan,
+    lifecycle_markdown_frontmatter_fields_for_route,
+    lifecycle_markdown_frontmatter_plan,
+    lifecycle_markdown_requires_frontmatter,
+    lifecycle_markdown_text_with_frontmatter,
+)
 from .lifecycle_focus import CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END, MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END
 from .models import Finding
 from .memory_hygiene import (
@@ -62,6 +69,7 @@ from .projection_artifacts import (
     rebuild_projection_artifacts,
 )
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, rebuild_projection_index
+from .reporting import RouteWriteEvidence, route_write_findings
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
     deep_research_rubric_recovery_target_label,
@@ -146,6 +154,7 @@ DOCMAP_CREATE_CLASS = "docmap-create"
 DOCMAP_REPAIR_TARGET_REL = ".agents/docmap.yaml"
 DOCMAP_REPAIR_TARGET_SLUG = "agents-docmap-yaml"
 DOCMAP_REPAIR_COPY_REL = "files/.agents/docmap.yaml"
+LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS = "lifecycle-markdown-frontmatter-repair"
 STABLE_SPEC_CREATE_CLASS = "stable-spec-create"
 STABLE_SPEC_ROOT_REL = "project/specs/workflow"
 STABLE_SPEC_TEMPLATE_PACKAGE = "mylittleharness"
@@ -3171,7 +3180,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "mutation-guard",
-            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, or snapshot-protected state frontmatter repair",
+            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, or snapshot-protected state frontmatter repair",
         ),
     ]
     validation = validation_findings(inventory)
@@ -3181,6 +3190,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
         if finding.severity in {"error", "warn"} and not _is_route_metadata_advisory(finding)
     ]
     findings.extend(_state_frontmatter_plan_findings(inventory, validation))
+    findings.extend(_lifecycle_markdown_frontmatter_plan_findings(inventory, validation))
     findings.extend(_agents_contract_create_plan_findings(inventory, validation))
     findings.extend(_docmap_snapshot_plan_findings(inventory, validation))
     findings.extend(_docmap_create_plan_findings(inventory, validation))
@@ -3249,6 +3259,8 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
     if not errors:
         errors.extend(_repair_apply_lifecycle_preflight_errors(validation))
     if not errors:
+        errors.extend(_lifecycle_markdown_frontmatter_apply_preflight_errors(inventory, validation))
+    if not errors:
         errors.extend(_repair_apply_preflight_errors(inventory))
     if not errors:
         errors.extend(_agents_contract_create_apply_preflight_errors(inventory, validation))
@@ -3260,6 +3272,20 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
         errors.extend(_stable_spec_create_apply_preflight_errors(inventory, validation))
     if errors:
         return errors
+
+    lifecycle_frontmatter_findings, lifecycle_frontmatter_changed = _lifecycle_markdown_frontmatter_apply_findings(inventory, validation)
+    if any(finding.severity == "error" for finding in lifecycle_frontmatter_findings):
+        return lifecycle_frontmatter_findings
+    if lifecycle_frontmatter_changed:
+        lifecycle_frontmatter_findings.extend(_post_repair_validation_findings(inventory))
+        lifecycle_frontmatter_findings.append(
+            Finding(
+                "info",
+                "lifecycle-frontmatter-rerun",
+                "lifecycle markdown frontmatter repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+            )
+        )
+        return lifecycle_frontmatter_findings
 
     findings: list[Finding] = [Finding("info", "repair-apply", "bounded repair apply started")]
     created_paths: list[str] = []
@@ -3304,7 +3330,7 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "repair-apply-boundary",
-            "repair --apply wrote only absent eager scaffold directories, selected create-only AGENTS.md creation, selected create-only docmap creation, selected create-only stable spec restoration, and selected snapshot-protected docmap route repair classes",
+            "repair --apply wrote only absent eager scaffold directories, selected create-only AGENTS.md creation, selected create-only docmap creation, selected create-only stable spec restoration, selected snapshot-protected lifecycle markdown frontmatter repair, and selected snapshot-protected docmap route repair classes",
         )
     )
 
@@ -3575,6 +3601,7 @@ def _repair_proposal_for(finding: Finding) -> Finding:
         "missing-stable-spec": "restore the expected workflow spec fixture from product docs or the operating source of truth",
         "frontmatter-parse": "fix malformed markdown frontmatter without changing body authority",
         "research-frontmatter": "add lightweight routing frontmatter only if the research artifact remains durable",
+        "lifecycle-frontmatter": "add canonical route frontmatter or rewrite the note through its owning MLH lifecycle command",
         "docmap-routing": "update docmap routes after confirming the target files are canonical entrypoints",
         "mirror-drift": "resync mirrors only if package-source mirror parity is still intended",
     }
@@ -3682,6 +3709,165 @@ def _state_frontmatter_plan_findings(inventory: Inventory, validation: list[Find
             ),
         ]
     )
+    return findings
+
+
+def _lifecycle_markdown_frontmatter_plan_findings(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "lifecycle-frontmatter-plan-scope",
+            f"selected repair class: {LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS}; target route files: lifecycle markdown requiring frontmatter",
+        )
+    ]
+
+    if _is_product_source_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-frontmatter-plan-refused",
+                "target is a product-source compatibility fixture; lifecycle frontmatter repair planning is report-only and snapshot creation is refused",
+                inventory.state.rel_path if inventory.state else ATTACH_STATE_REL_PATH,
+            )
+        )
+        return findings
+    if _is_fallback_or_archive_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-frontmatter-plan-refused",
+                "target is fallback/archive or generated-output evidence; lifecycle frontmatter repair planning is refused",
+                inventory.state.rel_path if inventory.state else None,
+            )
+        )
+        return findings
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-frontmatter-plan-refused",
+                f"target root kind is {inventory.root_kind}; lifecycle frontmatter repair requires an explicit live operating root",
+            )
+        )
+        return findings
+    if not _has_repair_apply_authority(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-frontmatter-plan-refused",
+                "snapshot-protected lifecycle frontmatter repair would require an existing readable workflow-core manifest and strict project-state frontmatter authority",
+                inventory.manifest_surface.rel_path if inventory.manifest_surface else ATTACH_MANIFEST_REL_PATH,
+            )
+        )
+        return findings
+
+    candidates = _lifecycle_markdown_frontmatter_candidate_rows(inventory, validation)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-frontmatter-plan-skipped",
+                "no lifecycle markdown frontmatter diagnostics require a snapshot plan",
+            )
+        )
+        return findings
+
+    for surface, _diagnostics, _plan in candidates:
+        target_conflict = _snapshot_target_conflict(inventory.root, surface.rel_path)
+        if target_conflict:
+            findings.append(_lifecycle_frontmatter_refusal_from(target_conflict, "warn"))
+            return findings
+        if surface.read_error:
+            findings.append(
+                Finding(
+                    "warn",
+                    "lifecycle-frontmatter-plan-refused",
+                    f"target file could not be read as clean UTF-8 before lifecycle frontmatter repair: {surface.read_error}",
+                    surface.rel_path,
+                )
+            )
+            return findings
+        if surface.frontmatter.errors:
+            findings.append(
+                Finding(
+                    "warn",
+                    "lifecycle-frontmatter-plan-refused",
+                    "target has malformed frontmatter; repair refuses to guess metadata boundaries",
+                    surface.rel_path,
+                )
+            )
+            return findings
+
+    plans = [plan for _surface, _diagnostics, plan in candidates]
+    snapshot_dir = _lifecycle_markdown_frontmatter_snapshot_dir(plans, SNAPSHOT_DRY_RUN_TIMESTAMP)
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        findings.append(_lifecycle_frontmatter_refusal_from(boundary_conflict, "warn"))
+        return findings
+
+    diagnostics = [diagnostic for _surface, diagnostics, _plan in candidates for diagnostic in diagnostics]
+    diagnostic_codes = ", ".join(sorted({finding.code for finding in diagnostics}))
+    target_paths = [plan.rel_path for plan in plans]
+    metadata_fields = ", ".join([*SNAPSHOT_METADATA_FIELDS, "planned_frontmatter_keys_by_path"])
+    findings.extend(
+        [
+            Finding(
+                "warn",
+                "lifecycle-frontmatter-plan",
+                (
+                    f"would prepend canonical route frontmatter to {len(plans)} lifecycle markdown artifact(s); "
+                    f"source diagnostics: {diagnostic_codes}"
+                ),
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-targets",
+                f"planned target files: {_lifecycle_frontmatter_path_summary(target_paths)}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-snapshot-path",
+                f"planned snapshot directory: {snapshot_dir}/; metadata: {snapshot_dir}/snapshot.json; copied files under {snapshot_dir}/files/",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-metadata",
+                f"metadata fields: {metadata_fields}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-rollback",
+                f"manual rollback only: copy files from {snapshot_dir}/files/ back to matching repo paths; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-validation",
+                "validation method after a future apply: python -m mylittleharness --root <target-root> validate; python -m mylittleharness --root <target-root> audit-links",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-authority",
+                "repair-added frontmatter is routing metadata only; it cannot approve closeout, archive, commit, lifecycle decisions, truth selection, or future repairs",
+                target_paths[0] if target_paths else None,
+            ),
+        ]
+    )
+    for plan in plans:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-frontmatter-keys",
+                f"planned frontmatter keys for {plan.rel_path}: {', '.join(plan.fields)}",
+                plan.rel_path,
+            )
+        )
+    findings.extend(_lifecycle_markdown_frontmatter_route_write_findings(plans, apply=False))
     return findings
 
 
@@ -4518,8 +4704,27 @@ def _stable_spec_templates_for(names: list[str]) -> tuple[dict[str, str], list[F
                 )
             )
             continue
-        templates[name] = content if content.endswith("\n") else content + "\n"
+        templates[name] = _stable_spec_template_with_frontmatter(name, content)
     return templates, errors
+
+
+def _stable_spec_template_with_frontmatter(name: str, content: str) -> str:
+    normalized = content if content.endswith("\n") else content + "\n"
+    frontmatter = parse_frontmatter(normalized)
+    if frontmatter.has_frontmatter and not frontmatter.errors:
+        return normalized
+    title = _stable_spec_template_title(name, normalized)
+    fields = lifecycle_markdown_frontmatter_fields_for_route("stable-specs", title)
+    return lifecycle_markdown_text_with_frontmatter(normalized, fields)
+
+
+def _stable_spec_template_title(name: str, content: str) -> str:
+    for line in content.splitlines():
+        if line.startswith("# "):
+            title = line.removeprefix("# ").strip()
+            if title:
+                return title
+    return name.removesuffix(".md").replace("-", " ").title()
 
 
 def _state_prose_fallback_diagnostic(validation: list[Finding]) -> Finding | None:
@@ -4774,6 +4979,149 @@ def _state_frontmatter_apply_findings(inventory: Inventory, validation: list[Fin
             ),
         ]
     )
+    return findings, True
+
+
+def _lifecycle_markdown_frontmatter_apply_preflight_errors(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
+    candidates = _lifecycle_markdown_frontmatter_candidate_rows(inventory, validation)
+    if not candidates:
+        return []
+    for surface, _diagnostics, _plan in candidates:
+        target_conflict = _snapshot_target_conflict(inventory.root, surface.rel_path)
+        if target_conflict:
+            return [_lifecycle_frontmatter_refusal_from(target_conflict)]
+        if surface.read_error:
+            return [
+                Finding(
+                    "error",
+                    "lifecycle-frontmatter-refused",
+                    f"target file could not be read as clean UTF-8 before lifecycle frontmatter repair: {surface.read_error}",
+                    surface.rel_path,
+                )
+            ]
+        if surface.frontmatter.errors:
+            return [
+                Finding(
+                    "error",
+                    "lifecycle-frontmatter-refused",
+                    "target has malformed frontmatter; repair refuses to guess metadata boundaries",
+                    surface.rel_path,
+                )
+            ]
+    snapshot_dir = _lifecycle_markdown_frontmatter_snapshot_dir([plan for _surface, _diagnostics, plan in candidates], _current_snapshot_timestamp())
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        return [_lifecycle_frontmatter_refusal_from(boundary_conflict)]
+    return []
+
+
+def _lifecycle_markdown_frontmatter_apply_findings(
+    inventory: Inventory,
+    validation: list[Finding],
+) -> tuple[list[Finding], bool]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "lifecycle-frontmatter-apply-scope",
+            f"selected repair class: {LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS}; target route files: lifecycle markdown requiring frontmatter",
+        )
+    ]
+    candidates = _lifecycle_markdown_frontmatter_candidate_rows(inventory, validation)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-frontmatter-apply-skipped",
+                "no lifecycle markdown frontmatter diagnostics required snapshot-protected repair",
+            )
+        )
+        return findings, False
+
+    plans = [plan for _surface, _diagnostics, plan in candidates]
+    changed_plans = [plan for plan in plans if plan.current_text != plan.updated_text]
+    if not changed_plans:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-frontmatter-apply-skipped",
+                "planned lifecycle frontmatter already matched current files; no snapshot or rewrite was needed",
+            )
+        )
+        return findings, False
+
+    timestamp = _current_snapshot_timestamp()
+    snapshot_dir_rel = _lifecycle_markdown_frontmatter_snapshot_dir(changed_plans, timestamp)
+    snapshot_dir = inventory.root / snapshot_dir_rel
+    metadata_rel = f"{snapshot_dir_rel}/snapshot.json"
+    diagnostics_by_path = _lifecycle_frontmatter_diagnostics_by_source(validation)
+    metadata = _lifecycle_markdown_frontmatter_snapshot_metadata(
+        inventory,
+        timestamp,
+        snapshot_dir_rel,
+        changed_plans,
+        diagnostics_by_path,
+    )
+    operations: list[AtomicFileWrite] = []
+    for plan in changed_plans:
+        target = inventory.root / plan.rel_path
+        copy_path = inventory.root / _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel, plan.rel_path)
+        operations.append(_lifecycle_frontmatter_atomic_write(copy_path, plan.current_text))
+        operations.append(_lifecycle_frontmatter_atomic_write(target, plan.updated_text))
+    operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
+
+    try:
+        cleanup_warnings = apply_file_transaction(operations)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "lifecycle-frontmatter-refused",
+                f"snapshot-protected lifecycle frontmatter repair failed before target mutation completed: {exc}",
+                changed_plans[0].rel_path,
+            )
+        ], False
+
+    findings.append(
+        Finding(
+            "info",
+            "snapshot-created",
+            f"created repair snapshot before lifecycle frontmatter mutation: {snapshot_dir_rel}/",
+            changed_plans[0].rel_path,
+        )
+    )
+    for plan in changed_plans:
+        copy_rel = _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel, plan.rel_path)
+        findings.extend(
+            [
+                Finding("info", "snapshot-copied-file", f"copied pre-repair bytes to {copy_rel}", plan.rel_path),
+                Finding(
+                    "info",
+                    "lifecycle-frontmatter-updated",
+                    f"prepended canonical route frontmatter keys: {', '.join(plan.fields)}",
+                    plan.rel_path,
+                ),
+            ]
+        )
+    findings.extend(_lifecycle_markdown_frontmatter_route_write_findings(changed_plans, apply=True))
+    findings.extend(
+        [
+            Finding("info", "snapshot-metadata-written", f"wrote snapshot metadata: {metadata_rel}", changed_plans[0].rel_path),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-rollback",
+                f"manual rollback only: copy files from {snapshot_dir_rel}/files/ back to matching repo paths; then run validate and audit-links",
+                changed_plans[0].rel_path,
+            ),
+            Finding(
+                "info",
+                "lifecycle-frontmatter-authority",
+                "snapshot metadata and repair-added frontmatter are safety/routing evidence only and cannot approve closeout, archive, commit, lifecycle decisions, truth selection, or future repairs",
+                changed_plans[0].rel_path,
+            ),
+        ]
+    )
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "repair-cleanup-warning", warning, changed_plans[0].rel_path))
     return findings, True
 
 
@@ -5040,6 +5388,148 @@ def _docmap_snapshot_apply_findings(inventory: Inventory, validation: list[Findi
         ]
     )
     return findings, True
+
+
+def _lifecycle_markdown_frontmatter_candidate_rows(
+    inventory: Inventory,
+    validation: list[Finding],
+) -> list[tuple[Surface, list[Finding], LifecycleMarkdownFrontmatterPlan]]:
+    diagnostics_by_path = _lifecycle_frontmatter_diagnostics_by_source(validation)
+    rows: list[tuple[Surface, list[Finding], LifecycleMarkdownFrontmatterPlan]] = []
+    for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path):
+        diagnostics = diagnostics_by_path.get(surface.rel_path)
+        if not diagnostics:
+            continue
+        if surface.frontmatter.has_frontmatter:
+            continue
+        if not lifecycle_markdown_requires_frontmatter(surface):
+            continue
+        rows.append((surface, diagnostics, lifecycle_markdown_frontmatter_plan(surface)))
+    return rows
+
+
+def _lifecycle_frontmatter_diagnostics_by_source(validation: list[Finding]) -> dict[str, list[Finding]]:
+    diagnostics_by_path: dict[str, list[Finding]] = {}
+    for finding in validation:
+        if finding.code not in {"research-frontmatter", "lifecycle-frontmatter"} or not finding.source:
+            continue
+        diagnostics_by_path.setdefault(finding.source, []).append(finding)
+    return diagnostics_by_path
+
+
+def _lifecycle_markdown_frontmatter_snapshot_dir(plans: list[LifecycleMarkdownFrontmatterPlan], timestamp: str) -> str:
+    payload_parts: list[bytes] = [LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS.encode("utf-8")]
+    for plan in sorted(plans, key=lambda item: item.rel_path):
+        payload_parts.extend(
+            [
+                plan.rel_path.encode("utf-8"),
+                plan.route_id.encode("utf-8"),
+                "\n".join(plan.fields).encode("utf-8"),
+                plan.current_text.encode("utf-8"),
+                plan.updated_text.encode("utf-8"),
+            ]
+        )
+    hash_prefix = hashlib.sha256(b"\n".join(payload_parts)).hexdigest()[:12]
+    count = len(plans)
+    return f"{SNAPSHOT_REPAIR_ROOT_REL}/{timestamp}-{LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS}-{count}-files-{hash_prefix}"
+
+
+def _lifecycle_markdown_frontmatter_snapshot_metadata(
+    inventory: Inventory,
+    timestamp: str,
+    snapshot_dir_rel: str,
+    plans: list[LifecycleMarkdownFrontmatterPlan],
+    diagnostics_by_path: dict[str, list[Finding]],
+) -> dict[str, object]:
+    copied_files = []
+    pre_repair_hashes: dict[str, str] = {}
+    source_diagnostics: list[dict[str, object]] = []
+    planned_keys: dict[str, list[str]] = {}
+    target_paths = [plan.rel_path for plan in plans]
+    for plan in plans:
+        pre_repair_bytes = plan.current_text.encode("utf-8")
+        digest = hashlib.sha256(pre_repair_bytes).hexdigest()
+        copy_rel = _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel, plan.rel_path)
+        copied_files.append(
+            {
+                "target_path": plan.rel_path,
+                "snapshot_path": copy_rel,
+                "sha256": digest,
+                "byte_count": len(pre_repair_bytes),
+            }
+        )
+        pre_repair_hashes[plan.rel_path] = digest
+        planned_keys[plan.rel_path] = list(plan.fields)
+        for diagnostic in diagnostics_by_path.get(plan.rel_path, []):
+            source_diagnostics.append(
+                {
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                    "source": diagnostic.source,
+                    "line": diagnostic.line,
+                }
+            )
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "created_at_utc": timestamp,
+        "tool_name": "mylittleharness",
+        "tool_version": __version__,
+        "command": "repair --apply",
+        "root_kind": inventory.root_kind,
+        "repair_class": LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS,
+        "target_root": str(inventory.root),
+        "snapshot_root": snapshot_dir_rel,
+        "target_paths": target_paths,
+        "copied_files": copied_files,
+        "pre_repair_hashes": pre_repair_hashes,
+        "planned_post_repair_paths": target_paths,
+        "source_diagnostics": source_diagnostics,
+        "planned_route_entries": [],
+        "planned_frontmatter_keys_by_path": planned_keys,
+        "retention": "manual; MyLittleHarness does not silently delete, rotate, compress, move, or hide repair snapshots",
+        "rollback_instructions": (
+            f"Copy files from {snapshot_dir_rel}/files/ back to matching repo paths, then run "
+            "python -m mylittleharness --root <target-root> validate and "
+            "python -m mylittleharness --root <target-root> audit-links."
+        ),
+        "authority_note": (
+            "snapshot metadata and repair-added frontmatter are safety/routing evidence only and cannot approve repair, "
+            "truth selection, closeout, archive, commit, lifecycle decisions, or future repairs"
+        ),
+    }
+
+
+def _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel: str, rel_path: str) -> str:
+    return f"{snapshot_dir_rel}/files/{rel_path}"
+
+
+def _lifecycle_frontmatter_atomic_write(path: Path, text: str) -> AtomicFileWrite:
+    return AtomicFileWrite(
+        path,
+        path.with_name(f".{path.name}.lifecycle-frontmatter.tmp"),
+        text,
+        path.with_name(f".{path.name}.lifecycle-frontmatter.backup"),
+    )
+
+
+def _lifecycle_markdown_frontmatter_route_write_findings(
+    plans: list[LifecycleMarkdownFrontmatterPlan],
+    *,
+    apply: bool,
+) -> list[Finding]:
+    writes = tuple(RouteWriteEvidence(plan.rel_path, plan.current_text, plan.updated_text) for plan in plans)
+    return route_write_findings("lifecycle-frontmatter-route-write", writes, apply=apply)
+
+
+def _lifecycle_frontmatter_refusal_from(finding: Finding, severity: str = "error") -> Finding:
+    code = "lifecycle-frontmatter-plan-refused" if severity == "warn" else "lifecycle-frontmatter-refused"
+    return Finding(severity, code, finding.message, finding.source, finding.line)
+
+
+def _lifecycle_frontmatter_path_summary(paths: list[str], limit: int = 8) -> str:
+    if len(paths) <= limit:
+        return ", ".join(paths)
+    return ", ".join(paths[:limit]) + f", +{len(paths) - limit} more"
 
 
 def _current_snapshot_timestamp() -> str:
@@ -5395,7 +5885,7 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
         )
 
     repair_class = metadata.get("repair_class")
-    if repair_class in {DOCMAP_REPAIR_CLASS, STATE_FRONTMATTER_REPAIR_CLASS}:
+    if repair_class in {DOCMAP_REPAIR_CLASS, STATE_FRONTMATTER_REPAIR_CLASS, LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS}:
         findings.append(Finding("info", "snapshot-repair-class", f"repair class: {repair_class}", f"{snapshot_rel}/snapshot.json"))
     else:
         findings.append(Finding("warn", "snapshot-repair-class", f"unexpected or missing repair class: {repair_class!r}", f"{snapshot_rel}/snapshot.json"))
@@ -5453,6 +5943,30 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
                 )
             )
 
+    planned_frontmatter_keys_by_path = metadata.get("planned_frontmatter_keys_by_path")
+    if repair_class == LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS:
+        if _is_frontmatter_keys_by_path(planned_frontmatter_keys_by_path):
+            key_summary = "; ".join(
+                f"{path}: {', '.join(keys)}" for path, keys in sorted(planned_frontmatter_keys_by_path.items())
+            )
+            findings.append(
+                Finding(
+                    "info",
+                    "snapshot-planned-frontmatter",
+                    f"planned frontmatter keys by path: {key_summary}",
+                    f"{snapshot_rel}/snapshot.json",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "warn",
+                    "snapshot-planned-frontmatter",
+                    f"lifecycle frontmatter snapshot has malformed planned_frontmatter_keys_by_path: {planned_frontmatter_keys_by_path!r}",
+                    f"{snapshot_rel}/snapshot.json",
+                )
+            )
+
     retention = metadata.get("retention")
     if isinstance(retention, str) and "manual" in retention.casefold():
         findings.append(Finding("info", "snapshot-retention", f"retention posture: {retention}", f"{snapshot_rel}/snapshot.json"))
@@ -5471,6 +5985,15 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
     else:
         findings.append(Finding("warn", "snapshot-rollback", "metadata rollback instructions are missing", f"{snapshot_rel}/snapshot.json"))
     return findings
+
+
+def _is_frontmatter_keys_by_path(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return all(
+        isinstance(path, str) and isinstance(keys, list) and all(isinstance(key, str) for key in keys)
+        for path, keys in value.items()
+    )
 
 
 def _snapshot_copied_file_findings(
@@ -7524,9 +8047,31 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
         for error in surface.frontmatter.errors:
             severity = "error" if surface.rel_path == "project/project-state.md" else "warn"
             findings.append(Finding(severity, "frontmatter-parse", error, surface.rel_path))
-        if surface.role == "research" and surface.path.name.lower() != "readme.md" and not surface.frontmatter.has_frontmatter:
+        if inventory.root_kind != "live_operating_root":
+            continue
+        if not lifecycle_markdown_requires_frontmatter(surface) or surface.frontmatter.has_frontmatter:
+            continue
+        if surface.memory_route == "research":
             findings.append(Finding("warn", "research-frontmatter", "research artifact has no frontmatter", surface.rel_path))
+        else:
+            findings.append(
+                Finding(
+                    "warn",
+                    "lifecycle-frontmatter",
+                    (
+                        f"{surface.memory_route or surface.role} lifecycle markdown artifact has no frontmatter; "
+                        "new files should be written through the owning MLH route so route metadata is explicit and "
+                        "generated projection/SQLite cache can be marked dirty or rebuilt"
+                    ),
+                    surface.rel_path,
+                    route_id=surface.memory_route,
+                )
+            )
     return findings
+
+
+def _lifecycle_markdown_requires_frontmatter(surface: Surface) -> bool:
+    return lifecycle_markdown_requires_frontmatter(surface)
 
 
 def archive_context_findings(inventory: Inventory) -> list[Finding]:

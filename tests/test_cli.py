@@ -1111,6 +1111,41 @@ class CliTests(unittest.TestCase):
             self.assertIn("navigation-cache-index-refresh", intelligence_rendered)
             self.assertIn("projection-index-query-current", intelligence_rendered)
 
+    def test_research_import_apply_marks_existing_projection_cache_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--apply",
+                        "--title",
+                        "Cache Research",
+                        "--text",
+                        "Research write should invalidate generated navigation caches.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("research-import-written", rendered)
+            self.assertIn("projection-cache-dirty", rendered)
+            self.assertTrue((root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).is_file())
+            self.assertTrue((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).is_file())
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertIn("projection-artifact-dirty", check_rendered)
+            self.assertIn("projection-index-dirty", check_rendered)
+
     def test_projection_dirty_marker_tolerates_existing_legacy_tmp_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -1563,6 +1598,13 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             specs = root / "project/specs/workflow"
+            (specs / "workflow-artifact-model-spec.md").write_text(
+                "---\n"
+                'title: "Artifact Model Missing Posture"\n'
+                "---\n"
+                "# Missing Posture\n",
+                encoding="utf-8",
+            )
             (specs / "workflow-plan-synthesis-spec.md").write_text(
                 "---\n"
                 'spec_status: "accepted"\n'
@@ -4604,6 +4646,7 @@ class CliTests(unittest.TestCase):
             record_text = record_path.read_text(encoding="utf-8")
             self.assertIn("agent-run-record-written", apply_rendered)
             self.assertIn("evidence record apply wrote one source-bound agent run evidence record", apply_rendered)
+            self.assertTrue(record_text.startswith("---\n"))
             self.assertIn('schema: "mylittleharness.agent-run.v1"', record_text)
             self.assertIn('assigned_scope: "agent-run-evidence-route-mvp"', record_text)
             self.assertIn('runtime: "local-shell"', record_text)
@@ -8803,6 +8846,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("Non-authority note: incubation is temporary synthesis", note_text)
             self.assertIn("First paragraph.\n\nSecond paragraph with detail.\n\n- bullet one\n- bullet two", note_text)
 
+    def test_incubate_apply_prepends_frontmatter_when_appending_legacy_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            note_path = root / "project/plan-incubation/future-ideas-rail.md"
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            note_path.write_text("# Future Ideas Rail\n\nLegacy body without routing metadata.\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "New routed entry.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("incubate-frontmatter-prepended", rendered)
+            note_text = note_path.read_text(encoding="utf-8")
+            self.assertTrue(note_text.startswith("---\n"))
+            self.assertIn('topic: "Future Ideas Rail"', note_text)
+            self.assertIn('status: "incubating"', note_text)
+            self.assertIn("Legacy body without routing metadata.", note_text)
+            self.assertIn("New routed entry.", note_text)
+
     def test_incubate_apply_records_active_plan_relationship_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp))
@@ -9096,8 +9171,10 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(code, 0)
             self.assertIn("appended to existing same-topic incubation note", output.getvalue())
+            self.assertIn("incubate-frontmatter-prepended", output.getvalue())
             note_text = note_path.read_text(encoding="utf-8")
-            self.assertTrue(note_text.startswith(original))
+            self.assertTrue(note_text.startswith("---\n"))
+            self.assertIn(original, note_text)
             self.assertIn(note, note_text)
 
     def test_incubate_apply_refuses_product_fixture_without_writes(self) -> None:
@@ -10949,6 +11026,7 @@ class CliTests(unittest.TestCase):
 
             note = root / "project/plan-incubation/manual-lifecycle-sync.md"
             note_text = note.read_text(encoding="utf-8")
+            self.assertTrue(note_text.startswith("---\n"))
             self.assertIn("[MLH-Fix-Candidate]", note_text)
             self.assertIn("signal_type: lifecycle-drift", note_text)
             self.assertIn("severity: high", note_text)
@@ -17451,6 +17529,63 @@ class CliTests(unittest.TestCase):
             self.assertIn("preflight-boundary", run_rendered)
             self.assertIn("hooks are sensors", run_rendered)
 
+    def test_hooks_session_start_emits_first_contact_context_payload_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            build_output = io.StringIO()
+            with redirect_stdout(build_output):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+            mark_projection_cache_dirty(load_inventory(root), ["project/project-state.md"], "test")
+            before_run = snapshot_tree_bytes(root)
+
+            run_output = io.StringIO()
+            with redirect_stdout(run_output):
+                code = main(["--root", str(root), "hooks", "--run", "session-start"])
+
+            run_rendered = run_output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before_run, snapshot_tree_bytes(root))
+            self.assertIn("MyLittleHarness hooks --run session-start", run_rendered)
+            self.assertIn("hooks-first-contact-context", run_rendered)
+            self.assertIn("hooks-first-contact-cache-posture", run_rendered)
+            self.assertIn("hooks-first-contact-accelerator-adoption", run_rendered)
+            self.assertIn("artifacts=stale-or-degraded", run_rendered)
+            self.assertIn("sqlite_index=stale-or-degraded", run_rendered)
+            self.assertIn("cannot approve lifecycle", run_rendered)
+            self.assertIn("provider routing", run_rendered)
+
+            json_output = io.StringIO()
+            with redirect_stdout(json_output):
+                code = main(["--root", str(root), "hooks", "--run", "session-start", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_run, snapshot_tree_bytes(root))
+            payload = json.loads(json_output.getvalue())
+            self.assertEqual("mylittleharness.hook-event.v1", payload["schema"])
+            self.assertEqual("session-start", payload["event"])
+            self.assertEqual("warn", payload["status"])
+            self.assertEqual("warn", payload["policy_mode"])
+            self.assertFalse(payload["block"])
+            self.assertIn("MLH first contact", payload["status_message"])
+            self.assertIn("dashboard-agent-packet", payload["agentPacket"]["schema"])
+            self.assertEqual("stale-or-degraded", payload["cachePosture"]["components"]["artifacts"]["status"])
+            self.assertEqual("stale-or-degraded", payload["cachePosture"]["components"]["sqlite_index"]["status"])
+            self.assertFalse(payload["cachePosture"]["refreshable_by_adapter"])
+            self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
+            self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
+            self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "conflict", "invalid-toml", "blocked", "unreadable"})
+            self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
+            self.assertFalse(payload["boundary"]["refreshesGeneratedCache"])
+            self.assertFalse(payload["boundary"]["authorizesLifecycle"])
+            self.assertFalse(payload["boundary"]["authorizesGit"])
+            self.assertFalse(payload["boundary"]["authorizesDispatcher"])
+            self.assertFalse(payload["boundary"]["authorizesProvider"])
+            self.assertFalse(payload["boundary"]["authorizesProductDiff"])
+            self.assertIn("accelerators: dashboard_packet=available", payload["additional_context"])
+            self.assertIn("rg_verification=required", payload["additional_context"])
+            self.assertIn("next legal dry-run", payload["additional_context"])
+            self.assertIn("hookSpecificOutput", payload["client_hints"]["codex"])
+
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -17772,6 +17907,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("root", next(iter(payload["toolInputSchema"]["properties"])))
             self.assertIn("Optional filesystem path", payload["toolInputSchema"]["properties"]["root"]["description"])
             self.assertEqual("%USERPROFILE%\\.codex\\config.toml", payload["codex"]["configPath"])
+            self.assertEqual("mylittleharness.codex-mcp-adoption.v1", payload["adoption"]["schema"])
+            self.assertIn(payload["adoption"]["status"], {"missing", "missing-server", "mounted", "conflict", "invalid-toml", "blocked", "unreadable"})
+            self.assertTrue(payload["adoption"]["merge"]["idempotent"])
+            self.assertFalse(payload["adoption"]["merge"]["storesSecrets"])
             self.assertIn("[mcp_servers.mylittleharness]", payload["codex"]["toml"])
             self.assertIn('"--root"', payload["codex"]["toml"])
             self.assertEqual(
@@ -17791,8 +17930,117 @@ class CliTests(unittest.TestCase):
                 payload["generic"]["json"]["mcpServers"]["mylittleharness"],
             )
             self.assertFalse(payload["boundary"]["writesUserConfig"])
+            self.assertTrue(payload["boundary"]["writesUserConfigOnApplyOnly"])
             self.assertFalse(payload["boundary"]["writesRepoFiles"])
+            self.assertFalse(payload["boundary"]["storesSecrets"])
             self.assertFalse(payload["boundary"]["authorizesLifecycle"])
+
+    def test_adapter_install_client_config_dry_run_and_apply_are_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "root")
+            config_path = Path(tmp) / "home" / ".codex" / "config.toml"
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "adapter",
+                        "--install-client-config",
+                        "--target",
+                        "mcp-read-projection",
+                        "--config-path",
+                        str(config_path),
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(dry_code, 0)
+            self.assertFalse(config_path.exists())
+            self.assertIn("adapter-codex-config-dry-run", dry_output.getvalue())
+            self.assertIn("stores_secrets=false", dry_output.getvalue())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "adapter",
+                        "--install-client-config",
+                        "--target",
+                        "mcp-read-projection",
+                        "--config-path",
+                        str(config_path),
+                        "--apply",
+                    ]
+                )
+
+            self.assertEqual(apply_code, 0)
+            config_text = config_path.read_text(encoding="utf-8")
+            self.assertIn("[mcp_servers.mylittleharness]", config_text)
+            self.assertIn("adapter-codex-config-apply-written", apply_output.getvalue())
+
+            second_apply_output = io.StringIO()
+            with redirect_stdout(second_apply_output):
+                second_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "adapter",
+                        "--install-client-config",
+                        "--target",
+                        "mcp-read-projection",
+                        "--config-path",
+                        str(config_path),
+                        "--apply",
+                    ]
+                )
+
+            self.assertEqual(second_code, 0)
+            self.assertEqual(config_text, config_path.read_text(encoding="utf-8"))
+            self.assertIn("adapter-codex-config-apply-unchanged", second_apply_output.getvalue())
+
+    def test_adapter_install_client_config_refuses_conflicting_existing_server_without_secret_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "root")
+            config_path = Path(tmp) / "home" / ".codex" / "config.toml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[mcp_servers.mylittleharness]",
+                        'command = "other"',
+                        'args = ["--secret-token", "should-not-print"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            before = config_path.read_text(encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "adapter",
+                        "--install-client-config",
+                        "--target",
+                        "mcp-read-projection",
+                        "--config-path",
+                        str(config_path),
+                        "--apply",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, config_path.read_text(encoding="utf-8"))
+            self.assertIn("adapter-codex-config-apply-refused", rendered)
+            self.assertNotIn("should-not-print", rendered)
 
     def test_adapter_reports_stale_generated_projection_as_optional_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -19432,6 +19680,106 @@ class CliTests(unittest.TestCase):
             self.assertIn("manual rollback only", rendered)
             self.assertFalse((root / ".mylittleharness").exists())
 
+    def test_repair_dry_run_reports_lifecycle_frontmatter_plan_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            examples = {
+                "project/research/deep-research.md": "# Deep Research\n\nImported by hand.\n",
+                "project/verification/smoke.md": "# Smoke\n\nManual verification note.\n",
+                "project/specs/workflow/manual-spec.md": "# Manual Spec\n\nStable spec body.\n",
+            }
+            for rel_path, text in examples.items():
+                path = root / rel_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "repair", "--dry-run"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("lifecycle-frontmatter-plan", rendered)
+            self.assertIn("selected repair class: lifecycle-markdown-frontmatter-repair", rendered)
+            self.assertIn("project/research/deep-research.md", rendered)
+            self.assertIn("project/verification/smoke.md", rendered)
+            self.assertIn("project/specs/workflow/manual-spec.md", rendered)
+            self.assertIn("planned frontmatter keys for project/research/deep-research.md: title, status, created, updated, source, authority", rendered)
+            self.assertIn("lifecycle-frontmatter-route-write", rendered)
+            self.assertFalse((root / ".mylittleharness").exists())
+
+    def test_repair_apply_snapshots_then_prepends_lifecycle_frontmatter_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            originals = {
+                "project/research/deep-research.md": "# Deep Research\n\nImported by hand.\n",
+                "project/verification/smoke.md": "# Smoke\n\nManual verification note.\n",
+                "project/specs/workflow/manual-spec.md": "# Manual Spec\n\nStable spec body.\n",
+            }
+            for rel_path, text in originals.items():
+                path = root / rel_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "repair", "--apply"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("snapshot-created", rendered)
+            self.assertIn("snapshot-copied-file", rendered)
+            self.assertIn("snapshot-metadata-written", rendered)
+            self.assertIn("lifecycle-frontmatter-updated", rendered)
+            self.assertIn("lifecycle-frontmatter-rerun", rendered)
+            self.assertIn("projection-cache-dirty", rendered)
+
+            research_text = (root / "project/research/deep-research.md").read_text(encoding="utf-8")
+            verification_text = (root / "project/verification/smoke.md").read_text(encoding="utf-8")
+            spec_text = (root / "project/specs/workflow/manual-spec.md").read_text(encoding="utf-8")
+            self.assertTrue(research_text.startswith("---\n"))
+            self.assertIn('status: "imported"', research_text)
+            self.assertIn("Imported by hand.", research_text)
+            self.assertTrue(verification_text.startswith("---\n"))
+            self.assertIn('status: "pending"', verification_text)
+            self.assertIn("Manual verification note.", verification_text)
+            self.assertTrue(spec_text.startswith("---\n"))
+            self.assertIn('spec_status: "draft"', spec_text)
+            self.assertIn('implementation_posture: "target-only"', spec_text)
+            self.assertIn("Stable spec body.", spec_text)
+
+            snapshot_dirs = list((root / ".mylittleharness/snapshots/repair").iterdir())
+            self.assertEqual(1, len(snapshot_dirs))
+            snapshot_dir = snapshot_dirs[0]
+            self.assertRegex(snapshot_dir.name, r"^\d{8}T\d{6}Z-lifecycle-markdown-frontmatter-repair-3-files-[0-9a-f]{12}$")
+            metadata = json.loads((snapshot_dir / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual("lifecycle-markdown-frontmatter-repair", metadata["repair_class"])
+            self.assertEqual(sorted(originals), sorted(metadata["target_paths"]))
+            self.assertEqual(["title", "status", "created", "updated", "source", "authority"], metadata["planned_frontmatter_keys_by_path"]["project/research/deep-research.md"])
+            for rel_path, original_text in originals.items():
+                copied = snapshot_dir / "files" / rel_path
+                self.assertEqual(original_text, copied.read_text(encoding="utf-8"))
+
+            inspect_output = io.StringIO()
+            with redirect_stdout(inspect_output):
+                self.assertEqual(main(["--root", str(root), "snapshot", "--inspect"]), 0)
+            inspect_rendered = inspect_output.getvalue()
+            self.assertIn("repair class: lifecycle-markdown-frontmatter-repair", inspect_rendered)
+            self.assertIn("planned frontmatter keys by path", inspect_rendered)
+            self.assertIn("project/research/deep-research.md: title, status, created, updated, source, authority", inspect_rendered)
+            self.assertNotIn("unexpected or missing repair class", inspect_rendered)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertNotIn("research artifact has no frontmatter", check_rendered)
+            self.assertNotIn("lifecycle markdown artifact has no frontmatter", check_rendered)
+
     def test_repair_dry_run_reports_docmap_snapshot_plan_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -19811,7 +20159,15 @@ class CliTests(unittest.TestCase):
             root = make_live_root(Path(tmp))
             add_complete_scaffold(root)
             target = root / "project/specs/workflow" / EXPECTED_SPEC_NAMES[0]
-            target.write_text("# Custom local spec\n", encoding="utf-8")
+            target.write_text(
+                "---\n"
+                'title: "Custom Local Spec"\n'
+                'spec_status: "draft"\n'
+                'implementation_posture: "target-only"\n'
+                "---\n"
+                "# Custom local spec\n",
+                encoding="utf-8",
+            )
             before = snapshot_tree(root)
             output = io.StringIO()
             with redirect_stdout(output):
@@ -20273,9 +20629,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.dashboard-agent-packet.v1", payload["agentPacket"]["schema"])
             self.assertIn("project/project-state.md", payload["agentPacket"]["source_refs"])
             self.assertIn("mylittleharness --root <root> intelligence --query", payload["agentPacket"]["recommendedCommands"][1])
+            self.assertIn("adapter --install-client-config --target mcp-read-projection --dry-run", payload["agentPacket"]["recommendedCommands"][3])
+            self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
+            self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
+            self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "conflict", "invalid-toml", "blocked", "unreadable"})
+            self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
             self.assertIn("writeback --dry-run --phase-status complete", payload["agentPacket"]["nextLegalDryRun"]["command"])
             self.assertFalse(payload["agentPacket"]["nextLegalDryRun"]["approves_git"])
             self.assertEqual("mylittleharness.projection-cache-posture.v1", payload["cachePosture"]["schema"])
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["cachePosture"]["self_heal_command"])
             section_names = [section["name"] for section in payload["sections"]]
             self.assertIn("Lifecycle Provenance", section_names)
 
@@ -20296,6 +20658,7 @@ class CliTests(unittest.TestCase):
             structured = jsonrpc_lines(output.getvalue())[0]["result"]["structuredContent"]
             self.assertEqual("mylittleharness.projection-cache-posture.v1", structured["cachePosture"]["schema"])
             self.assertFalse(structured["cachePosture"]["refreshable_by_adapter"])
+            self.assertTrue(structured["cachePosture"]["self_healable_by_command"])
             self.assertIn("recommended_refresh_commands", structured["cachePosture"])
 
     def test_suggest_start_pass_prefers_dashboard_then_intelligence_and_mcp(self) -> None:
@@ -20551,6 +20914,7 @@ class CliTests(unittest.TestCase):
                     0,
                 )
             distill_text = (root / "project/research/distillate.md").read_text(encoding="utf-8")
+            self.assertTrue(distill_text.startswith("---\n"))
             self.assertNotIn('superseded_by: ""', distill_text)
 
             with redirect_stdout(io.StringIO()):
@@ -20572,6 +20936,7 @@ class CliTests(unittest.TestCase):
                     0,
                 )
             compare_text = (root / "project/research/comparison.md").read_text(encoding="utf-8")
+            self.assertTrue(compare_text.startswith("---\n"))
             self.assertIn('status: "compared"', compare_text)
             self.assertNotIn('superseded_by: ""', compare_text)
 
@@ -20580,6 +20945,38 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             check_rendered = check_output.getvalue()
             self.assertNotIn("route-metadata-status", check_rendered)
+
+    def test_check_warns_for_lifecycle_markdown_missing_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            examples = {
+                "project/plan-incubation/manual-note.md": "# Manual Note\n",
+                "project/research/deep-research.md": "# Deep Research\n",
+                "project/verification/smoke.md": "# Smoke\n",
+                "project/decisions/decision.md": "# Decision\n",
+                "project/adrs/adr.md": "# ADR\n",
+                "project/specs/workflow/manual-spec.md": "# Manual Spec\n",
+            }
+            for rel_path, text in examples.items():
+                path = root / rel_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("research-frontmatter", rendered)
+            self.assertIn("research artifact has no frontmatter", rendered)
+            self.assertIn("lifecycle-frontmatter", rendered)
+            self.assertIn("project/plan-incubation/manual-note.md", rendered)
+            self.assertIn("project/verification/smoke.md", rendered)
+            self.assertIn("project/decisions/decision.md", rendered)
+            self.assertIn("project/adrs/adr.md", rendered)
+            self.assertIn("project/specs/workflow/manual-spec.md", rendered)
+            self.assertIn("projection/SQLite cache can be marked dirty or rebuilt", rendered)
 
     def test_check_surfaces_lifecycle_provenance_unknown_owner_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -20628,6 +21025,18 @@ class EncodingLimitedTextStream:
         return self._text.getvalue() + self.buffer.getvalue().decode(self.encoding)
 
 
+def workflow_spec_fixture_text(name: str) -> str:
+    title = name.removesuffix(".md").replace("-", " ").title()
+    return (
+        "---\n"
+        f'title: "{title}"\n'
+        'spec_status: "draft"\n'
+        'implementation_posture: "target-only"\n'
+        "---\n"
+        f"# {name}\n"
+    )
+
+
 def make_root(root: Path, active: bool, mirrors: bool) -> Path:
     (root / ".codex").mkdir(parents=True)
     (root / ".agents").mkdir(parents=True)
@@ -20652,7 +21061,7 @@ def make_root(root: Path, active: bool, mirrors: bool) -> Path:
     if active:
         (root / "project/implementation-plan.md").write_text("# Plan\n", encoding="utf-8")
     for name in EXPECTED_SPEC_NAMES:
-        content = f"# {name}\n"
+        content = workflow_spec_fixture_text(name)
         (root / "project/specs/workflow" / name).write_text(content, encoding="utf-8")
         if mirrors:
             (root / "specs/workflow").mkdir(parents=True, exist_ok=True)
@@ -20704,7 +21113,7 @@ def make_live_root(root: Path) -> Path:
     (root / "README.md").write_text("# Sample\n", encoding="utf-8")
     (root / "AGENTS.md").write_text("# Agents\nUse `project/plan-incubation/*.md` for incubation notes.\n", encoding="utf-8")
     for name in EXPECTED_SPEC_NAMES:
-        (root / "project/specs/workflow" / name).write_text(f"# {name}\n", encoding="utf-8")
+        (root / "project/specs/workflow" / name).write_text(workflow_spec_fixture_text(name), encoding="utf-8")
     return root
 
 
@@ -21372,7 +21781,7 @@ def make_fallback_root(root: Path) -> Path:
     (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
     (root / ".agents/docmap.yaml").write_text("version: 2\n", encoding="utf-8")
     for name in EXPECTED_SPEC_NAMES:
-        (root / "project/specs/workflow" / name).write_text(f"# {name}\n", encoding="utf-8")
+        (root / "project/specs/workflow" / name).write_text(workflow_spec_fixture_text(name), encoding="utf-8")
     return root
 
 
@@ -21436,7 +21845,7 @@ def make_operating_root(root: Path) -> Path:
     (root / "project/implementation-plan.md").write_text("# Active Plan\n", encoding="utf-8")
     (root / "project/research/README.md").write_text("# Research\n", encoding="utf-8")
     for name in EXPECTED_SPEC_NAMES:
-        (root / "project/specs/workflow" / name).write_text(f"# {name}\n", encoding="utf-8")
+        (root / "project/specs/workflow" / name).write_text(workflow_spec_fixture_text(name), encoding="utf-8")
     return root
 
 

@@ -38,6 +38,8 @@ First-contact docs and top-level help show this small shape first. The first-run
 
 The no-skill start pass is part of the CLI contract. A file-reading, shell-capable agent reads `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and `project/implementation-plan.md` only when `plan_status = "active"` or the operator asks about plan/phase/closeout, then runs `check` before mutation. `.agents/docmap.yaml`, `audit-links`, `check`, and relevant specs provide portable docs-decision inputs; no `docs-impact`, `guide`, or `orient` command is required for v1.
 
+The optional agent-accelerator start pass is helper-owned and explicit. `adapter --client-config --target mcp-read-projection` previews the Codex MCP config payload, mount posture, first-pass commands, and no-secret boundary without writing. `adapter --install-client-config --target mcp-read-projection --dry-run|--apply` is the only implemented client config mutation: apply may touch only the reviewed Codex config target, writes an idempotent managed MCP server table, backs up existing config before append, refuses conflicts or unreadable/invalid config, and must not print existing config values. `dashboard --inspect --json`, bare `check`, and `hooks --run session-start --json` expose whether the dashboard packet is available, whether MCP is mounted/missing/conflicting, whether projection cache can be self-healed with `projection --warm-cache --target all`, and that direct `rg` or bounded file verification remains required after any accelerator path.
+
 `sync` is not a primary command. Disposable projection refresh, search, semantic readiness, adapter projection, and report assembly stay advanced unless a later implementation proves a visible refresh command reduces operator ceremony.
 
 Compatibility is a transition policy:
@@ -330,7 +332,7 @@ The `authority_note` must state that snapshots cannot approve repair, closeout, 
 
 Retention is manual-first. MyLittleHarness must not silently delete, rotate, compress, move, or hide repair snapshots. Cleanup is an operator action after review/closeout, or a later explicit cleanup command with its own dry-run, refusal rules, and docs. Reports may warn about old or numerous snapshots, but warnings do not authorize deletion.
 
-The implemented snapshot repair classes are `project/project-state.md` state frontmatter repair and `.agents/docmap.yaml` route repair:
+The implemented snapshot repair classes are `project/project-state.md` state frontmatter repair, lifecycle Markdown frontmatter repair, and `.agents/docmap.yaml` route repair:
 
 - The state frontmatter target path is limited to `project/project-state.md`.
 - The state frontmatter dry-run plan reports deterministic frontmatter keys from existing assignment fallback data, preview snapshot path `.mylittleharness/snapshots/repair/00000000T000000Z-state-frontmatter-repair-project-project-state-md-<hash-prefix>`, metadata fields including `planned_frontmatter_keys`, copied-file path `files/project/project-state.md`, manual rollback posture, and validation method.
@@ -345,6 +347,14 @@ The implemented docmap snapshot repair class is `.agents/docmap.yaml` route repa
 - An absent required docmap is handled only by the create-only `docmap-create` class; snapshot protection is required before rewriting an existing docmap.
 - Docmap repair cannot make routing metadata authoritative and cannot repair manifest, project state, active plans, stable specs, archives, research files, generated outputs, or root-boundary posture.
 
+The implemented lifecycle Markdown snapshot repair class is `lifecycle-markdown-frontmatter-repair`:
+
+- Target files are limited to routed lifecycle Markdown in live operating roots where validation already reported missing frontmatter, including research, incubation, roadmap, decision, ADR, verification, and stable-spec routes. Optional route README files remain exempt.
+- The dry-run plan reports the selected repair class, exact target files, source diagnostics, deterministic preview snapshot path `.mylittleharness/snapshots/repair/00000000T000000Z-lifecycle-markdown-frontmatter-repair-<count>-files-<hash-prefix>`, copied-file boundary, planned frontmatter keys by path, route-write evidence, manual rollback posture, and validation method without writing files or snapshots.
+- The apply path uses a real UTC timestamp, writes one snapshot containing every pre-repair target file before mutation, prepends canonical conservative route frontmatter, preserves body bytes, invalidates existing projection artifacts and SQLite indexes by dirty marker when generated cache exists, runs post-repair validation, and stops before other repair classes.
+- Lifecycle frontmatter repair refuses product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, missing strict repair authority, path conflicts, malformed existing frontmatter, snapshot-boundary conflicts, target-root escapes, unreadable UTF-8 targets, and write failures before or during the bounded transaction.
+- Lifecycle frontmatter repair cannot choose truth or lifecycle status beyond route defaults, rewrite malformed frontmatter, move research/incubation/archive material, update docmap entries, approve projection cache truth, closeout, archive, roadmap status, staging, commit, or future repair.
+
 Implemented state-frontmatter findings:
 
 - `state-frontmatter-scope`: names repair class `state-frontmatter-repair` and target file `project/project-state.md`.
@@ -358,6 +368,23 @@ Implemented state-frontmatter findings:
 - `state-frontmatter-refused`: reports product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, non-default state paths, missing lifecycle assignments, active-plan mismatches, malformed frontmatter, symlink/non-directory target conflicts, target-root escape, snapshot boundary conflicts, and write failures.
 - `state-frontmatter-updated`: names the deterministic frontmatter keys prepended to `project/project-state.md`.
 - `state-frontmatter-rerun`: states that state frontmatter repair completed first and any remaining repair classes require a separate rerun.
+
+Implemented lifecycle Markdown frontmatter findings:
+
+- `lifecycle-frontmatter-plan-scope`: names repair class `lifecycle-markdown-frontmatter-repair` and routed Markdown target class.
+- `lifecycle-frontmatter-plan`: reports that canonical route frontmatter would be prepended to selected lifecycle Markdown files and names the source diagnostic codes.
+- `lifecycle-frontmatter-targets`: lists planned target files.
+- `lifecycle-frontmatter-snapshot-path`: names the preview snapshot directory, `snapshot.json`, and copied-file boundary under `files/`.
+- `lifecycle-frontmatter-metadata`: lists inspectable metadata fields, including `planned_frontmatter_keys_by_path`.
+- `lifecycle-frontmatter-keys`: lists planned deterministic frontmatter keys per target file.
+- `lifecycle-frontmatter-route-write`: reports dry-run or apply route-write evidence for the routed Markdown files.
+- `lifecycle-frontmatter-rollback`: prints manual rollback posture without implying cleanup automation.
+- `lifecycle-frontmatter-validation`: names validation commands for post-apply review.
+- `lifecycle-frontmatter-authority`: states that repair-added frontmatter is routing metadata only.
+- `lifecycle-frontmatter-plan-refused` and `lifecycle-frontmatter-refused`: report root posture, authority, path, malformed-frontmatter, snapshot-boundary, target-root, read, and write refusals.
+- `lifecycle-frontmatter-plan-skipped` and `lifecycle-frontmatter-apply-skipped`: report no matching missing-frontmatter diagnostics or no changed files without writing snapshots.
+- `lifecycle-frontmatter-updated`: names each target file whose frontmatter was prepended and its copied pre-repair snapshot path.
+- `lifecycle-frontmatter-rerun`: states that lifecycle frontmatter repair completed first and any remaining repair classes require a separate rerun.
 
 Implemented docmap route dry-run snapshot-plan findings:
 
@@ -429,22 +456,22 @@ Implemented snapshot-inspection findings:
 - `snapshot-found`: names each repair snapshot directory found.
 - `snapshot-metadata-read`, `snapshot-metadata-missing`, `snapshot-metadata-malformed`, and `snapshot-metadata-missing-field`: report `snapshot.json` readability and minimum contract shape.
 - `snapshot-schema`, `snapshot-command`, `snapshot-repair-class`, `snapshot-target-root`, and `snapshot-root`: report metadata identity and confinement posture.
-- `snapshot-planned-frontmatter`: reports state-frontmatter snapshot planned keys when the repair class is `state-frontmatter-repair`.
+- `snapshot-planned-frontmatter`: reports state-frontmatter planned keys when the repair class is `state-frontmatter-repair`, and lifecycle Markdown planned keys by path when the repair class is `lifecycle-markdown-frontmatter-repair`.
 - `snapshot-copied-file-hash`, `snapshot-copied-file-size`, `snapshot-copied-file-missing`, `snapshot-copied-file-malformed`, and `snapshot-pre-repair-hash`: report copied-file consistency.
 - `snapshot-target-current` and `snapshot-target-missing`: report current target posture relative to the copied pre-repair bytes.
 - `snapshot-retention`, `snapshot-rollback`, and `snapshot-authority`: report manual retention, manual rollback instructions, and snapshot non-authority.
 
-Manifest normalization, malformed or partial project-state frontmatter repair, AGENTS rewrites, stable-spec rewrites, arbitrary stale-plan cleanup, archive cleanup, and non-default active-plan mutation are explicitly deferred until a later plan gives each class its own deterministic action, snapshot behavior, validation method, residual-risk story, and rollback posture. The canonical completed-plan archive close is no longer deferred; it belongs to hidden `writeback --dry-run|--apply --archive-active-plan`, while `writeback --apply --phase-status complete` records the explicit ready-for-closeout boundary without archiving.
+Manifest normalization, malformed or partial project-state frontmatter repair, AGENTS rewrites, stable-spec or research rewrites beyond missing-route-frontmatter prepending, arbitrary stale-plan cleanup, archive cleanup, and non-default active-plan mutation are explicitly deferred until a later plan gives each class its own deterministic action, snapshot behavior, validation method, residual-risk story, and rollback posture. The canonical completed-plan archive close is no longer deferred; it belongs to hidden `writeback --dry-run|--apply --archive-active-plan`, while `writeback --apply --phase-status complete` records the explicit ready-for-closeout boundary without archiving.
 
 ## Rollback And Idempotency
 
-Create-only scaffold, AGENTS creation, docmap creation, and stable spec creation operations do not require backups because they never overwrite existing content. The implemented state frontmatter repair and docmap route repair require snapshots before rewriting existing files.
+Create-only scaffold, AGENTS creation, docmap creation, and stable spec creation operations do not require backups because they never overwrite existing content. The implemented state frontmatter repair, lifecycle Markdown frontmatter repair, and docmap route repair require snapshots before rewriting existing files.
 
-Any operation that would overwrite, delete, rename, normalize, resync, archive, or otherwise change existing content outside selected `project/project-state.md` frontmatter prepending or `.agents/docmap.yaml` route-entry update is blocked unless a later implementation uses the repair snapshot contract above and starts with a no-write dry-run snapshot plan.
+Any operation that would overwrite, delete, rename, normalize, resync, archive, or otherwise change existing content outside selected `project/project-state.md` frontmatter prepending, lifecycle Markdown frontmatter prepending, or `.agents/docmap.yaml` route-entry update is blocked unless a later implementation uses the repair snapshot contract above and starts with a no-write dry-run snapshot plan.
 
 Rollback is manual-only for this contract. A create-only docmap repair must print instructions to remove the created docmap and only remove `.agents/` when the operator confirms it is empty and repair-created. A snapshot-protected repair must print rollback instructions that name the snapshot directory, copied files, target files, and validation command. No rollback command, cleanup command, archive action, VCS action, or lifecycle mutation is implied.
 
-Allowed apply behavior must be idempotent: rerunning the same command against an already-created scaffold, already-created AGENTS contract, already-created docmap, already-created stable spec fixture, already-repaired state frontmatter, or already-repaired docmap returns success, reports no changed paths, and leaves file contents unchanged.
+Allowed apply behavior must be idempotent: rerunning the same command against an already-created scaffold, already-created AGENTS contract, already-created docmap, already-created stable spec fixture, already-repaired state frontmatter, already-repaired lifecycle Markdown frontmatter, or already-repaired docmap returns success, reports no changed paths, and leaves file contents unchanged.
 
 ## Future Product Gates
 
@@ -493,10 +520,11 @@ A future implementation should be validated with scenarios for:
 - primary CLI parser/help tests for `init`, `check`, `repair`, and `detach`, with `attach`, `status`, and `validate` compatibility preserved until a separate deprecation/removal gate
 - terminal-only `detach --dry-run` reports for product-source fixtures, live operating roots, fallback/archive roots, generated-output roots, ambiguous roots, generated projection preservation, no-write behavior, bare-command usage failure, apply-like flag rejection, unknown flag rejection, and boundary conflict posture
 - terminal-only semantic readiness and evaluation reports for product-source fixtures, live operating roots, missing generated projection/index posture, stale generated projection/index posture, corrupt or unavailable index posture, current SQLite FTS/BM25 posture, fixed-query source verification, negative probe no-match posture, lifecycle-risk query wording, no-write behavior, unknown flag rejection, combined-mode rejection, and bare-command usage failure
-- terminal-only adapter reports for product-source fixtures, target-repository live operating roots, missing optional surfaces, missing generated projection inputs, stale generated projection artifacts, no-write behavior, and unknown target rejection
+- terminal-only adapter reports for product-source fixtures, target-repository live operating roots, missing optional surfaces, missing generated projection inputs, stale generated projection artifacts, client-config preview, explicit client-config install dry-run/apply idempotency and conflict refusal, no-write behavior, and unknown target rejection
 - projection artifact and index build, inspect, delete, rebuild, v2 JSON integrity metadata, SQLite schema metadata, stale/corrupt/malformed/unexpected/hash/count diagnostics, source-verified full-text search, boundary path conflicts, directory-shaped artifact delete refusal, and visible directory-shaped index sidecar skips
 - snapshot inspect report shape, no-write behavior, no-snapshot roots, valid docmap-route snapshots, malformed metadata, missing copied files, hash/byte-count mismatches, missing or changed current targets, product-source snapshot debris, fallback/generated/ambiguous root posture, symlink path conflicts, and snapshot boundary conflicts
 - state-frontmatter repair dry-run, snapshot-protected apply, metadata, copied pre-repair bytes, body preservation, post-repair validation, idempotent rerun behavior, non-default state path refusal, active-plan mismatch refusal, malformed frontmatter refusal, and snapshot-boundary conflicts
+- lifecycle Markdown frontmatter repair dry-run, snapshot-protected apply, per-file planned frontmatter keys, copied pre-repair bytes, body preservation, projection-cache dirty marking, snapshot inspection, idempotent rerun behavior, malformed frontmatter refusal, and snapshot-boundary conflicts
 - exact search over inventory surfaces without persistent indexes, plus path/full-text navigation that refreshes disposable generated cache only inside `.mylittleharness/generated/projection/`
 - repo-map, backlink, optional/lazy link, duplicate-reference, and fan-in summaries
 - dry-run attach and repair without writes
@@ -518,7 +546,7 @@ Validation output should be inspectable and concise. It must not create hidden s
 
 - No automatic repair, broad attach, archive, commit, or lifecycle decision.
 - No file mutation from `init --dry-run`, `attach --dry-run`, or `repair --dry-run`.
-- No state mutation outside snapshot-protected frontmatter prepending for default-path prose `project/project-state.md`; no manifest normalization, malformed frontmatter repair, active-plan mutation, existing AGENTS rewrite, spec rewrite, archive cleanup, broad docmap normalization, or broad repair-all behavior in the implemented repair apply slice.
+- No state or lifecycle source mutation outside snapshot-protected frontmatter prepending for default-path prose `project/project-state.md`, snapshot-protected frontmatter prepending for routed lifecycle Markdown, or selected `.agents/docmap.yaml` route-entry update; no manifest normalization, malformed frontmatter repair, active-plan mutation, existing AGENTS rewrite, broad spec/research rewrite, archive cleanup, broad docmap normalization, or broad repair-all behavior in the implemented repair apply slice.
 - No automatic snapshot cleanup, automatic rollback command, or snapshot creation from dry-run reports.
 - No automatic snapshot cleanup, automatic rollback command, snapshot creation, repair approval, closeout approval, archive action, commit action, or lifecycle mutation from `snapshot --inspect`.
 - No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, hooks, adapters, MCP, GitHub, generated projections, caches, logs, reports, local databases, package archives, or workflow execution surfaces.
@@ -534,3 +562,4 @@ Validation output should be inspectable and concise. It must not create hidden s
 - No broad repair-all command, `--write` alias, or implicit mutation from bare `init`, `attach`, or `repair`.
 - No background daemon, scheduler, queue, or dashboard.
 - No adapter-only correctness through IDE, browser, MCP, GitHub, CI, or hooks.
+- No hidden user-config mutation: the only implemented client-config write is the explicit `adapter --install-client-config --target mcp-read-projection --apply` rail, and its success cannot approve lifecycle movement, repair, closeout, archive, staging, commit, push, or source mutation.

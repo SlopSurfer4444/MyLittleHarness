@@ -25,6 +25,8 @@ Optional wrappers such as Codex skills, IDE rules, shell aliases, preflight wrap
 
 When an MCP client exposes `mylittleharness.read_projection`, `mylittleharness.search`, `mylittleharness.read_source`, or `mylittleharness.related_or_bundle`, agents may use those tools as the projection leg of the agent-navigation reflex before or alongside CLI/file reads for route discovery, relationship lookup, source snippets, and impact checks. That use is optional and read-only. It cannot replace direct source verification, refresh generated caches from the adapter, create adapter-owned memory, or decide the lifecycle rail.
 
+The Codex MCP adoption rail is explicit helper setup, not hidden workflow state. `adapter --client-config --target mcp-read-projection` reports the default-active client configuration, current mount posture, no-secret boundary, first-pass commands, and idempotent merge metadata without writing. `adapter --install-client-config --target mcp-read-projection --dry-run|--apply` is the only implemented client-config mutation: dry-run previews the managed block, and apply may write only the reviewed Codex config target with an idempotent managed server table, an existing-file backup, refusal on conflicts or unreadable/invalid config, and no config-value or secret echo. Installing the client config may make the MCP helper available to future client sessions, but it cannot replace `check`, direct `rg`/file verification, or MLH dry-run/apply lifecycle rails.
+
 ## V2 External Orchestrator Boundary
 
 The v2 architecture treats external orchestrators, model providers, MCP servers, generated indexes, and notification relays as embassies around MLH's deterministic State. They may inspect route law, receive role packets, produce patches, record run evidence, transport approval packets, or help humans review work. They must not become lifecycle authority.
@@ -70,6 +72,10 @@ They must not silently mutate files, repair workflow state, commit changes, arch
 
 The implemented `preflight` command is a terminal-only warning feed that wrapper scripts may consume explicitly. `preflight --template git-pre-commit` prints a local Git pre-commit wrapper template to stdout, but it does not install that wrapper. The implemented `hooks` command is the explicit hook ergonomics rail: `hooks --doctor` and `hooks --dry-run` are read-only, `hooks --apply --hook git-pre-commit` may write only the selected warning-only shim under `.git/hooks/` in a live operating root, and `hooks --run <event>` is a foreground sensor/context adapter. None of these modes blocks correctness by itself, writes reports, mutates Git config, installs CI/GitHub workflows, or becomes lifecycle authority.
 
+`hooks --run session-start` is the implemented first-contact hook event. The terminal report emits a bounded dashboard-backed context summary; `hooks --run session-start --json` emits the structured `mylittleharness.hook-event.v1` payload for native clients. That payload includes status text, optional system message, bounded additional context, the dashboard agent packet, projection/SQLite cache posture, accelerator adoption posture, client hints, and explicit no-authority booleans. The accelerator posture reports dashboard-packet availability, MCP mount status (`mounted`, `missing`, `missing-server`, or conflict/degraded posture), the projection warm-cache command, and the requirement to verify exact source with `rg` or bounded file reads after any accelerator path. It may report missing, dirty, stale, or degraded generated artifacts and SQLite indexes and name the next safe projection command, but it must not rebuild or warm the cache from inside the hook.
+
+The first-contact hook event does not install native client config, install Git hooks, start a daemon or listener, create adapter state, choose providers, dispatch workers, accept product diffs, approve lifecycle movement, archive plans, move roadmap status, stage, commit, push, or release. Native clients may render the hook's status or inject its additional context, but repo-visible files and explicit MLH dry-run/apply rails remain authority.
+
 ## Product Gates
 
 An adapter requires a later scoped plan before implementation.
@@ -89,6 +95,8 @@ That plan must define:
 `adapter --inspect --target mcp-read-projection` is the first implemented adapter report.
 `adapter --serve --target mcp-read-projection --transport stdio` is the first real adapter integration.
 It is an explicit foreground MCP stdio JSON-RPC tools server over the same read projection, not an installed service, SDK-backed runtime, HTTP server, network integration, or background daemon.
+`adapter --client-config --target mcp-read-projection` is the no-write adoption report for clients that can mount a foreground stdio MCP server.
+`adapter --install-client-config --target mcp-read-projection --dry-run|--apply` is the explicit Codex client-config merge rail described in the adapter boundary above.
 `suggest --intent "inspect projection adapter runtime"` routes operators to the read-only inspect rail before projection-cache rebuild advice, so runtime/source/root provenance questions do not depend on remembering the exact adapter target id.
 
 The inspect report and stdio tool payloads expose:
@@ -101,7 +109,8 @@ The inspect report and stdio tool payloads expose:
 - source-verified search rows from direct exact text search, projection path/reference search, and a current SQLite FTS/BM25 index when available
 - nearby route/source bundles for a root-relative projection source, including outbound links, inbound links, fan-in rows, relationship graph rows, and adjacent source records without source bodies
 - optional generated artifact and SQLite index posture as degraded input when missing, stale, corrupt, or unavailable
-- structured `cachePosture` with component statuses, source refs, and recommended `projection --inspect` or `projection --rebuild` commands; adapters expose this posture read-only and never refresh caches themselves
+- structured `cachePosture` with component statuses, source refs, recommended `projection --inspect` or `projection --rebuild` commands, and a bounded `projection --warm-cache --target all` self-heal command when supported; adapters expose this posture read-only and never refresh caches themselves
+- structured `adoption` metadata for client-config setup, including config path, mounted/conflict status, expected managed server id, idempotent merge posture, first-pass commands, and no-secret boundary
 - no-authority and no-mutation reminders
 
 The stdio server supports only `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`.
@@ -118,6 +127,8 @@ Generated-input warnings must point operators at `projection --inspect`/`project
 They return `0` for readable roots with info or warning findings; root-load failures remain exit `2`; missing required adapter modes, missing `--transport stdio` for serving, or unknown targets remain argparse usage failures.
 
 They must not install an MCP SDK, create an HTTP or network server, create adapter state, write generated reports, refresh generated caches, mutate files, approve repair, approve closeout, archive, commit, change target roots outside explicit per-call selection, store accepted decisions, or become the only recovery path.
+
+The client-config install rail is narrower than a general workstation-adoption feature. It writes no project files, creates no MCP runtime, starts no server, stores no credentials, and does not inspect or print existing user config values. It refuses instead of merging across an unmanaged/conflicting `mylittleharness` server table. A successful apply only prepares the client to launch the same foreground stdio command later; the next session still must use repo-visible state, check/dashboard posture, MCP/search helpers when available, and direct source verification.
 
 ## Implemented Approval Relay Adapter Slice
 
@@ -166,7 +177,9 @@ It must not install hooks, create CI/GitHub workflows, use network calls, write 
 
 The installed shim is warning-only. It invokes `mylittleharness --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"`, warns if the command is unavailable or fails to complete, and exits `0`. `hooks --run git-pre-commit` delegates to the same read-only preflight report; `hooks --run agent-status` reports root posture only until a later accepted slice defines richer agent lifecycle inputs.
 
-Hook outputs may warn, block inside a local tool by convention, or inject context into a visible operator flow, but they cannot approve repair, closeout, archive, roadmap status, staging, commit, push, rollback, release, next-plan opening, worker spawning, dispatcher decisions, or daemon truth. Hook installation creates no hidden runtime, cache authority, provider gateway, dashboard, queue, or accepted decision store.
+`hooks --run session-start` is the first richer agent lifecycle input. It reuses the read-only dashboard agent packet, cache posture, and accelerator-adoption posture as a compact first-contact context packet, and its JSON form is safe for Codex, Claude Code, VS Code, Windsurf, Cline, or other native hook adapters to translate later. It remains a foreground command: no project, user, or plugin hook configuration is written by this event.
+
+Hook outputs may warn, block inside a local tool by convention, or inject context into a visible operator flow, but they cannot approve repair, closeout, archive, lifecycle movement, roadmap status, staging, commit, push, rollback, release, next-plan opening, product-diff acceptance, provider routing, worker spawning, dispatcher decisions, cache truth, or daemon truth. Hook installation creates no hidden runtime, cache authority, provider gateway, dashboard, queue, or accepted decision store.
 
 ## Implemented Multi-Agent Security Threat Model Slice
 
@@ -184,9 +197,11 @@ Security-sensitive adapter output should name root-relative refs, hashes, and bo
 
 ## Implemented Read-Only Dashboard Prototype Slice
 
-`dashboard --inspect` is a terminal-only local cockpit over repo-visible coordination inputs. It renders project-state lifecycle posture, roadmap queue/counts, work-claim records, agent-run records, handoff packets, session active-work records, worktree diagnostics, check posture, lifecycle provenance, projection cache posture, and an in-memory projection summary. `dashboard --inspect --json` exposes the same posture as a structured `mylittleharness.dashboard.v1` payload for read-only tooling, including source refs, an `agentPacket` with the portable first-pass command order, a `nextLegalDryRun` route candidate, and a `cachePosture` object that mirrors the adapter/check cache boundary.
+`dashboard --inspect` is a terminal-only local cockpit over repo-visible coordination inputs. It renders project-state lifecycle posture, roadmap queue/counts, work-claim records, agent-run records, handoff packets, session active-work records, worktree diagnostics, check posture, lifecycle provenance, projection cache posture, and an in-memory projection summary. `dashboard --inspect --json` exposes the same posture as a structured `mylittleharness.dashboard.v1` payload for read-only tooling, including source refs, an `agentPacket` with the portable first-pass command order, a `nextLegalDryRun` route candidate, a `cachePosture` object that mirrors the adapter/check cache boundary, and `acceleratorAdoption` metadata for first-contact clients.
 
 The dashboard starts no server, daemon, watcher, dispatcher, worker, hook install, network listener, or cache refresh. Optional generated projection artifacts and any future runtime cache are degraded inputs only; the command rebuilds its current view from source files and in-memory projection data when they are absent or stale.
+
+The dashboard accelerator-adoption payload is a visible cue, not a gate. It can report that the dashboard packet is available, MCP config is mounted/missing/conflicting, cache can be self-healed through `projection --warm-cache --target all`, and `rg` verification is required. `check` may surface the same posture as an informational finding so a missing or conflicting MCP mount is actionable without turning optional client setup into a repository warning or lifecycle blocker.
 
 Dashboard stale/conflict signals are findings only. They may highlight expired session leases, worktree-root mismatches, malformed or overlapping coordination records, missing optional runtime data, next legal dry-run candidates, or other warnings, but they cannot approve lifecycle movement, archive, roadmap status changes, staging, commit, push, rollback, release, dispatcher work, product-diff acceptance, cache truth, provider output, or daemon truth.
 

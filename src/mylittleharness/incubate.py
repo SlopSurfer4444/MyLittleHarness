@@ -115,6 +115,7 @@ class IncubationTarget:
 @dataclass(frozen=True)
 class IncubationWritePlan:
     text: str
+    frontmatter_repair: str = ""
     relationship_fields: tuple[str, ...] = ()
     relationship_skip: str = ""
 
@@ -191,6 +192,7 @@ def incubate_dry_run_findings(inventory: Inventory, request: IncubateRequest) ->
     findings.append(_note_body_finding(target))
     if request.fix_candidate:
         findings.append(Finding("info", "incubate-fix-candidate", "would record note with [MLH-Fix-Candidate] tag", target.rel_path))
+    findings.extend(_frontmatter_repair_findings(target, write_plan, apply=False))
     findings.extend(_relationship_findings(target, write_plan, apply=False))
     findings.append(_note_posture_finding(target, apply=False))
     findings.extend(_boundary_findings())
@@ -229,6 +231,7 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
         *_target_findings(target, apply=True),
         _note_body_finding(target),
         *([Finding("info", "incubate-fix-candidate", "recorded note with [MLH-Fix-Candidate] tag", target.rel_path)] if request.fix_candidate else []),
+        *_frontmatter_repair_findings(target, write_plan, apply=True),
         *_relationship_findings(target, write_plan, apply=True),
         _note_posture_finding(target, apply=True, existed=existed),
         *_boundary_findings(),
@@ -885,15 +888,16 @@ def _incubation_write_plan(inventory: Inventory, target: IncubationTarget, *, ex
         )
 
     current_text = target.path.read_text(encoding="utf-8")
-    updated_text = current_text
+    updated_text, frontmatter_repair = _existing_note_text_with_frontmatter(target, current_text)
     relationship_fields: tuple[str, ...] = ()
     relationship_skip = ""
     if relationships:
-        updated_text, relationship_fields, relationship_skip = _text_with_relationships_if_unclaimed(current_text, relationships)
+        updated_text, relationship_fields, relationship_skip = _text_with_relationships_if_unclaimed(updated_text, relationships)
     else:
         relationship_skip = "no active plan relationship facts were structurally known"
     return IncubationWritePlan(
         text=updated_text + _append_entry(target.note),
+        frontmatter_repair=frontmatter_repair,
         relationship_fields=relationship_fields,
         relationship_skip=relationship_skip,
     )
@@ -944,6 +948,31 @@ def _target_matches_active_plan(target: IncubationTarget, plan_data: dict[str, o
     return bool(target_keys & {key for key in candidate_keys if key})
 
 
+def _existing_note_text_with_frontmatter(target: IncubationTarget, text: str) -> tuple[str, str]:
+    frontmatter = parse_frontmatter(text)
+    if frontmatter.has_frontmatter and not frontmatter.errors:
+        return text, ""
+    reason = "existing note frontmatter is malformed" if frontmatter.has_frontmatter else "existing note has no frontmatter"
+    return (
+        _prepend_incubation_frontmatter(target, text),
+        f"{reason}; prepended canonical incubation frontmatter before appending",
+    )
+
+
+def _prepend_incubation_frontmatter(target: IncubationTarget, text: str) -> str:
+    today = date.today().isoformat()
+    return (
+        "---\n"
+        f'topic: "{_yaml_double_quoted_value(target.topic)}"\n'
+        'status: "incubating"\n'
+        f'created: "{today}"\n'
+        f'updated: "{today}"\n'
+        f'source: "{INCUBATION_SOURCE}"\n'
+        "---\n"
+        + text.lstrip("\n")
+    )
+
+
 def _text_with_relationships_if_unclaimed(text: str, relationships: dict[str, str]) -> tuple[str, tuple[str, ...], str]:
     frontmatter = parse_frontmatter(text)
     if not frontmatter.has_frontmatter:
@@ -972,6 +1001,20 @@ def _relationship_findings(target: IncubationTarget, plan: IncubationWritePlan, 
     if plan.relationship_skip and apply:
         return [Finding("info", "incubate-relationship-skipped", plan.relationship_skip, target.rel_path)]
     return []
+
+
+def _frontmatter_repair_findings(target: IncubationTarget, plan: IncubationWritePlan, apply: bool) -> list[Finding]:
+    if not plan.frontmatter_repair:
+        return []
+    prefix = "" if apply else "would "
+    return [
+        Finding(
+            "info",
+            "incubate-frontmatter-prepended" if apply else "incubate-frontmatter-plan",
+            f"{prefix}{plan.frontmatter_repair}",
+            target.rel_path,
+        )
+    ]
 
 
 def _new_note_text(target: IncubationTarget, relationships: dict[str, str] | None = None) -> str:

@@ -197,6 +197,8 @@ That means:
 
 Hooks or helper scripts may assist, but correctness must not depend on hidden hooks.
 
+The first-contact hook event is verification context only. `hooks --run session-start` and its JSON payload can show the active lifecycle posture, next legal dry-run candidate, and generated projection/SQLite cache posture before an agent starts work, but that output is not proof that a phase is complete, not proof that docs are updated, and not approval for lifecycle movement, archive, roadmap done-status, Git actions, dispatcher work, provider routing, product-diff acceptance, staging, commit, push, or release. Closeout evidence must still name changed artifacts, verification commands, observed results, docs decision, state writeback, residual risk, and commit decision.
+
 ## Fresh-Context Review and Worktree Use
 
 Fresh-context review is recommended for:

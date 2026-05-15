@@ -399,6 +399,9 @@ def projection_cache_posture_payload(
         "read_only": True,
         "authority": "repo-visible source files and in-memory projection remain authoritative",
         "refreshable_by_adapter": False,
+        "self_heal_command": "mylittleharness --root <root> projection --warm-cache --target all",
+        "self_healable_by_command": True,
+        "refresh_policy": "missing, dirty, stale, corrupt, or malformed generated cache can be warmed or rebuilt explicitly without creating lifecycle authority",
         "components": {
             "artifacts": artifact,
             "sqlite_index": index,

@@ -480,7 +480,8 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_mode.add_argument("--doctor", action="store_true", help="Inspect hook posture and supported events without writing files.")
     hooks_mode.add_argument("--dry-run", action="store_true", help="Preview explicit hook shim installation without writing files.")
     hooks_mode.add_argument("--apply", action="store_true", help="Install the selected warning-only hook shim after dry-run review.")
-    hooks_mode.add_argument("--run", choices=("git-pre-commit", "agent-status"), help="Run one hook event as a foreground read-only adapter.")
+    hooks_mode.add_argument("--run", choices=("git-pre-commit", "agent-status", "session-start"), help="Run one hook event as a foreground read-only adapter.")
+    hooks.add_argument("--json", action="store_true", help="Emit a structured hook event payload with --run.")
     hooks.add_argument("--hook", choices=("git-pre-commit",), default="git-pre-commit", help="Hook shim to install. Defaults to git-pre-commit.")
     hooks.add_argument("--force", action="store_true", help="Replace an existing non-MLH hook only after explicit review.")
     hooks.add_argument("hook_args", nargs=argparse.REMAINDER, help="Optional raw hook arguments after --run.")
@@ -546,6 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_mode.add_argument("--inspect", action="store_true", help="Inspect the selected adapter projection without installing or running an adapter.")
     adapter_mode.add_argument("--serve", action="store_true", help="Serve the selected adapter projection as a foreground MCP stdio JSON-RPC server.")
     adapter_mode.add_argument("--client-config", action="store_true", help="Print no-write MCP client configuration for the selected adapter projection.")
+    adapter_mode.add_argument("--install-client-config", action="store_true", help="Review or apply an idempotent Codex MCP client config merge.")
     adapter.add_argument(
         "--target",
         choices=(MCP_READ_PROJECTION_TARGET, APPROVAL_RELAY_TARGET),
@@ -553,6 +555,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Adapter projection target to inspect. Defaults to mcp-read-projection.",
     )
     adapter.add_argument("--transport", choices=("stdio",), help="Adapter serving transport. Required with --serve; only stdio is supported.")
+    adapter.add_argument("--dry-run", action="store_true", help="Preview adapter client config installation without writing workstation files.")
+    adapter.add_argument("--apply", action="store_true", help="Apply a reviewed adapter client config installation.")
+    adapter.add_argument("--config-path", dest="config_path", help="Override the Codex config path for client-config inspection or install tests.")
     adapter.add_argument("--approval-packet-ref", dest="approval_packet_refs", action="append", default=[], help="Root-relative approval packet JSON reference for approval-relay inspect reports. May be repeated.")
     adapter.add_argument("--relay-channel", dest="relay_channel", default="manual", help="Approval relay channel label. No delivery transport is opened.")
     adapter.add_argument("--relay-recipient", dest="relay_recipient", default="", help="Optional approval relay recipient label. No secrets or delivery state are stored.")

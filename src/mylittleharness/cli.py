@@ -14,6 +14,7 @@ from .adapter import (
     MCP_READ_PROJECTION_TARGET,
     approval_relay_client_config,
     approval_relay_sections,
+    codex_mcp_install_sections,
     mcp_read_projection_client_config,
     mcp_read_projection_sections,
     serve_mcp_read_projection,
@@ -90,6 +91,7 @@ from .handoff import (
     make_handoff_packet_request,
 )
 from .hooks import (
+    hook_event_payload,
     hook_install_apply_findings,
     hook_install_dry_run_findings,
     hook_run_sections,
@@ -262,8 +264,22 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("adapter --serve requires --transport stdio")
         if args.serve and args.target != MCP_READ_PROJECTION_TARGET:
             parser.error("adapter --serve is only supported for --target mcp-read-projection")
+        if args.install_client_config and args.target != MCP_READ_PROJECTION_TARGET:
+            parser.error("adapter --install-client-config is only supported for --target mcp-read-projection")
+        if args.install_client_config and not (args.dry_run or args.apply):
+            parser.error("adapter --install-client-config requires --dry-run or --apply")
+        if not args.install_client_config and (args.dry_run or args.apply):
+            parser.error("adapter --dry-run/--apply are only valid with --install-client-config")
+        if args.apply and args.dry_run:
+            parser.error("adapter --dry-run and --apply are mutually exclusive")
+        if args.config_path and not (args.client_config or args.install_client_config):
+            parser.error("adapter --config-path is only valid with --client-config or --install-client-config")
+        if args.target == APPROVAL_RELAY_TARGET and args.config_path:
+            parser.error("adapter --config-path is only supported for --target mcp-read-projection")
         if args.target != APPROVAL_RELAY_TARGET and (args.approval_packet_refs or args.relay_channel != "manual" or args.relay_recipient):
             parser.error("--approval-packet-ref and --relay-* are only valid with adapter --target approval-relay")
+    if args.command == "hooks" and getattr(args, "json", False) and not getattr(args, "run", None):
+        parser.error("hooks --json is only valid with --run")
     root = Path(args.root).expanduser()
     try:
         inventory = load_for_root(root)
@@ -408,6 +424,9 @@ def main(argv: list[str] | None = None) -> int:
             sections = hook_run_sections(inventory, args.run, args.hook_args)
             findings = flatten_sections(sections)
             result = _result_for(findings)
+            if args.json:
+                emit_text(json.dumps(hook_event_payload(inventory, args.run, args.hook_args), sort_keys=True, indent=2, ensure_ascii=True))
+                return 1 if any(finding.severity == "error" for finding in findings) else 0
             emit_text(render_sectioned_report(f"hooks --run {args.run}", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
             return 0
         request = make_hook_install_request(args)
@@ -884,9 +903,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.serve:
             return serve_mcp_read_projection(inventory, sys.stdin, sys.stdout)
         if args.client_config:
-            config = approval_relay_client_config(inventory) if args.target == APPROVAL_RELAY_TARGET else mcp_read_projection_client_config(inventory)
+            config = approval_relay_client_config(inventory) if args.target == APPROVAL_RELAY_TARGET else mcp_read_projection_client_config(inventory, codex_config_path=args.config_path)
             emit_text(json.dumps(config, sort_keys=True, indent=2, ensure_ascii=True))
             return 0
+        if args.install_client_config:
+            sections = codex_mcp_install_sections(inventory, codex_config_path=args.config_path, apply=args.apply)
+            findings = flatten_sections(sections)
+            result = _result_for(findings)
+            report_name = f"adapter --install-client-config --target {args.target} {'--apply' if args.apply else '--dry-run'}"
+            emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+            return 2 if args.apply and any(finding.severity == "error" for finding in findings) else 0
         if args.target == APPROVAL_RELAY_TARGET:
             sections = approval_relay_sections(
                 inventory,
@@ -2050,6 +2076,7 @@ def _repair_apply_exit_code(findings) -> int:
         "docmap-create-refused",
         "stable-spec-create-refused",
         "state-frontmatter-refused",
+        "lifecycle-frontmatter-refused",
     }
     if any(finding.severity == "error" and finding.code in invalid_codes for finding in findings):
         return 2
@@ -2353,6 +2380,7 @@ def _suggestions(command: str, findings) -> list[str]:
             "docmap-create-refused",
             "stable-spec-create-refused",
             "state-frontmatter-refused",
+            "lifecycle-frontmatter-refused",
         }
         for finding in errors
     ):
@@ -2367,6 +2395,8 @@ def _suggestions(command: str, findings) -> list[str]:
         return ["repair apply created a repair snapshot, updated the selected docmap routes, and ran post-repair validation."]
     if any(finding.code == "state-frontmatter-updated" for finding in findings):
         return ["repair apply created a repair snapshot, prepended project-state frontmatter, and stopped before other repair classes."]
+    if any(finding.code == "lifecycle-frontmatter-updated" for finding in findings):
+        return ["repair apply created a repair snapshot, prepended lifecycle markdown frontmatter, and stopped before other repair classes."]
     if any(finding.code == "agents-contract-create-created" for finding in findings):
         return ["repair apply created the selected AGENTS.md operator contract without creating a repair snapshot and ran post-repair validation."]
     if any(finding.code == "docmap-create-created" for finding in findings):
@@ -2383,6 +2413,9 @@ def _suggestions(command: str, findings) -> list[str]:
             "state-frontmatter-plan",
             "state-frontmatter-refused",
             "state-frontmatter-skipped",
+            "lifecycle-frontmatter-plan",
+            "lifecycle-frontmatter-plan-refused",
+            "lifecycle-frontmatter-plan-skipped",
             "snapshot-plan",
             "snapshot-plan-refused",
             "snapshot-plan-skipped",

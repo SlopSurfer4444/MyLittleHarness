@@ -4,6 +4,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from .dashboard import dashboard_agent_packet, dashboard_payload
 from .inventory import Inventory
 from .models import Finding
 from .preflight import preflight_sections
@@ -11,8 +12,10 @@ from .preflight import preflight_sections
 
 HOOK_PRE_COMMIT = "git-pre-commit"
 HOOK_AGENT_STATUS = "agent-status"
+HOOK_SESSION_START = "session-start"
 INSTALLABLE_HOOKS = (HOOK_PRE_COMMIT,)
-RUNNABLE_HOOKS = (HOOK_PRE_COMMIT, HOOK_AGENT_STATUS)
+RUNNABLE_HOOKS = (HOOK_PRE_COMMIT, HOOK_AGENT_STATUS, HOOK_SESSION_START)
+FIRST_CONTACT_HOOKS = (HOOK_SESSION_START,)
 
 
 @dataclass(frozen=True)
@@ -108,7 +111,54 @@ def hook_run_sections(inventory: Inventory, hook_id: str, hook_args: list[str]) 
             )
         )
         return [("Event", event_findings), ("Boundary", _hook_boundary_findings())]
+    if hook_id in FIRST_CONTACT_HOOKS:
+        return [
+            ("Event", event_findings),
+            ("First Contact Context", _first_contact_context_findings(inventory, hook_id)),
+            ("Boundary", _hook_boundary_findings()),
+        ]
     return [("Event", event_findings), *preflight_sections(inventory), ("Boundary", _hook_boundary_findings())]
+
+
+def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str]) -> dict[str, object]:
+    sections = hook_run_sections(inventory, hook_id, hook_args)
+    findings = [finding for _section, section_findings in sections for finding in section_findings]
+    dashboard = dashboard_payload(inventory) if hook_id in FIRST_CONTACT_HOOKS else {}
+    agent_packet = dashboard.get("agentPacket") if isinstance(dashboard.get("agentPacket"), dict) else dashboard_agent_packet(inventory)
+    cache_posture = dashboard.get("cachePosture") if isinstance(dashboard.get("cachePosture"), dict) else {}
+    accelerator_adoption = (
+        agent_packet.get("acceleratorAdoption") if isinstance(agent_packet.get("acceleratorAdoption"), dict) else dashboard.get("acceleratorAdoption")
+    )
+    if not isinstance(accelerator_adoption, dict):
+        accelerator_adoption = {}
+    lifecycle = agent_packet.get("lifecycle") if isinstance(agent_packet.get("lifecycle"), dict) else {}
+    status = _hook_status(findings)
+    status_message = _hook_status_message(hook_id, lifecycle, cache_posture)
+    additional_context = _hook_additional_context(agent_packet, cache_posture, accelerator_adoption) if hook_id in FIRST_CONTACT_HOOKS else ""
+    return {
+        "schema": "mylittleharness.hook-event.v1",
+        "event": hook_id,
+        "status": status,
+        "policy_mode": "warn",
+        "status_message": status_message,
+        "system_message": _hook_system_message(findings),
+        "additional_context": additional_context,
+        "block": False,
+        "arg_count": len(_clean_hook_args(hook_args)),
+        "root": {"path": str(inventory.root), "kind": inventory.root_kind},
+        "agentPacket": agent_packet,
+        "cachePosture": cache_posture,
+        "acceleratorAdoption": accelerator_adoption,
+        "findings": [finding.to_dict() for finding in findings],
+        "client_hints": {
+            "codex": {
+                "statusMessage": status_message,
+                "systemMessage": _hook_system_message(findings),
+                "hookSpecificOutput": {"additionalContext": additional_context},
+            }
+        },
+        "boundary": _hook_payload_boundary(),
+    }
 
 
 def render_hook_shim(root: Path, hook_id: str) -> str:
@@ -172,6 +222,7 @@ def _hook_event_findings() -> list[Finding]:
     return [
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_PRE_COMMIT}; delegates to preflight and remains warning-only"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_AGENT_STATUS}; reports root posture without writing files"),
+        Finding("info", "hooks-event", f"runnable hook event: {HOOK_SESSION_START}; emits first-contact context without writing files"),
     ]
 
 
@@ -206,14 +257,150 @@ def _hook_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "hooks-boundary",
-            "hooks are sensors, blockers, or context injectors only; hook output cannot approve closeout, archive, roadmap status, staging, commit, push, rollback, release, or next-plan opening",
+            "hooks are sensors, blockers, or context injectors only; hook output cannot approve lifecycle movement, closeout, archive, roadmap status, staging, commit, push, rollback, release, product-diff acceptance, dispatcher work, provider routing, or next-plan opening",
         ),
         Finding(
             "info",
             "hooks-runtime-boundary",
-            "hooks create no daemon, dashboard, queue, cache authority, provider gateway, hidden worker, or lifecycle runtime",
+            "hooks create no daemon, listener, dashboard server, queue, cache authority, provider gateway, hidden worker, or lifecycle runtime",
         ),
     ]
+
+
+def _first_contact_context_findings(inventory: Inventory, hook_id: str) -> list[Finding]:
+    payload = dashboard_payload(inventory)
+    agent_packet = payload["agentPacket"]
+    cache_posture = payload["cachePosture"]
+    accelerator_adoption = payload["acceleratorAdoption"]
+    assert isinstance(agent_packet, dict)
+    assert isinstance(cache_posture, dict)
+    assert isinstance(accelerator_adoption, dict)
+    lifecycle = agent_packet.get("lifecycle", {})
+    components = cache_posture.get("components", {})
+    mcp = accelerator_adoption.get("mcp", {})
+    assert isinstance(mcp, dict)
+    artifacts = _component_status(components, "artifacts")
+    sqlite_index = _component_status(components, "sqlite_index")
+    return [
+        Finding(
+            "info",
+            "hooks-first-contact-context",
+            (
+                f"{hook_id} emits a bounded dashboard-backed agent packet for first contact; "
+                f"plan_status={_payload_value(lifecycle, 'plan_status')}; "
+                f"active_phase={_payload_value(lifecycle, 'active_phase')}; "
+                "use --json for the structured hook event payload"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+        Finding(
+            "info" if artifacts == "current" and sqlite_index == "current" else "warn",
+            "hooks-first-contact-cache-posture",
+            (
+                f"projection cache posture for first contact: artifacts={artifacts}; sqlite_index={sqlite_index}; "
+                "hook output reports stale/degraded cache but does not refresh it or make cache truth"
+            ),
+            ".mylittleharness/generated/projection",
+        ),
+        Finding(
+            "info",
+            "hooks-first-contact-accelerator-adoption",
+            (
+                f"MCP adoption status for first contact: {str(mcp.get('status') or 'unknown')}; "
+                f"mounted={str(mcp.get('mounted') is True).lower()}; dashboard_packet=available; "
+                "config_merge=idempotent-explicit; rg_verification=required"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+        Finding(
+            "info",
+            "hooks-first-contact-boundary",
+            "first-contact hook context cannot approve lifecycle, Git, dispatcher, provider, product-diff, cache, archive, roadmap, staging, commit, push, or release decisions",
+        ),
+    ]
+
+
+def _hook_status(findings: list[Finding]) -> str:
+    if any(finding.severity == "error" for finding in findings):
+        return "error"
+    if any(finding.severity == "warn" for finding in findings):
+        return "warn"
+    return "ok"
+
+
+def _hook_status_message(hook_id: str, lifecycle: object, cache_posture: object) -> str:
+    if hook_id not in FIRST_CONTACT_HOOKS:
+        return f"MLH hook {hook_id}: advisory context only"
+    components = cache_posture.get("components", {}) if isinstance(cache_posture, dict) else {}
+    lifecycle_data = lifecycle if isinstance(lifecycle, dict) else {}
+    return (
+        "MLH first contact: "
+        f"plan_status={_payload_value(lifecycle_data, 'plan_status')}; "
+        f"phase={_payload_value(lifecycle_data, 'active_phase')}; "
+        f"artifacts={_component_status(components, 'artifacts')}; "
+        f"sqlite={_component_status(components, 'sqlite_index')}"
+    )
+
+
+def _hook_system_message(findings: list[Finding]) -> str | None:
+    sample = next((finding for finding in findings if finding.severity in {"warn", "error"}), None)
+    return sample.message if sample else None
+
+
+def _hook_additional_context(agent_packet: object, cache_posture: object, accelerator_adoption: object) -> str:
+    if not isinstance(agent_packet, dict):
+        return ""
+    lifecycle = agent_packet.get("lifecycle", {})
+    next_legal = agent_packet.get("nextLegalDryRun", {})
+    recommended = agent_packet.get("recommendedCommands", [])
+    components = cache_posture.get("components", {}) if isinstance(cache_posture, dict) else {}
+    adoption = accelerator_adoption if isinstance(accelerator_adoption, dict) else {}
+    mcp = adoption.get("mcp", {}) if isinstance(adoption.get("mcp"), dict) else {}
+    return "\n".join(
+        [
+            "MyLittleHarness first-contact context:",
+            f"- lifecycle: plan_status={_payload_value(lifecycle, 'plan_status')}; active_plan={_payload_value(lifecycle, 'active_plan')}; active_phase={_payload_value(lifecycle, 'active_phase')}; phase_status={_payload_value(lifecycle, 'phase_status')}",
+            f"- cache: artifacts={_component_status(components, 'artifacts')}; sqlite_index={_component_status(components, 'sqlite_index')}",
+            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; warm_cache=mylittleharness --root <root> projection --warm-cache --target all; rg_verification=required",
+            f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
+            f"- recommended first-pass commands: {', '.join(str(command) for command in recommended[:4])}",
+            "- boundary: this hook is advisory context only and approves no lifecycle, Git, dispatcher, provider, product-diff, cache, archive, staging, commit, push, or release action.",
+        ]
+    )
+
+
+def _hook_payload_boundary() -> dict[str, object]:
+    return {
+        "readOnly": True,
+        "writesFiles": False,
+        "installsHook": False,
+        "startsListener": False,
+        "startsDaemon": False,
+        "refreshesGeneratedCache": False,
+        "createsAdapterState": False,
+        "authorizesLifecycle": False,
+        "authorizesGit": False,
+        "authorizesDispatcher": False,
+        "authorizesProvider": False,
+        "authorizesProductDiff": False,
+        "authorizesCacheTruth": False,
+    }
+
+
+def _component_status(components: object, key: str) -> str:
+    if not isinstance(components, dict):
+        return "unknown"
+    value = components.get(key)
+    if not isinstance(value, dict):
+        return "unknown"
+    return str(value.get("status") or "unknown")
+
+
+def _payload_value(payload: object, key: str) -> str:
+    if not isinstance(payload, dict):
+        return "<none>"
+    value = payload.get(key)
+    return str(value) if value not in (None, "") else "<none>"
 
 
 def _hook_target(root: Path, hook_id: str) -> Path:

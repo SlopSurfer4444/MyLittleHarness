@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
@@ -25,6 +27,10 @@ MCP_READ_SOURCE_TOOL = "mylittleharness.read_source"
 MCP_SEARCH_TOOL = "mylittleharness.search"
 MCP_RELATED_OR_BUNDLE_TOOL = "mylittleharness.related_or_bundle"
 MCP_READ_PROJECTION_SERVER_NAME = "mylittleharness"
+CODEX_CONFIG_DISPLAY_PATH = "%USERPROFILE%\\.codex\\config.toml"
+CODEX_MCP_ADOPTION_SCHEMA = "mylittleharness.codex-mcp-adoption.v1"
+CODEX_MCP_BLOCK_START = "# BEGIN MyLittleHarness mcp-read-projection"
+CODEX_MCP_BLOCK_END = "# END MyLittleHarness mcp-read-projection"
 MCP_TOOL_NAMES = (
     MCP_READ_PROJECTION_TOOL,
     MCP_READ_SOURCE_TOOL,
@@ -381,8 +387,9 @@ def mcp_read_projection_serve_command(inventory: Inventory) -> list[str]:
     ]
 
 
-def mcp_read_projection_client_config(inventory: Inventory) -> dict[str, object]:
+def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path: str | Path | None = None) -> dict[str, object]:
     command = mcp_read_projection_serve_command(inventory)
+    adoption = codex_mcp_adoption_payload(inventory, codex_config_path=codex_config_path, include_snippet=True)
     server = {
         "name": MCP_READ_PROJECTION_SERVER_NAME,
         "command": command[0],
@@ -415,20 +422,154 @@ def mcp_read_projection_client_config(inventory: Inventory) -> dict[str, object]
         },
         "codex": {
             "configPath": "%USERPROFILE%\\.codex\\config.toml",
+            "resolvedConfigPath": adoption["configPath"],
             "server": server,
             "toml": _codex_mcp_toml(command),
+            "adoption": adoption,
         },
         "generic": {
             "server": server,
             "json": {"mcpServers": {MCP_READ_PROJECTION_SERVER_NAME: {"command": command[0], "args": command[1:]}}},
         },
+        "adoption": adoption,
         "boundary": {
             "writesUserConfig": False,
+            "writesUserConfigOnApplyOnly": True,
             "writesRepoFiles": False,
+            "storesSecrets": False,
             "authorizesLifecycle": False,
             "fallback": "repo-visible files and generic CLI remain authoritative when no MCP client is active",
         },
     }
+
+
+def codex_mcp_adoption_payload(
+    inventory: Inventory,
+    *,
+    codex_config_path: str | Path | None = None,
+    include_snippet: bool = False,
+) -> dict[str, object]:
+    command = mcp_read_projection_serve_command(inventory)
+    config_path = _codex_config_path(codex_config_path)
+    expected_server = _codex_expected_server(command)
+    snippet = _codex_mcp_toml(command)
+    status, mounted, reason, extra_keys = _codex_config_status(config_path, expected_server)
+    merge_mode = _codex_merge_mode(status)
+    payload: dict[str, object] = {
+        "schema": CODEX_MCP_ADOPTION_SCHEMA,
+        "client": "codex",
+        "serverName": MCP_READ_PROJECTION_SERVER_NAME,
+        "status": status,
+        "mounted": mounted,
+        "configPath": str(config_path),
+        "displayConfigPath": CODEX_CONFIG_DISPLAY_PATH if codex_config_path is None else str(config_path),
+        "expectedServer": expected_server,
+        "expectedSnippetHash": _payload_hash(snippet)[:12],
+        "merge": {
+            "mode": merge_mode,
+            "idempotent": True,
+            "dryRunCommand": "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
+            "applyCommand": "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --apply",
+            "backupExistingConfigOnApply": True,
+            "writesUserConfigOnlyOnApply": True,
+            "storesSecrets": False,
+            "printsExistingConfigValues": False,
+        },
+        "dashboardPacketAvailable": True,
+        "firstPass": [
+            "mylittleharness --root <root> dashboard --inspect --json",
+            "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
+            "mylittleharness --root <root> projection --warm-cache --target all",
+            "rg \"<exact symbol or route>\"",
+        ],
+        "boundary": (
+            "MCP adoption is helper tooling only; mounted or missing status cannot approve lifecycle movement, repair, "
+            "archive, roadmap status, staging, commit, push, provider routing, product diffs, or cache truth"
+        ),
+    }
+    if reason:
+        payload["reason"] = reason
+    if extra_keys:
+        payload["extraFieldNames"] = list(extra_keys)
+    if include_snippet:
+        payload["toml"] = snippet
+    return payload
+
+
+def codex_mcp_install_sections(
+    inventory: Inventory,
+    *,
+    codex_config_path: str | Path | None = None,
+    apply: bool = False,
+) -> list[tuple[str, list[Finding]]]:
+    command = mcp_read_projection_serve_command(inventory)
+    config_path = _codex_config_path(codex_config_path)
+    expected_server = _codex_expected_server(command)
+    status, mounted, reason, extra_keys = _codex_config_status(config_path, expected_server)
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "adapter-codex-config-boundary",
+            (
+                "Codex MCP config adoption is explicit and client-local; dry-run writes nothing, apply writes only "
+                "the reviewed MCP server table, and repo-visible files remain authority"
+            ),
+        ),
+        Finding(
+            "info",
+            "adapter-codex-config-target",
+            f"client=codex; server={MCP_READ_PROJECTION_SERVER_NAME}; config_path={config_path}; mounted={str(mounted).lower()}; status={status}",
+        ),
+        Finding(
+            "info",
+            "adapter-codex-config-snippet",
+            f"expected idempotent server snippet hash={_payload_hash(_codex_mcp_toml(command))[:12]}; existing config values are not printed",
+        ),
+        Finding(
+            "info",
+            "adapter-codex-config-merge",
+            (
+                f"merge_mode={_codex_merge_mode(status)}; backup_existing_config_on_apply=true; "
+                "stores_secrets=false; apply is refused for conflicting or invalid existing server tables"
+            ),
+        ),
+    ]
+    if reason:
+        findings.append(Finding("info" if mounted else "warn", "adapter-codex-config-status", reason))
+    if extra_keys:
+        findings.append(
+            Finding(
+                "info",
+                "adapter-codex-config-extra-fields",
+                f"existing server table has extra field names only: {', '.join(extra_keys)}; values are not printed",
+            )
+        )
+    if not apply:
+        if status in {"conflict", "invalid-toml", "blocked", "unreadable"}:
+            findings.append(
+                Finding(
+                    "warn",
+                    "adapter-codex-config-dry-run-refused",
+                    "apply would be refused until the existing Codex config is reviewed; no workstation file was changed",
+                )
+            )
+        elif mounted:
+            findings.append(Finding("info", "adapter-codex-config-dry-run", "MCP server is already mounted; apply would be a no-op"))
+        else:
+            findings.append(
+                Finding(
+                    "info",
+                    "adapter-codex-config-dry-run",
+                    f"would append MCP server table to {config_path}; no workstation file was changed",
+                )
+            )
+        findings.extend(_codex_config_install_boundary_findings())
+        return [("Codex MCP Config", findings)]
+
+    apply_findings = _apply_codex_mcp_config(config_path, command, status, mounted)
+    findings.extend(apply_findings)
+    findings.extend(_codex_config_install_boundary_findings())
+    return [("Codex MCP Config", findings)]
 
 
 def serve_mcp_read_projection(
@@ -722,6 +863,141 @@ def _codex_mcp_toml(command: list[str]) -> str:
             f"args = [{rendered_args}]",
         ]
     )
+
+
+def _codex_mcp_toml_block(command: list[str]) -> str:
+    return "\n".join([CODEX_MCP_BLOCK_START, _codex_mcp_toml(command), CODEX_MCP_BLOCK_END, ""])
+
+
+def _codex_config_path(config_path: str | Path | None) -> Path:
+    if config_path is not None:
+        return Path(config_path).expanduser()
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile:
+        return Path(userprofile).expanduser() / ".codex" / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _codex_expected_server(command: list[str]) -> dict[str, object]:
+    return {"command": command[0], "args": command[1:]}
+
+
+def _codex_config_status(
+    config_path: Path,
+    expected_server: dict[str, object],
+) -> tuple[str, bool, str, tuple[str, ...]]:
+    if config_path.exists() and not config_path.is_file():
+        return "blocked", False, "Codex config path exists but is not a regular file; apply is refused", ()
+    if not config_path.exists():
+        return "missing", False, "Codex config file is missing; reviewed apply can create it", ()
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return "unreadable", False, f"Codex config could not be read; apply is refused: {exc}", ()
+    try:
+        data = tomllib.loads(text or "")
+    except tomllib.TOMLDecodeError as exc:
+        return "invalid-toml", False, f"Codex config is not valid TOML; apply is refused: {exc}", ()
+    servers = data.get("mcp_servers")
+    server = servers.get(MCP_READ_PROJECTION_SERVER_NAME) if isinstance(servers, dict) else None
+    if server is None:
+        return "missing-server", False, "Codex config is readable but the mylittleharness MCP server table is missing", ()
+    if not isinstance(server, dict):
+        return "conflict", False, "Codex config has a non-table mylittleharness MCP server entry; apply is refused", ()
+    command_matches = server.get("command") == expected_server["command"]
+    args_matches = server.get("args") == expected_server["args"]
+    extra_keys = tuple(sorted(str(key) for key in set(server) - {"command", "args"}))
+    if command_matches and args_matches:
+        return "mounted", True, "Codex config already mounts the expected mylittleharness MCP server", extra_keys
+    return "conflict", False, "Codex config already has a mylittleharness MCP server table with different command or args; apply is refused", extra_keys
+
+
+def _codex_merge_mode(status: str) -> str:
+    if status == "mounted":
+        return "no-op"
+    if status in {"missing", "missing-server"}:
+        return "append-managed-server-table"
+    return "refuse-unreviewed-existing-config"
+
+
+def _apply_codex_mcp_config(config_path: Path, command: list[str], status: str, mounted: bool) -> list[Finding]:
+    if mounted:
+        return [Finding("info", "adapter-codex-config-apply-unchanged", "MCP server is already mounted; no workstation file was changed")]
+    if status not in {"missing", "missing-server"}:
+        return [
+            Finding(
+                "error",
+                "adapter-codex-config-apply-refused",
+                f"refused to write Codex config while adoption status is {status}; run --client-config and review the existing config manually",
+            )
+        ]
+    if config_path.exists() and not config_path.is_file():
+        return [Finding("error", "adapter-codex-config-apply-refused", "config path exists but is not a regular file")]
+    if config_path.parent.exists() and not config_path.parent.is_dir():
+        return [Finding("error", "adapter-codex-config-apply-refused", "config parent path exists but is not a directory")]
+    try:
+        before = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        backup_finding = _backup_codex_config(config_path, before) if before else None
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(_merged_codex_config_text(before, command), encoding="utf-8")
+    except OSError as exc:
+        return [Finding("error", "adapter-codex-config-apply-refused", f"could not write Codex config: {exc}")]
+    after_status, after_mounted, after_reason, _extra = _codex_config_status(config_path, _codex_expected_server(command))
+    findings: list[Finding] = []
+    if backup_finding is not None:
+        findings.append(backup_finding)
+    if after_mounted:
+        findings.append(
+            Finding(
+                "info",
+                "adapter-codex-config-apply-written",
+                f"mounted mylittleharness MCP server in Codex config; post_status={after_status}; {after_reason}",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "error",
+                "adapter-codex-config-apply-refused",
+                f"Codex config write did not produce a mounted server; post_status={after_status}; {after_reason}",
+            )
+        )
+    return findings
+
+
+def _backup_codex_config(config_path: Path, text: str) -> Finding:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    backup_path = config_path.with_name(f"{config_path.name}.mylittleharness-backup-{digest}")
+    if not backup_path.exists():
+        backup_path.write_text(text, encoding="utf-8")
+    return Finding(
+        "info",
+        "adapter-codex-config-backup",
+        f"existing Codex config backup present: {backup_path}; backup content was not printed",
+    )
+
+
+def _merged_codex_config_text(before: str, command: list[str]) -> str:
+    prefix = before.rstrip()
+    block = _codex_mcp_toml_block(command).rstrip()
+    if not prefix:
+        return block + "\n"
+    return prefix + "\n\n" + block + "\n"
+
+
+def _codex_config_install_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "adapter-codex-config-no-secrets",
+            "reports include only status, expected command/args, hashes, and field names; existing config values are never printed",
+        ),
+        Finding(
+            "info",
+            "adapter-codex-config-no-authority",
+            "MCP config adoption cannot approve lifecycle movement, repair, archive, roadmap status, staging, commit, push, provider routing, product diffs, or cache truth",
+        ),
+    ]
 
 
 def _root_selection_payload(inventory: Inventory, default_root: Path, requested_root: str | None) -> dict[str, object]:

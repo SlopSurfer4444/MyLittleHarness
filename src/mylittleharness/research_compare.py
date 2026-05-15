@@ -726,14 +726,14 @@ def _iter_lifecycle_markdown_files(root: Path) -> tuple[Path, ...]:
 def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> str:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
-        return text
+        return _prepend_frontmatter_scalars(text, updates)
     closing_index = None
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
             closing_index = index
             break
     if closing_index is None:
-        return text
+        return _prepend_frontmatter_scalars(text, updates)
 
     seen: set[str] = set()
     index = 1
@@ -759,6 +759,11 @@ def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> str:
     if missing:
         lines[closing_index:closing_index] = [f'{key}: "{_yaml_double_quoted_value(updates[key])}"\n' for key in missing]
     return "".join(lines)
+
+
+def _prepend_frontmatter_scalars(text: str, updates: dict[str, str]) -> str:
+    frontmatter = ["---", *(f'{key}: "{_yaml_double_quoted_value(value)}"' for key, value in updates.items()), "---"]
+    return "\n".join(frontmatter) + "\n" + text.lstrip("\n")
 
 
 def _frontmatter_scalar_continuation_line(line: str) -> bool:

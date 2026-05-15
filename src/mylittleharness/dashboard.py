@@ -4,6 +4,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from .adapter import codex_mcp_adoption_payload
 from .claims import work_claim_status_findings
 from .evidence import agent_run_record_findings, lifecycle_mutation_provenance_findings
 from .handoff import handoff_packet_status_findings
@@ -61,6 +62,7 @@ def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Findi
         "projection": projection_summary_to_dict(build_projection(inventory)),
         "cachePosture": _cache_posture_payload(inventory),
         "agentPacket": dashboard_agent_packet(inventory),
+        "acceleratorAdoption": _accelerator_adoption_payload(inventory),
         "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
         "coordination": _coordination_payload(findings),
         "alerts": _alert_payload(findings),
@@ -104,6 +106,7 @@ def dashboard_check_findings(inventory: Inventory, code_prefix: str = "check-das
             ),
             "project/project-state.md" if inventory.state and inventory.state.exists else None,
         ),
+        _accelerator_adoption_finding(inventory, code_prefix),
     ]
 
 
@@ -373,6 +376,7 @@ def _value(data: dict[str, object], key: str) -> str:
 
 def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
     data = _state_data(inventory)
+    adoption = _accelerator_adoption_payload(inventory)
     return {
         "schema": "mylittleharness.dashboard-agent-packet.v1",
         "source_refs": [
@@ -393,9 +397,12 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
             "mylittleharness --root <root> dashboard --inspect --json",
             "mylittleharness --root <root> intelligence --query \"<task or route question>\"",
             "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
+            "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
+            "mylittleharness --root <root> projection --warm-cache --target all",
             "rg \"<exact symbol or route>\"",
         ],
         "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
+        "acceleratorAdoption": adoption,
         "lifecycle": {
             "plan_status": str(data.get("plan_status") or ""),
             "active_plan": str(data.get("active_plan") or ""),
@@ -404,6 +411,43 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
         },
         "boundary": "agent packet is read-only navigation guidance and cannot approve lifecycle movement, repair, archive, staging, commit, or next-plan opening",
     }
+
+
+def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
+    return {
+        "schema": "mylittleharness.agent-accelerator-adoption.v1",
+        "dashboardPacketAvailable": True,
+        "mcp": codex_mcp_adoption_payload(inventory),
+        "projectionWarmCacheCommand": "mylittleharness --root <root> projection --warm-cache --target all",
+        "rgVerificationRequired": True,
+        "sequence": [
+            "dashboard packet",
+            "MCP read/search/bundle when mounted",
+            "projection warm-cache when stale or missing",
+            "rg exact verification before edits or closeout claims",
+        ],
+        "boundary": (
+            "accelerators are first-contact helpers only; they cannot approve lifecycle movement, repair, archive, "
+            "roadmap status, staging, commit, push, provider routing, product diffs, or cache truth"
+        ),
+    }
+
+
+def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Finding:
+    adoption = _accelerator_adoption_payload(inventory)
+    mcp = adoption["mcp"]
+    assert isinstance(mcp, dict)
+    status = str(mcp.get("status") or "unknown")
+    return Finding(
+        "info",
+        f"{code_prefix}-accelerator-adoption",
+        (
+            f"first-contact accelerators: dashboard_packet=available; mcp={status}; "
+            "projection_warm_cache_command=`mylittleharness --root <root> projection --warm-cache --target all`; "
+            "rg_verification=required; config_merge=idempotent-explicit"
+        ),
+        "project/project-state.md" if inventory.state and inventory.state.exists else None,
+    )
 
 
 def _cache_posture_payload(inventory: Inventory, projection=None) -> dict[str, object]:

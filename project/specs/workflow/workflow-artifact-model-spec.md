@@ -1,3 +1,7 @@
+---
+spec_status: "accepted"
+implementation_posture: "partially-verified"
+---
 # Workflow Artifact Model and Authority Spec
 
 > Product fixture note: This spec is retained as a product compatibility fixture for CLI/tests. Live workflow authority, plans, research, and memory remain in the target repository; legacy reference material is opened only for a named blocker.
@@ -66,6 +70,16 @@ CLI route-table output is a compact discovery view over this artifact model. `st
 
 Route and role manifests are protocol views over the same artifact model, not a new authority layer. `route_manifest` may expose orchestration fields such as `parallelism_class`, `authority_lane`, `exclusive_owner`, `claim_scope`, `claim_required`, `merge_policy`, `fan_in_gate`, `max_parallelism_hint`, `stale_claim_policy`, and `conflict_policy`; lifecycle routes remain sequential and coordinator-owned. `role_manifest` may expose coordination fields such as `orchestration_role`, `may_spawn_workers`, `worker_space_boundary`, `isolation_contract`, `fan_in_output_required`, `work_claim_required`, `work_claim_contract`, `route_receipt_contract`, `fan_in_authority`, `runtime_boundary`, and `coordination_budget`; these fields describe packet and fan-in expectations without spawning workers or granting direct apply authority.
 
+### Route Frontmatter And Projection Discovery
+
+MLH-owned lifecycle Markdown route files are expected to carry frontmatter when they are created, imported, refreshed, or appended through MLH writers. This applies to research, incubation, roadmap, decision, ADR, verification, agent-run evidence, and stable-spec route writes when those routes are present. Legacy files without frontmatter are recoverable source files, but `check` should warn on routed lifecycle Markdown that has no frontmatter or malformed frontmatter so the owning route can rewrite or normalize the file before future writes depend on it. The selected repair rail for missing route frontmatter is snapshot-protected `lifecycle-markdown-frontmatter-repair`; it prepends conservative route metadata only, preserves bodies, and cannot infer truth, move lifecycle state, update docmap entries, approve generated cache, or close out work.
+
+`.agents/docmap.yaml` names route classes, entrypoints, docs-impact routing, and authority boundaries. It is not a registry of every file under known route directories. A new frontmatter-bearing research, incubation, verification, decision, ADR, or roadmap artifact becomes discoverable through inventory, route-reference checks, projection rebuilds, and source-bound searches without editing the docmap. Change the docmap only when route shape, directory ownership, entrypoint behavior, or authority/routing semantics change.
+
+Generated projection artifacts, relationship graphs, dashboard pulses, MCP read projections, and SQLite indexes rebuild from repo-visible route files and their frontmatter/body content. When a lifecycle write changes routed Markdown or lifecycle metadata and generated cache exists, the write path must mark that cache dirty or rebuild/warm it through the bounded projection rail. First-contact navigation may use generated acceleration only after it sees current cache, or after it reports dirty/missing/stale/degraded cache with the next safe `projection --rebuild --target all` or `projection --warm-cache --target all` route.
+
+The first-contact hook event is another generated/projection consumer, not a new artifact authority class. `hooks --run session-start --json` may package lifecycle posture, dashboard agent packet data, route refs, and projection/SQLite cache posture into `mylittleharness.hook-event.v1` for a native client. The hook payload is derived context and must remain rebuildable from repo-visible sources plus current inspection; it cannot become the only record of active focus, docs decisions, phase evidence, archive state, roadmap status, product-diff acceptance, Git state, dispatcher readiness, provider selection, or cache truth.
+
 Repo-visible coordination artifacts may live under `project/verification/**` when they are useful fan-in evidence. Work claims belong under `project/verification/work-claims/*.json`, handoff packets under `project/verification/handoffs/*.json`, route receipts under `project/verification/route-receipts/*.json`, and approval packets under `project/verification/approval-packets/*.json`. These records coordinate scoped work, handoff context, route-write evidence, human-gate evidence, and overlap checks, but they remain evidence routes: they do not create a hidden queue, grant worker lifecycle authority, approve archive, mutate roadmap status, stage, commit, push, or release. Review tokens are deterministic report outputs that bind current route and role manifest fingerprints, active-plan identity, claims, evidence, patch, verifier, and human-gate inputs for fan-in review; matching tokens are still guards, not authority. In this contract, work claims and review tokens are evidence, not authority. The coordinator retains lifecycle authority; worker packets are evidence only, and route receipts are protocol/report data only.
 
 Approval relay adapters may read these approval packets and render serializable transport previews, but the relay payload is adapter evidence only. Relay output must not copy packet bodies into hidden adapter state, store secrets, attempt delivery by default, install daemons, create queues, or treat approved packet status as lifecycle, archive, roadmap, Git, or release authority.
@@ -110,7 +124,7 @@ Rules:
 - keep the navigation set aligned when current pointers, authority tiers, routing surfaces, or reboot posture change
 - update `project/project-state.md` for current pointers and durable active commitments
 - update the hierarchy map when artifact classes, attention tiers, or current-fate rules change
-- update `.agents/docmap.yaml` when entrypoint or routing knowledge changes
+- update `.agents/docmap.yaml` when entrypoint, route-class ownership, directory shape, docs-impact routing, or authority-boundary knowledge changes; do not edit it merely because a new file appeared under an existing frontmatter-bearing route
 - update the active incubation surface when the reboot posture, next lane, or dependency spine changes
 - update stable specs when the rule itself changes, not only the current repo pointers
 - do not churn the navigation set when nothing meaningful changed; the maintenance discipline is anti-drift, not ceremony
@@ -201,7 +215,7 @@ Not allowed:
 - execution sequencing that belongs in an active plan
 
 Rules:
-- research artifacts should carry frontmatter with:
+- MLH-owned research writes must carry or normalize frontmatter with:
   - `status`
   - `topic`
   - `created`
@@ -266,7 +280,7 @@ Rules:
 - contradictions between same-topic temporary artifacts or between a temporary artifact and stronger canon must stay visible until resolved
 - capture into incubation should be signal-driven; durable signals include constraints, repeated conclusions, rejected directions, dependencies, and durable choice points
 - the artifact must be referenced from `project-state` or the active plan if it is still active
-- new or materially refreshed incubation artifacts should carry frontmatter with:
+- MLH-owned incubation writes must create or normalize frontmatter with:
   - `status`
   - `topic`
   - `created`
@@ -502,7 +516,7 @@ Rules:
 
 For stable specs, `spec_status` is the spec lifecycle and `implementation_posture` is the implementation/evidence relation. Read-only reconcile diagnostics may report `spec-posture-missing`, `spec-synced-without-verification`, `spec-target-only-has-implementation-evidence`, `spec-drift-detected-without-carry-forward`, or `spec-superseded-without-target`, but those findings only name review work. They do not rewrite accepted specs to match code, delete target-only specs, approve supersession, archive plans, or move lifecycle state.
 
-This vocabulary is most important for incubation and verification surfaces; durable specs and `project-state` remain canonical without needing lifecycle frontmatter on every file.
+This vocabulary is most important for routed lifecycle surfaces that need recovery and projection support. Durable specs and `project-state` remain canonical through their bodies and first-class lifecycle fields, but MLH-owned route writers should still write or preserve explicit frontmatter whenever they mutate Markdown in a route that uses metadata for checks, relationships, projections, or handoff.
 
 ## Anti-Patterns
 

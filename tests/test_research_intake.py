@@ -63,6 +63,7 @@ class ResearchIntakeTests(unittest.TestCase):
             self.assertEqual(["project/research/deep-research-import.md"], changed)
 
             text = (root / "project/research/deep-research-import.md").read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))
             self.assertIn('status: "imported"', text)
             self.assertIn('topic: "Deep Research"', text)
             self.assertIn('derived_from: "manual Google Docs export"', text)
