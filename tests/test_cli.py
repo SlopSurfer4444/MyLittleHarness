@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import shutil
 import shlex
 import subprocess
@@ -17580,16 +17581,73 @@ class CliTests(unittest.TestCase):
             self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
             self.assertEqual("mylittleharness --root <root> hooks --run session-start --json", payload["acceleratorAdoption"]["firstContactHookCommand"])
+            self.assertEqual("mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project", payload["acceleratorAdoption"]["codexHookAdapterCommand"])
             self.assertFalse(payload["boundary"]["refreshesGeneratedCache"])
             self.assertFalse(payload["boundary"]["authorizesLifecycle"])
             self.assertFalse(payload["boundary"]["authorizesGit"])
             self.assertFalse(payload["boundary"]["authorizesDispatcher"])
             self.assertFalse(payload["boundary"]["authorizesProvider"])
             self.assertFalse(payload["boundary"]["authorizesProductDiff"])
+            self.assertTrue(payload["continue"])
+            self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("dashboard_packet=available", payload["hookSpecificOutput"]["additionalContext"])
             self.assertIn("accelerators: dashboard_packet=available", payload["additional_context"])
             self.assertIn("rg_verification=required", payload["additional_context"])
             self.assertIn("next legal dry-run", payload["additional_context"])
             self.assertIn("hookSpecificOutput", payload["client_hints"]["codex"])
+
+    def test_hooks_codex_adapter_writes_project_session_start_hook_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "codex", "--dry-run", "--scope", "project"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_rendered = dry_run_output.getvalue()
+            self.assertIn("hooks-codex-adapter-dry-run", dry_rendered)
+            self.assertIn("hooks-codex-adapter-plan", dry_rendered)
+            self.assertIn(".codex/hooks.json", dry_rendered)
+            self.assertFalse((root / ".codex/hooks.json").exists())
+            self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "codex", "--apply", "--scope", "project"])
+
+            self.assertEqual(code, 0)
+            rendered = apply_output.getvalue()
+            self.assertIn("hooks-codex-adapter-apply-written", rendered)
+            hooks_path = root / ".codex/hooks.json"
+            script_path = root / ".codex/hooks/mylittleharness_session_start.py"
+            self.assertTrue(hooks_path.is_file())
+            self.assertTrue(script_path.is_file())
+            config = json.loads(hooks_path.read_text(encoding="utf-8"))
+            session_start = config["hooks"]["SessionStart"]
+            self.assertEqual("startup|resume|clear", session_start[-1]["matcher"])
+            command = session_start[-1]["hooks"][0]["command"]
+            self.assertIn("mylittleharness_session_start.py", command)
+            self.assertIn("statusMessage", session_start[-1]["hooks"][0])
+            script_text = script_path.read_text(encoding="utf-8")
+            self.assertIn("MLH_IMPORT_ROOT", script_text)
+            self.assertIn("hooks\", \"--run\", \"session-start\", \"--json", script_text)
+
+            script_output = io.StringIO()
+            cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with redirect_stdout(script_output), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            payload = json.loads(script_output.getvalue())
+            self.assertEqual("session-start", payload["event"])
+            self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("MyLittleHarness first-contact context", payload["hookSpecificOutput"]["additionalContext"])
 
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

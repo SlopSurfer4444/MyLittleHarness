@@ -483,6 +483,9 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_mode.add_argument("--run", choices=("git-pre-commit", "agent-status", "session-start"), help="Run one hook event as a foreground read-only adapter.")
     hooks.add_argument("--json", action="store_true", help="Emit a structured hook event payload with --run.")
     hooks.add_argument("--hook", choices=("git-pre-commit",), default="git-pre-commit", help="Hook shim to install. Defaults to git-pre-commit.")
+    hooks.add_argument("--adapter", action="store_true", help="Manage a native client hook adapter; compatible with dry-run/apply.")
+    hooks.add_argument("--client", choices=("codex",), help="Native hook client to configure with --adapter. Only codex is implemented.")
+    hooks.add_argument("--scope", choices=("project",), default="project", help="Native hook adapter scope. Only project scope is implemented.")
     hooks.add_argument("--force", action="store_true", help="Replace an existing non-MLH hook only after explicit review.")
     hooks.add_argument("hook_args", nargs=argparse.REMAINDER, help="Optional raw hook arguments after --run.")
     tasks = subparsers.add_parser(

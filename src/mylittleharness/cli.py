@@ -91,11 +91,14 @@ from .handoff import (
     make_handoff_packet_request,
 )
 from .hooks import (
+    codex_hook_adapter_apply_findings,
+    codex_hook_adapter_dry_run_findings,
     hook_event_payload,
     hook_install_apply_findings,
     hook_install_dry_run_findings,
     hook_run_sections,
     hooks_doctor_sections,
+    make_codex_hook_adapter_request,
     make_hook_install_request,
 )
 from .inventory import RootLoadError
@@ -252,9 +255,27 @@ class TransitionRouteWriteEntry:
 _TRANSITION_ROUTE_WRITE_RE = re.compile(r"^(?:would )?(create|write|delete|created|wrote|deleted) route ([^;]+);")
 
 
+def _normalize_argv(argv: list[str] | None) -> list[str]:
+    raw = sys.argv[1:] if argv is None else list(argv)
+    normalized: list[str] = []
+    i = 0
+    while i < len(raw):
+        token = raw[i]
+        normalized.append(token)
+        if token == "--root" and i + 1 < len(raw):
+            i += 1
+            normalized.append(raw[i])
+        elif token == "hooks" and i + 1 < len(raw) and raw[i + 1] == "adapter":
+            normalized.append("--adapter")
+            i += 1
+        i += 1
+    return normalized
+
+
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = _normalize_argv(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "adapter":
@@ -278,8 +299,17 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("adapter --config-path is only supported for --target mcp-read-projection")
         if args.target != APPROVAL_RELAY_TARGET and (args.approval_packet_refs or args.relay_channel != "manual" or args.relay_recipient):
             parser.error("--approval-packet-ref and --relay-* are only valid with adapter --target approval-relay")
-    if args.command == "hooks" and getattr(args, "json", False) and not getattr(args, "run", None):
-        parser.error("hooks --json is only valid with --run")
+    if args.command == "hooks":
+        hooks_adapter = bool(getattr(args, "adapter", False) or getattr(args, "client", None))
+        if getattr(args, "json", False) and not getattr(args, "run", None):
+            parser.error("hooks --json is only valid with --run")
+        if hooks_adapter:
+            if not (getattr(args, "dry_run", False) or getattr(args, "apply", False)):
+                parser.error("hooks adapter requires --dry-run or --apply")
+            if getattr(args, "doctor", False) or getattr(args, "run", None):
+                parser.error("hooks adapter is only valid with --dry-run or --apply")
+            if getattr(args, "force", False):
+                parser.error("hooks --force is only valid for local Git hook shim installation")
     if args.command == "adapter" and args.serve and args.root is None:
         return serve_mcp_read_projection(None, sys.stdin, sys.stdout)
 
@@ -417,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
     if command == "hooks":
+        hooks_adapter = bool(getattr(args, "adapter", False) or getattr(args, "client", None))
         if args.doctor:
             sections = hooks_doctor_sections(inventory)
             findings = flatten_sections(sections)
@@ -432,6 +463,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1 if any(finding.severity == "error" for finding in findings) else 0
             emit_text(render_sectioned_report(f"hooks --run {args.run}", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
             return 0
+        if hooks_adapter:
+            request = make_codex_hook_adapter_request(args)
+            report_name = "hooks adapter --apply" if args.apply else "hooks adapter --dry-run"
+            findings = codex_hook_adapter_apply_findings(inventory, request) if args.apply else codex_hook_adapter_dry_run_findings(inventory, request)
+            result = _result_for(findings)
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            return 2 if args.apply and result == "error" else 0
         request = make_hook_install_request(args)
         report_name = "hooks --apply" if args.apply else "hooks --dry-run"
         findings = hook_install_apply_findings(inventory, request) if args.apply else hook_install_dry_run_findings(inventory, request)
@@ -2350,6 +2388,8 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["Use preflight findings as optional warning inputs; source files, observed verification, and operator decisions remain authority."]
         return ["preflight completed as a terminal-only optional report; it did not install hooks, add CI, write reports, or approve lifecycle decisions."]
     if command == "hooks":
+        if any(finding.code == "hooks-codex-adapter-apply-written" for finding in findings):
+            return ["hooks adapter apply installed only the project-local Codex SessionStart adapter; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
         if any(finding.code == "hooks-install-written" for finding in findings):
             return ["hooks apply installed only the selected warning-only shim; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
         if any(finding.code == "hooks-install-refused" for finding in findings):
