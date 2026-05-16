@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,16 +16,79 @@ from .preflight import preflight_sections
 HOOK_PRE_COMMIT = "git-pre-commit"
 HOOK_AGENT_STATUS = "agent-status"
 HOOK_SESSION_START = "session-start"
+HOOK_USER_PROMPT_SUBMIT = "user-prompt-submit"
+HOOK_PRE_TOOL_USE = "pre-tool-use"
+HOOK_POST_TOOL_USE = "post-tool-use"
+HOOK_STOP = "stop"
 CODEX_CLIENT = "codex"
 CODEX_HOOK_ADAPTER_SCHEMA = "mylittleharness.codex-hook-adapter.v1"
 CODEX_HOOKS_REL_PATH = ".codex/hooks.json"
 CODEX_HOOK_SCRIPT_REL_PATH = ".codex/hooks/mylittleharness_session_start.py"
-CODEX_SESSION_START_EVENT = "SessionStart"
-CODEX_SESSION_START_MATCHER = "startup|resume|clear"
-CODEX_SESSION_START_STATUS_MESSAGE = "Loading MLH dashboard context"
+CODEX_HOOK_EVENTS = {
+    HOOK_SESSION_START: "SessionStart",
+    HOOK_USER_PROMPT_SUBMIT: "UserPromptSubmit",
+    HOOK_PRE_TOOL_USE: "PreToolUse",
+    HOOK_POST_TOOL_USE: "PostToolUse",
+    HOOK_STOP: "Stop",
+}
+CODEX_SESSION_START_EVENT = CODEX_HOOK_EVENTS[HOOK_SESSION_START]
+CODEX_HOOK_MATCHERS = {
+    HOOK_SESSION_START: "startup|resume|clear",
+    HOOK_USER_PROMPT_SUBMIT: "*",
+    HOOK_PRE_TOOL_USE: "*",
+    HOOK_POST_TOOL_USE: "*",
+    HOOK_STOP: "*",
+}
+CODEX_HOOK_STATUS_MESSAGES = {
+    HOOK_SESSION_START: "Loading MLH dashboard context",
+    HOOK_USER_PROMPT_SUBMIT: "Checking MLH route context",
+    HOOK_PRE_TOOL_USE: "Checking MLH shortcut rails",
+    HOOK_POST_TOOL_USE: "Recording MLH tool-use posture",
+    HOOK_STOP: "Checking MLH lifecycle tail",
+}
 INSTALLABLE_HOOKS = (HOOK_PRE_COMMIT,)
-RUNNABLE_HOOKS = (HOOK_PRE_COMMIT, HOOK_AGENT_STATUS, HOOK_SESSION_START)
-FIRST_CONTACT_HOOKS = (HOOK_SESSION_START,)
+CODEX_NATIVE_HOOKS = (HOOK_SESSION_START, HOOK_USER_PROMPT_SUBMIT, HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE, HOOK_STOP)
+RUNNABLE_HOOKS = (HOOK_PRE_COMMIT, HOOK_AGENT_STATUS, *CODEX_NATIVE_HOOKS)
+FIRST_CONTACT_HOOKS = (HOOK_SESSION_START, HOOK_USER_PROMPT_SUBMIT)
+TOOL_USE_HOOKS = (HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE)
+WRITING_COMMAND_TOKENS = (
+    ">",
+    ">>",
+    "set-content",
+    "add-content",
+    "out-file",
+    "new-item",
+    "remove-item",
+    "move-item",
+    "copy-item",
+    "del ",
+    "erase ",
+    "rm ",
+    "mv ",
+    "cp ",
+)
+MLH_MUTATION_COMMANDS = (
+    "mylittleharness",
+    "python -m mylittleharness",
+    "py -m mylittleharness",
+)
+LIFECYCLE_MARKDOWN_PREFIXES = (
+    "project/plan-incubation/",
+    "project/research/",
+    "project/verification/",
+    "project/decisions/",
+    "project/adrs/",
+    "project/specs/",
+    "project/roadmap",
+    "project/archive/",
+)
+LIFECYCLE_AUTHORITY_PATHS = (
+    "project/project-state.md",
+    "project/implementation-plan.md",
+    "project/roadmap.md",
+)
+GENERATED_CACHE_PREFIXES = (".mylittleharness/generated/",)
+PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])((?:\.?[\\/])?(?:project|src|tests|docs|\.mylittleharness)[\\/][^\s\"'`]+)")
 
 
 @dataclass(frozen=True)
@@ -134,7 +199,7 @@ def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHook
                 "info",
                 "hooks-codex-adapter-plan",
                 (
-                    f"would ensure Codex SessionStart hook adapter; status={status}; "
+                    f"would ensure Codex native hook adapter events={','.join(CODEX_NATIVE_HOOKS)}; status={status}; "
                     f"config={_rel_path(inventory.root, config_path)}; script={_rel_path(inventory.root, script_path)}"
                 ),
                 _rel_path(inventory.root, config_path),
@@ -178,7 +243,7 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
             Finding(
                 "info",
                 "hooks-codex-adapter-apply-unchanged",
-                f"Codex SessionStart hook adapter already current at {_rel_path(inventory.root, config_path)}",
+                f"Codex native hook adapter already current at {_rel_path(inventory.root, config_path)}",
                 _rel_path(inventory.root, config_path),
             )
         )
@@ -188,7 +253,7 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
                 "info",
                 "hooks-codex-adapter-apply-written",
                 (
-                    f"installed Codex SessionStart hook adapter at {_rel_path(inventory.root, config_path)} "
+                    f"installed Codex native hook adapter at {_rel_path(inventory.root, config_path)} "
                     f"with helper {_rel_path(inventory.root, script_path)}"
                 ),
                 _rel_path(inventory.root, config_path),
@@ -198,7 +263,7 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
     return findings
 
 
-def hook_run_sections(inventory: Inventory, hook_id: str, hook_args: list[str]) -> list[tuple[str, list[Finding]]]:
+def hook_run_sections(inventory: Inventory, hook_id: str, hook_args: list[str], hook_input_text: str = "") -> list[tuple[str, list[Finding]]]:
     event_findings = [
         Finding("info", "hooks-run-event", f"hook event: {hook_id}; arg_count={len(_clean_hook_args(hook_args))}"),
         Finding("info", "hooks-run-root", f"root kind: {inventory.root_kind}; root={inventory.root}"),
@@ -223,13 +288,20 @@ def hook_run_sections(inventory: Inventory, hook_id: str, hook_args: list[str]) 
         return [
             ("Event", event_findings),
             ("First Contact Context", _first_contact_context_findings(inventory, hook_id)),
+            ("Native Hook Policy", _native_hook_policy_findings(inventory, hook_id, hook_input_text)),
+            ("Boundary", _hook_boundary_findings()),
+        ]
+    if hook_id in TOOL_USE_HOOKS or hook_id == HOOK_STOP:
+        return [
+            ("Event", event_findings),
+            ("Native Hook Policy", _native_hook_policy_findings(inventory, hook_id, hook_input_text)),
             ("Boundary", _hook_boundary_findings()),
         ]
     return [("Event", event_findings), *preflight_sections(inventory), ("Boundary", _hook_boundary_findings())]
 
 
-def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str]) -> dict[str, object]:
-    sections = hook_run_sections(inventory, hook_id, hook_args)
+def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str], hook_input_text: str = "") -> dict[str, object]:
+    sections = hook_run_sections(inventory, hook_id, hook_args, hook_input_text)
     findings = [finding for _section, section_findings in sections for finding in section_findings]
     dashboard = dashboard_payload(inventory) if hook_id in FIRST_CONTACT_HOOKS else {}
     agent_packet = dashboard.get("agentPacket") if isinstance(dashboard.get("agentPacket"), dict) else dashboard_agent_packet(inventory)
@@ -240,24 +312,26 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str])
     if not isinstance(accelerator_adoption, dict):
         accelerator_adoption = {}
     lifecycle = agent_packet.get("lifecycle") if isinstance(agent_packet.get("lifecycle"), dict) else {}
-    status = _hook_status(findings)
+    blocked = _hook_blocked(findings)
+    status = "block" if blocked else _hook_status(findings)
     status_message = _hook_status_message(hook_id, lifecycle, cache_posture)
-    additional_context = _hook_additional_context(agent_packet, cache_posture, accelerator_adoption) if hook_id in FIRST_CONTACT_HOOKS else ""
-    codex_specific_output = _codex_hook_specific_output(hook_id, additional_context)
+    additional_context = _hook_additional_context(agent_packet, cache_posture, accelerator_adoption) if hook_id in FIRST_CONTACT_HOOKS else _hook_event_context(inventory, hook_id)
     system_message = _hook_system_message(findings)
+    codex_specific_output = _codex_hook_specific_output(hook_id, additional_context, blocked, system_message)
     return {
         "schema": "mylittleharness.hook-event.v1",
         "event": hook_id,
         "status": status,
-        "policy_mode": "warn",
+        "policy_mode": "block" if blocked else "warn",
         "status_message": status_message,
         "system_message": system_message,
         "additional_context": additional_context,
-        "continue": True,
+        "continue": not blocked,
         "systemMessage": system_message,
         "hookSpecificOutput": codex_specific_output,
-        "block": False,
+        "block": blocked,
         "arg_count": len(_clean_hook_args(hook_args)),
+        "hook_input": _hook_input_summary(hook_input_text),
         "root": {"path": str(inventory.root), "kind": inventory.root_kind},
         "agentPacket": agent_packet,
         "cachePosture": cache_posture,
@@ -265,7 +339,7 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str])
         "findings": [finding.to_dict() for finding in findings],
         "client_hints": {
             "codex": {
-                "continue": True,
+                "continue": not blocked,
                 "statusMessage": status_message,
                 "systemMessage": system_message,
                 "hookSpecificOutput": codex_specific_output,
@@ -275,8 +349,8 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str])
     }
 
 
-def codex_session_start_command_output(inventory: Inventory) -> dict[str, object]:
-    payload = hook_event_payload(inventory, HOOK_SESSION_START, [])
+def codex_hook_command_output(inventory: Inventory, hook_id: str, hook_input_text: str = "") -> dict[str, object]:
+    payload = hook_event_payload(inventory, hook_id, [], hook_input_text)
     codex_hints = payload.get("client_hints")
     codex_output = codex_hints.get(CODEX_CLIENT) if isinstance(codex_hints, dict) else {}
     if not isinstance(codex_output, dict):
@@ -291,11 +365,15 @@ def codex_session_start_command_output(inventory: Inventory) -> dict[str, object
     return result
 
 
+def codex_session_start_command_output(inventory: Inventory) -> dict[str, object]:
+    return codex_hook_command_output(inventory, HOOK_SESSION_START)
+
+
 def render_codex_hooks_json(root: Path, request: CodexHookAdapterRequest | None = None) -> str:
     request = request or CodexHookAdapterRequest()
     config_path = _codex_hooks_config_path(root, request)
     existing = _read_codex_hooks_config(config_path)
-    merged = _merge_codex_session_start_hook(existing)
+    merged = _merge_codex_native_hooks(existing)
     return json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
 
 
@@ -306,6 +384,7 @@ def render_codex_session_start_script() -> str:
             "# Generated by MyLittleHarness. Do not edit by hand unless replacing the hook adapter.",
             "from __future__ import annotations",
             "",
+            "import os",
             "import sys",
             "from pathlib import Path",
             "",
@@ -315,7 +394,7 @@ def render_codex_session_start_script() -> str:
             "",
             "import json",
             "",
-            "from mylittleharness.hooks import CODEX_SESSION_START_EVENT, codex_session_start_command_output",
+            "from mylittleharness.hooks import CODEX_HOOK_EVENTS, CODEX_SESSION_START_EVENT, HOOK_SESSION_START, codex_hook_command_output, codex_session_start_command_output",
             "from mylittleharness.inventory import load_inventory",
             "",
             "",
@@ -325,14 +404,19 @@ def render_codex_session_start_script() -> str:
             "",
             "if __name__ == \"__main__\":",
             "    root = _operating_root()",
+            "    hook_event = os.environ.get(\"MLH_HOOK_EVENT\") or HOOK_SESSION_START",
+            "    hook_input = sys.stdin.read()",
             "    try:",
-            "        payload = codex_session_start_command_output(load_inventory(root))",
+            "        if hook_event == HOOK_SESSION_START and not hook_input:",
+            "            payload = codex_session_start_command_output(load_inventory(root))",
+            "        else:",
+            "            payload = codex_hook_command_output(load_inventory(root), hook_event, hook_input)",
             "    except Exception as exc:",
             "        payload = {",
             "            \"continue\": True,",
-            "            \"systemMessage\": f\"MLH SessionStart hook failed: {exc}\",",
+            "            \"systemMessage\": f\"MLH hook failed: {exc}\",",
             "            \"hookSpecificOutput\": {",
-            "                \"hookEventName\": CODEX_SESSION_START_EVENT,",
+            "                \"hookEventName\": CODEX_HOOK_EVENTS.get(hook_event, CODEX_SESSION_START_EVENT),",
             "                \"additionalContext\": \"MyLittleHarness first-contact context unavailable; run `mylittleharness --root <root> check` before lifecycle-sensitive work.\",",
             "            },",
             "        }",
@@ -413,7 +497,7 @@ def _codex_hook_adapter_target_findings(inventory: Inventory, request: CodexHook
         Finding(
             "info",
             "hooks-codex-adapter-event",
-            "Codex SessionStart matcher=startup|resume|clear; hook stdout provides hookSpecificOutput.additionalContext for dashboard-first navigation",
+            "Codex native events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop; hook stdout provides client-valid JSON for context, warning, or deterministic denial",
             _rel_path(inventory.root, config_path),
         ),
     ]
@@ -480,6 +564,10 @@ def _hook_event_findings() -> list[Finding]:
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_PRE_COMMIT}; delegates to preflight and remains warning-only"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_AGENT_STATUS}; reports root posture without writing files"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_SESSION_START}; emits first-contact context without writing files"),
+        Finding("info", "hooks-event", f"runnable hook event: {HOOK_USER_PROMPT_SUBMIT}; emits dashboard-first context for prompt routing"),
+        Finding("info", "hooks-event", f"runnable hook event: {HOOK_PRE_TOOL_USE}; warns or blocks deterministic shortcut attempts before tool execution"),
+        Finding("info", "hooks-event", f"runnable hook event: {HOOK_POST_TOOL_USE}; reports post-tool shortcut posture without writing files"),
+        Finding("info", "hooks-event", f"runnable hook event: {HOOK_STOP}; warns about dangling lifecycle tails before final response"),
     ]
 
 
@@ -636,17 +724,189 @@ def _hook_status_message(hook_id: str, lifecycle: object, cache_posture: object)
 
 
 def _hook_system_message(findings: list[Finding]) -> str | None:
-    sample = next((finding for finding in findings if finding.severity in {"warn", "error"}), None)
+    sample = next((finding for finding in findings if finding.severity in {"error", "warn"}), None)
     return sample.message if sample else None
 
 
-def _codex_hook_specific_output(hook_id: str, additional_context: str) -> dict[str, object]:
-    if hook_id == HOOK_SESSION_START:
-        return {
-            "hookEventName": CODEX_SESSION_START_EVENT,
-            "additionalContext": additional_context,
-        }
-    return {"additionalContext": additional_context}
+def _hook_blocked(findings: list[Finding]) -> bool:
+    return any(finding.code.startswith("hooks-policy-block-") for finding in findings)
+
+
+def _codex_hook_specific_output(hook_id: str, additional_context: str, blocked: bool, system_message: str | None) -> dict[str, object]:
+    output: dict[str, object] = {
+        "hookEventName": CODEX_HOOK_EVENTS.get(hook_id, hook_id),
+        "additionalContext": additional_context,
+    }
+    if blocked:
+        output["deny"] = system_message or "MyLittleHarness blocked this deterministic shortcut attempt."
+    return output
+
+
+def _hook_event_context(inventory: Inventory, hook_id: str) -> str:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    plan_status = _payload_value(state, "plan_status")
+    active_phase = _payload_value(state, "active_phase")
+    return "\n".join(
+        [
+            f"MyLittleHarness hook context for {hook_id}:",
+            f"- lifecycle: plan_status={plan_status}; active_phase={active_phase}",
+            "- policy: deterministic unsafe shortcuts may be blocked; ambiguous cases are advisory warnings.",
+            "- boundary: hook output cannot approve lifecycle, archive, roadmap, staging, commit, push, release, provider routing, daemon state, or cache truth.",
+        ]
+    )
+
+
+def _hook_input_summary(hook_input_text: str) -> dict[str, object]:
+    stripped = hook_input_text.strip()
+    parsed: object = None
+    if stripped:
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+    return {
+        "provided": bool(stripped),
+        "bytes": len(hook_input_text.encode("utf-8", errors="replace")),
+        "json": isinstance(parsed, dict),
+    }
+
+
+def _native_hook_policy_findings(inventory: Inventory, hook_id: str, hook_input_text: str) -> list[Finding]:
+    if hook_id == HOOK_USER_PROMPT_SUBMIT:
+        return _user_prompt_policy_findings(inventory, hook_input_text)
+    if hook_id == HOOK_PRE_TOOL_USE:
+        return _pre_tool_policy_findings(inventory, hook_input_text)
+    if hook_id == HOOK_POST_TOOL_USE:
+        return _post_tool_policy_findings(inventory, hook_input_text)
+    if hook_id == HOOK_STOP:
+        return _stop_policy_findings(inventory)
+    return [
+        Finding(
+            "info",
+            "hooks-policy-context",
+            f"{hook_id} has no blocking policy beyond dashboard-first context injection",
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        )
+    ]
+
+
+def _user_prompt_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
+    text = _hook_input_search_text(hook_input_text)
+    findings = [
+        Finding(
+            "info",
+            "hooks-policy-user-prompt-submit",
+            "user-prompt-submit injects dashboard-first navigation, cache posture, MCP adoption, and rg verification reminders before route-sensitive work",
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        )
+    ]
+    if _looks_like_shortcut_prompt(text):
+        findings.append(
+            Finding(
+                "warn",
+                "hooks-policy-shortcut-prompt",
+                "prompt appears to ask for shortcut-prone lifecycle work; use dashboard, active plan, check, and explicit dry-run/apply rails before mutation",
+                "project/project-state.md" if inventory.state and inventory.state.exists else None,
+            )
+        )
+    return findings
+
+
+def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
+    data = _hook_input_data(hook_input_text)
+    text = _hook_input_search_text(hook_input_text)
+    paths = _hook_input_paths(data, text)
+    findings = [
+        Finding(
+            "info",
+            "hooks-policy-pre-tool-use",
+            "pre-tool-use inspects declared tool intent and blocks deterministic MLH shortcut attempts before tool execution",
+        )
+    ]
+    for finding in _path_policy_findings(inventory, paths):
+        findings.append(finding)
+    command = _hook_input_command(data, text)
+    lowered = command.casefold()
+    if _looks_like_generated_cache_write(paths, command):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-generated-cache-write",
+                "blocked deterministic generated-cache write; use `mylittleharness --root <root> projection --warm-cache --target all` or rebuild rails instead",
+                ".mylittleharness/generated",
+            )
+        )
+    if _looks_like_lifecycle_markdown_write(paths, command):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                "blocked direct lifecycle Markdown write without MLH route/frontmatter evidence; use the owning dry-run/apply rail or repair route",
+                paths[0] if paths else "project",
+            )
+        )
+    if _looks_like_unsafe_mlh_mutation(lowered) and " --dry-run" not in lowered and " --apply" not in lowered:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-mlh-mutation-without-mode",
+                "blocked MLH mutating command without explicit --dry-run or --apply review mode",
+            )
+        )
+    if _looks_like_product_root_direct_edit(inventory, paths, command):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-product-root-direct-edit",
+                "blocked direct product-source edit from a serviced operating-root hook context; edit the configured product_source_root deliberately",
+                paths[0] if paths else None,
+            )
+        )
+    if len(findings) == 1:
+        findings.append(Finding("info", "hooks-policy-pre-tool-use-clear", "no deterministic shortcut block matched this tool request"))
+    return findings
+
+
+def _post_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
+    data = _hook_input_data(hook_input_text)
+    text = _hook_input_search_text(hook_input_text)
+    paths = _hook_input_paths(data, text)
+    findings = [
+        Finding(
+            "info",
+            "hooks-policy-post-tool-use",
+            "post-tool-use reports shortcut posture after tool execution; it cannot repair or approve the result",
+        )
+    ]
+    findings.extend(_path_policy_findings(inventory, paths, warn_only=True))
+    if len(findings) == 1:
+        findings.append(Finding("info", "hooks-policy-post-tool-use-clear", "no deterministic post-tool warning matched this tool result"))
+    return findings
+
+
+def _stop_policy_findings(inventory: Inventory) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "hooks-policy-stop",
+            "stop checks for dangling active lifecycle posture before the agent finalizes; hook output remains advisory",
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        )
+    ]
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    if str(state.get("plan_status") or "").casefold() == "active":
+        findings.append(
+            Finding(
+                "warn",
+                "hooks-policy-stop-active-plan-open",
+                (
+                    f"active plan remains open at {_payload_value(state, 'active_plan')}; "
+                    "record phase writeback/verification before confident final closeout wording"
+                ),
+                _payload_value(state, "active_plan"),
+            )
+        )
+    return findings
 
 
 def _hook_additional_context(agent_packet: object, cache_posture: object, accelerator_adoption: object) -> str:
@@ -687,6 +947,243 @@ def _hook_payload_boundary() -> dict[str, object]:
         "authorizesProductDiff": False,
         "authorizesCacheTruth": False,
     }
+
+
+def _hook_input_data(hook_input_text: str) -> dict[str, object]:
+    if not hook_input_text.strip():
+        return {}
+    try:
+        value = json.loads(hook_input_text)
+    except json.JSONDecodeError:
+        return {"raw": hook_input_text}
+    return value if isinstance(value, dict) else {"raw": value}
+
+
+def _hook_input_search_text(hook_input_text: str) -> str:
+    data = _hook_input_data(hook_input_text)
+    return _stringify_jsonish(data) if data else hook_input_text
+
+
+def _stringify_jsonish(value: object) -> str:
+    if isinstance(value, dict):
+        return " ".join(f"{key} {_stringify_jsonish(item)}" for key, item in value.items())
+    if isinstance(value, list):
+        return " ".join(_stringify_jsonish(item) for item in value)
+    return str(value or "")
+
+
+def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
+    candidates = (
+        data.get("command"),
+        data.get("shell_command"),
+        data.get("cmd"),
+        data.get("args"),
+        data.get("input"),
+        data.get("tool_input"),
+        data.get("parameters"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+        if isinstance(candidate, dict):
+            nested = _hook_input_command(candidate, "")
+            if nested:
+                return nested
+        if isinstance(candidate, list) and candidate:
+            return " ".join(str(item) for item in candidate)
+    return fallback_text
+
+
+def _hook_input_paths(data: dict[str, object], text: str) -> list[str]:
+    paths: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).casefold() in {"path", "file", "filename", "target", "cwd", "workdir", "command", "shell_command"}:
+                    collect(item)
+                elif isinstance(item, (dict, list)):
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, str):
+            paths.extend(_extract_paths(value))
+
+    collect(data)
+    paths.extend(_extract_paths(text))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        clean = _normalize_hook_path(path)
+        if clean and clean not in seen:
+            seen.add(clean)
+            normalized.append(clean)
+    return normalized
+
+
+def _extract_paths(text: str) -> list[str]:
+    matches: list[str] = []
+    for match in PATH_RE.finditer(text or ""):
+        value = match.group(0).strip(" \t\r\n\"'`") or (match.group(1) or "").strip(" \t\r\n\"'`")
+        if value:
+            matches.append(value)
+    return matches
+
+
+def _normalize_hook_path(path: str) -> str:
+    rel = str(path or "").strip().strip(".,;:)]}").replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel
+
+
+def _path_policy_findings(inventory: Inventory, paths: list[str], *, warn_only: bool = False) -> list[Finding]:
+    findings: list[Finding] = []
+    for rel in paths:
+        if _is_generated_cache_path(rel):
+            findings.append(
+                Finding(
+                    "warn",
+                    "hooks-policy-warn-generated-cache-path" if warn_only else "hooks-policy-generated-cache-path",
+                    "tool request touches generated projection/cache paths; cache remains disposable and should be refreshed through projection rails",
+                    rel,
+                )
+            )
+        if _is_lifecycle_authority_path(rel):
+            findings.append(
+                Finding(
+                    "warn",
+                    "hooks-policy-lifecycle-authority-path",
+                    "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes and record docs_decision/verification as required",
+                    rel,
+                )
+            )
+        elif _is_lifecycle_markdown_path(rel):
+            findings.append(
+                Finding(
+                    "warn",
+                    "hooks-policy-lifecycle-markdown-path",
+                    "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence must stay intact",
+                    rel,
+                )
+            )
+        if _is_under_configured_product_root(inventory, rel):
+            findings.append(
+                Finding(
+                    "warn",
+                    "hooks-policy-product-root-path",
+                    "tool request names the configured product source root from an operating-root context; keep product edits deliberate and bounded",
+                    rel,
+                )
+            )
+    return findings
+
+
+def _looks_like_shortcut_prompt(text: str) -> bool:
+    lowered = (text or "").casefold()
+    shortcut_terms = ("without plan", "skip check", "skip dry-run", "no frontmatter", "archive anyway", "mark done", "shortcut", "шорткат", "без плана", "без проверки")
+    return any(term in lowered for term in shortcut_terms)
+
+
+def _looks_like_generated_cache_write(paths: list[str], command: str) -> bool:
+    return any(_is_generated_cache_path(path) for path in paths) and _looks_like_write_command(command)
+
+
+def _looks_like_lifecycle_markdown_write(paths: list[str], command: str) -> bool:
+    return any(_is_lifecycle_markdown_path(path) for path in paths) and _looks_like_write_command(command) and "mylittleharness" not in command.casefold()
+
+
+def _looks_like_product_root_direct_edit(inventory: Inventory, paths: list[str], command: str) -> bool:
+    if not _looks_like_write_command(command):
+        return False
+    return any(_is_under_configured_product_root(inventory, path) and not _is_active_plan_product_artifact(inventory, path) for path in paths)
+
+
+def _looks_like_write_command(command: str) -> bool:
+    lowered = f" {command.casefold()} "
+    return any(token in lowered for token in WRITING_COMMAND_TOKENS)
+
+
+def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
+    if not any(token in lowered_command for token in MLH_MUTATION_COMMANDS):
+        return False
+    mutating_terms = (
+        " repair ",
+        " plan ",
+        " writeback ",
+        " transition ",
+        " roadmap ",
+        " meta-feedback ",
+        " projection ",
+        " memory-hygiene ",
+        " hooks ",
+        " adapter --install-client-config ",
+    )
+    padded = f" {lowered_command} "
+    return any(term in padded for term in mutating_terms)
+
+
+def _is_generated_cache_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return any(rel.startswith(prefix) for prefix in GENERATED_CACHE_PREFIXES)
+
+
+def _is_lifecycle_authority_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel in LIFECYCLE_AUTHORITY_PATHS
+
+
+def _is_lifecycle_markdown_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.endswith(".md") and any(rel.startswith(prefix) for prefix in LIFECYCLE_MARKDOWN_PREFIXES)
+
+
+def _is_under_configured_product_root(inventory: Inventory, path: str) -> bool:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    product_root = str(state.get("product_source_root") or "").strip()
+    if not product_root:
+        return False
+    try:
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            return False
+        candidate.resolve().relative_to(Path(product_root).expanduser().resolve())
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _is_active_plan_product_artifact(inventory: Inventory, path: str) -> bool:
+    plan = inventory.active_plan_surface
+    if not plan or not plan.exists:
+        return False
+    rel = _product_relative_path(inventory, path)
+    if not rel:
+        return False
+    artifacts = plan.frontmatter.data.get("target_artifacts")
+    if not isinstance(artifacts, list):
+        return False
+    normalized = _normalize_hook_path(rel).casefold()
+    for artifact in artifacts:
+        candidate = _normalize_hook_path(str(artifact or "")).casefold()
+        if candidate and normalized == candidate:
+            return True
+    return False
+
+
+def _product_relative_path(inventory: Inventory, path: str) -> str:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    product_root = str(state.get("product_source_root") or "").strip()
+    if not product_root:
+        return ""
+    try:
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            return ""
+        return candidate.resolve().relative_to(Path(product_root).expanduser().resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return ""
 
 
 def _codex_hooks_config_path(root: Path, request: CodexHookAdapterRequest) -> Path:
@@ -733,54 +1230,58 @@ def _read_codex_hooks_config(config_path: Path) -> dict[str, object]:
     hooks = payload.get("hooks", {})
     if not isinstance(hooks, dict):
         raise ValueError("Codex hooks config `hooks` field must be a JSON object")
-    session_start = hooks.get(CODEX_SESSION_START_EVENT, [])
-    if not isinstance(session_start, list):
-        raise ValueError("Codex hooks config `hooks.SessionStart` field must be a JSON array")
+    for codex_event in CODEX_HOOK_EVENTS.values():
+        event_hooks = hooks.get(codex_event, [])
+        if not isinstance(event_hooks, list):
+            raise ValueError(f"Codex hooks config `hooks.{codex_event}` field must be a JSON array")
     return payload
 
 
-def _merge_codex_session_start_hook(existing: dict[str, object]) -> dict[str, object]:
+def _merge_codex_native_hooks(existing: dict[str, object]) -> dict[str, object]:
     merged = json.loads(json.dumps(existing))
     hooks = merged.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         hooks = {}
         merged["hooks"] = hooks
-    existing_groups = hooks.get(CODEX_SESSION_START_EVENT, [])
-    if not isinstance(existing_groups, list):
-        existing_groups = []
-    filtered_groups = [group for group in existing_groups if not _is_mlh_codex_session_start_group(group)]
-    filtered_groups.append(_codex_session_start_group())
-    hooks[CODEX_SESSION_START_EVENT] = filtered_groups
+    for hook_id in CODEX_NATIVE_HOOKS:
+        codex_event = CODEX_HOOK_EVENTS[hook_id]
+        existing_groups = hooks.get(codex_event, [])
+        if not isinstance(existing_groups, list):
+            existing_groups = []
+        filtered_groups = [group for group in existing_groups if not _is_mlh_codex_hook_group(group)]
+        filtered_groups.append(_codex_hook_group(hook_id))
+        hooks[codex_event] = filtered_groups
     return merged
 
 
-def _codex_session_start_group() -> dict[str, object]:
+def _codex_hook_group(hook_id: str) -> dict[str, object]:
     return {
-        "matcher": CODEX_SESSION_START_MATCHER,
+        "matcher": CODEX_HOOK_MATCHERS[hook_id],
         "hooks": [
             {
                 "type": "command",
-                "command": _codex_session_start_command(),
+                "command": _codex_hook_command(hook_id),
                 "timeout": 30,
-                "statusMessage": CODEX_SESSION_START_STATUS_MESSAGE,
+                "statusMessage": CODEX_HOOK_STATUS_MESSAGES[hook_id],
             }
         ],
     }
 
 
-def _codex_session_start_command() -> str:
+def _codex_hook_command(hook_id: str) -> str:
     script_rel = CODEX_HOOK_SCRIPT_REL_PATH
     return (
-        "python -c \"from pathlib import Path; import runpy; "
+        "python -c \"from pathlib import Path; import os; import runpy; "
         "p=Path.cwd().resolve(); roots=(p, *p.parents); "
         f"script=next((r/{_py_literal(script_rel.split('/')[0])}/{_py_literal(script_rel.split('/')[1])}/{_py_literal(script_rel.split('/')[2])} "
         f"for r in roots if (r/{_py_literal(script_rel.split('/')[0])}/{_py_literal(script_rel.split('/')[1])}/{_py_literal(script_rel.split('/')[2])}).is_file()), None); "
         "assert script is not None, 'MLH Codex hook script not found from cwd'; "
+        f"os.environ['MLH_HOOK_EVENT']={_py_literal(hook_id)}; "
         "runpy.run_path(str(script), run_name='__main__')\""
     )
 
 
-def _is_mlh_codex_session_start_group(group: object) -> bool:
+def _is_mlh_codex_hook_group(group: object) -> bool:
     if not isinstance(group, dict):
         return False
     handlers = group.get("hooks")

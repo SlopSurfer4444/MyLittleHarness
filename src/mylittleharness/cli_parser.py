@@ -480,8 +480,13 @@ def build_parser() -> argparse.ArgumentParser:
     hooks_mode.add_argument("--doctor", action="store_true", help="Inspect hook posture and supported events without writing files.")
     hooks_mode.add_argument("--dry-run", action="store_true", help="Preview explicit hook shim installation without writing files.")
     hooks_mode.add_argument("--apply", action="store_true", help="Install the selected warning-only hook shim after dry-run review.")
-    hooks_mode.add_argument("--run", choices=("git-pre-commit", "agent-status", "session-start"), help="Run one hook event as a foreground read-only adapter.")
+    hooks_mode.add_argument(
+        "--run",
+        choices=("git-pre-commit", "agent-status", "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop"),
+        help="Run one hook event as a foreground read-only adapter.",
+    )
     hooks.add_argument("--json", action="store_true", help="Emit a structured hook event payload with --run.")
+    hooks.add_argument("--input-file", dest="input_file", help="Read native hook JSON/text input from a UTF-8 file, or '-' for stdin; valid with --run.")
     hooks.add_argument("--hook", choices=("git-pre-commit",), default="git-pre-commit", help="Hook shim to install. Defaults to git-pre-commit.")
     hooks.add_argument("--adapter", action="store_true", help="Manage a native client hook adapter; compatible with dry-run/apply.")
     hooks.add_argument("--client", choices=("codex",), help="Native hook client to configure with --adapter. Only codex is implemented.")

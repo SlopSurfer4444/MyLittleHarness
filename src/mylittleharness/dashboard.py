@@ -425,7 +425,7 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
         "sequence": [
             "dashboard packet",
             "MCP read/search/bundle when mounted",
-            "Codex SessionStart hook adapter when project-local hooks are explicitly applied",
+            "Codex native hook adapter when project-local hooks are explicitly applied",
             "projection warm-cache when stale or missing",
             "rg exact verification before edits or closeout claims",
         ],
@@ -446,7 +446,7 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
         f"{code_prefix}-accelerator-adoption",
         (
             f"first-contact accelerators: dashboard_packet=available; mcp={status}; "
-            "session_start_hook=`mylittleharness --root <root> hooks --run session-start --json`; "
+            "native_hooks=`mylittleharness --root <root> hooks --run session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop --json`; "
             "codex_hook_adapter=`mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project`; "
             "projection_warm_cache_command=`mylittleharness --root <root> projection --warm-cache --target all`; "
             "rg_verification=required; config_merge=idempotent-explicit"

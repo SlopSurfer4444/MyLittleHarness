@@ -17646,13 +17646,24 @@ class CliTests(unittest.TestCase):
             self.assertTrue(hooks_path.is_file())
             self.assertTrue(script_path.is_file())
             config = json.loads(hooks_path.read_text(encoding="utf-8"))
-            session_start = config["hooks"]["SessionStart"]
-            self.assertEqual("startup|resume|clear", session_start[-1]["matcher"])
-            command = session_start[-1]["hooks"][0]["command"]
-            self.assertIn("mylittleharness_session_start.py", command)
-            self.assertIn("statusMessage", session_start[-1]["hooks"][0])
+            expected_events = {
+                "SessionStart": "startup|resume|clear",
+                "UserPromptSubmit": "*",
+                "PreToolUse": "*",
+                "PostToolUse": "*",
+                "Stop": "*",
+            }
+            for event_name, matcher in expected_events.items():
+                groups = config["hooks"][event_name]
+                self.assertEqual(matcher, groups[-1]["matcher"])
+                command = groups[-1]["hooks"][0]["command"]
+                self.assertIn("mylittleharness_session_start.py", command)
+                self.assertIn("MLH_HOOK_EVENT", command)
+                self.assertIn("statusMessage", groups[-1]["hooks"][0])
             script_text = script_path.read_text(encoding="utf-8")
             self.assertIn("MLH_IMPORT_ROOT", script_text)
+            self.assertIn("MLH_HOOK_EVENT", script_text)
+            self.assertIn("codex_hook_command_output", script_text)
             self.assertIn("codex_session_start_command_output", script_text)
             self.assertIn("json.dump(payload, sys.stdout", script_text)
 
@@ -17672,6 +17683,64 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("event", payload)
             self.assertNotIn("statusMessage", payload)
             self.assertNotIn("client_hints", payload)
+
+            pre_tool_input = json.dumps({"toolName": "shell_command", "command": "Set-Content project/research/deep.md '# missing frontmatter'"})
+            pre_tool_output = io.StringIO()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ, {"MLH_HOOK_EVENT": "pre-tool-use"}), patch("sys.stdin", io.StringIO(pre_tool_input)), redirect_stdout(pre_tool_output), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            pre_tool_payload = json.loads(pre_tool_output.getvalue())
+            self.assertFalse(pre_tool_payload["continue"])
+            self.assertEqual("PreToolUse", pre_tool_payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("deny", pre_tool_payload["hookSpecificOutput"])
+            self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["deny"])
+
+    def test_hooks_native_events_read_input_and_block_lifecycle_shortcuts_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            hook_input = root / "pre_tool_input.json"
+            hook_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": "Set-Content project/research/new-deep-research.md '# missing frontmatter'"}),
+                encoding="utf-8",
+            )
+            before_run = snapshot_tree_bytes(root)
+
+            json_output = io.StringIO()
+            with redirect_stdout(json_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(hook_input), "--json"])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(before_run, snapshot_tree_bytes(root))
+            payload = json.loads(json_output.getvalue())
+            self.assertEqual("pre-tool-use", payload["event"])
+            self.assertEqual("block", payload["status"])
+            self.assertEqual("block", payload["policy_mode"])
+            self.assertFalse(payload["continue"])
+            self.assertTrue(payload["block"])
+            self.assertEqual("PreToolUse", payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("deny", payload["hookSpecificOutput"])
+            self.assertIn("frontmatter", payload["system_message"])
+            self.assertTrue(payload["hook_input"]["provided"])
+            self.assertTrue(payload["hook_input"]["json"])
+
+            prompt_input = root / "prompt_input.json"
+            prompt_input.write_text(json.dumps({"prompt": "continue but do not skip dry-run"}), encoding="utf-8")
+            before_prompt = snapshot_tree_bytes(root)
+            prompt_output = io.StringIO()
+            with redirect_stdout(prompt_output):
+                code = main(["--root", str(root), "hooks", "--run", "user-prompt-submit", "--input-file", str(prompt_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_prompt, snapshot_tree_bytes(root))
+            prompt_payload = json.loads(prompt_output.getvalue())
+            self.assertEqual("user-prompt-submit", prompt_payload["event"])
+            self.assertEqual("UserPromptSubmit", prompt_payload["hookSpecificOutput"]["hookEventName"])
+            self.assertTrue(prompt_payload["continue"])
+            self.assertIn("dashboard_packet=available", prompt_payload["additional_context"])
 
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -448,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "hooks":
         hooks_adapter = bool(getattr(args, "adapter", False) or getattr(args, "client", None))
+        if getattr(args, "input_file", None) and not getattr(args, "run", None):
+            emit_text("mylittleharness: --input-file is valid only with hooks --run", stream=sys.stderr)
+            return 2
         if args.doctor:
             sections = hooks_doctor_sections(inventory)
             findings = flatten_sections(sections)
@@ -455,11 +458,18 @@ def main(argv: list[str] | None = None) -> int:
             emit_text(render_sectioned_report("hooks --doctor", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
             return 0
         if args.run:
-            sections = hook_run_sections(inventory, args.run, args.hook_args)
+            hook_input_text = ""
+            if getattr(args, "input_file", None):
+                hook_input_text, read_error = _read_text_argument("--input-file", args.input_file)
+                if read_error:
+                    emit_text(f"mylittleharness: {read_error}", stream=sys.stderr)
+                    return 2
+                hook_input_text = hook_input_text or ""
+            sections = hook_run_sections(inventory, args.run, args.hook_args, hook_input_text)
             findings = flatten_sections(sections)
             result = _result_for(findings)
             if args.json:
-                emit_text(json.dumps(hook_event_payload(inventory, args.run, args.hook_args), sort_keys=True, indent=2, ensure_ascii=True))
+                emit_text(json.dumps(hook_event_payload(inventory, args.run, args.hook_args, hook_input_text), sort_keys=True, indent=2, ensure_ascii=True))
                 return 1 if any(finding.severity == "error" for finding in findings) else 0
             emit_text(render_sectioned_report(f"hooks --run {args.run}", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
             return 0
