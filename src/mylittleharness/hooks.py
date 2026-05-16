@@ -21,15 +21,29 @@ HOOK_PRE_TOOL_USE = "pre-tool-use"
 HOOK_POST_TOOL_USE = "post-tool-use"
 HOOK_STOP = "stop"
 CODEX_CLIENT = "codex"
+CLAUDE_CODE_CLIENT = "claude-code"
+GITHUB_COPILOT_CLIENT = "github-copilot"
+NATIVE_HOOK_CLIENTS = (CODEX_CLIENT, CLAUDE_CODE_CLIENT, GITHUB_COPILOT_CLIENT)
 CODEX_HOOK_ADAPTER_SCHEMA = "mylittleharness.codex-hook-adapter.v1"
 CODEX_HOOKS_REL_PATH = ".codex/hooks.json"
 CODEX_HOOK_SCRIPT_REL_PATH = ".codex/hooks/mylittleharness_session_start.py"
+CLAUDE_CODE_HOOKS_REL_PATH = ".claude/settings.json"
+CLAUDE_CODE_HOOK_SCRIPT_REL_PATH = ".claude/hooks/mylittleharness_hook.py"
+GITHUB_COPILOT_HOOKS_REL_PATH = ".github/hooks/mylittleharness.json"
+GITHUB_COPILOT_HOOK_SCRIPT_REL_PATH = ".github/hooks/mylittleharness_hook.py"
 CODEX_HOOK_EVENTS = {
     HOOK_SESSION_START: "SessionStart",
     HOOK_USER_PROMPT_SUBMIT: "UserPromptSubmit",
     HOOK_PRE_TOOL_USE: "PreToolUse",
     HOOK_POST_TOOL_USE: "PostToolUse",
     HOOK_STOP: "Stop",
+}
+GITHUB_COPILOT_HOOK_EVENTS = {
+    HOOK_SESSION_START: "sessionStart",
+    HOOK_USER_PROMPT_SUBMIT: "userPromptSubmitted",
+    HOOK_PRE_TOOL_USE: "preToolUse",
+    HOOK_POST_TOOL_USE: "postToolUse",
+    HOOK_STOP: "agentStop",
 }
 CODEX_SESSION_START_EVENT = CODEX_HOOK_EVENTS[HOOK_SESSION_START]
 CODEX_HOOK_MATCHERS = {
@@ -48,6 +62,7 @@ CODEX_HOOK_STATUS_MESSAGES = {
 }
 INSTALLABLE_HOOKS = (HOOK_PRE_COMMIT,)
 CODEX_NATIVE_HOOKS = (HOOK_SESSION_START, HOOK_USER_PROMPT_SUBMIT, HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE, HOOK_STOP)
+NATIVE_ADAPTER_HOOKS = CODEX_NATIVE_HOOKS
 RUNNABLE_HOOKS = (HOOK_PRE_COMMIT, HOOK_AGENT_STATUS, *CODEX_NATIVE_HOOKS)
 FIRST_CONTACT_HOOKS = (HOOK_SESSION_START, HOOK_USER_PROMPT_SUBMIT)
 TOOL_USE_HOOKS = (HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE)
@@ -101,6 +116,7 @@ class HookInstallRequest:
 class CodexHookAdapterRequest:
     client: str = CODEX_CLIENT
     scope: str = "project"
+    config_path: str = ""
 
 
 def make_hook_install_request(args) -> HookInstallRequest:
@@ -108,7 +124,11 @@ def make_hook_install_request(args) -> HookInstallRequest:
 
 
 def make_codex_hook_adapter_request(args) -> CodexHookAdapterRequest:
-    return CodexHookAdapterRequest(client=getattr(args, "client", None) or CODEX_CLIENT, scope=getattr(args, "scope", None) or "project")
+    return CodexHookAdapterRequest(
+        client=getattr(args, "client", None) or CODEX_CLIENT,
+        scope=getattr(args, "scope", None) or "project",
+        config_path=getattr(args, "config_path", None) or "",
+    )
 
 
 def hooks_doctor_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -116,6 +136,14 @@ def hooks_doctor_sections(inventory: Inventory) -> list[tuple[str, list[Finding]
         ("Summary", _hooks_summary_findings(inventory)),
         ("Install Targets", _hook_install_target_findings(inventory, HookInstallRequest(HOOK_PRE_COMMIT))),
         ("Codex Native Adapter", _codex_hook_adapter_target_findings(inventory, CodexHookAdapterRequest())),
+        (
+            "Native Client Adapters",
+            [
+                finding
+                for client in (CLAUDE_CODE_CLIENT, GITHUB_COPILOT_CLIENT)
+                for finding in _codex_hook_adapter_target_findings(inventory, CodexHookAdapterRequest(client=client))
+            ],
+        ),
         ("First Contact Adoption", _hook_first_contact_adoption_findings(inventory)),
         ("Runnable Events", _hook_event_findings()),
         ("Boundary", _hook_boundary_findings()),
@@ -176,13 +204,15 @@ def hook_install_apply_findings(inventory: Inventory, request: HookInstallReques
 
 
 def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
+    prefix = _hook_adapter_code_prefix(request)
+    label = _native_hook_client_label(request.client)
     findings = [
         Finding(
             "info",
-            "hooks-codex-adapter-dry-run",
+            f"{prefix}-dry-run",
             (
-                f"Codex native hook adapter preview only; client={request.client}; scope={request.scope}; "
-                "no hooks.json, scripts, user config, lifecycle state, caches, generated reports, or Git state were written"
+                f"{label} native hook adapter preview only; client={request.client}; scope={request.scope}; "
+                "no hook config, scripts, user config, lifecycle state, caches, generated reports, or Git state were written"
             ),
         )
     ]
@@ -191,15 +221,15 @@ def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHook
     if errors:
         findings.extend(errors)
     else:
-        config_path = _codex_hooks_config_path(inventory.root, request)
-        script_path = _codex_hook_script_path(inventory.root, request)
+        config_path = _native_hooks_config_path(inventory.root, request)
+        script_path = _native_hook_script_path(inventory.root, request)
         status = _codex_hook_adapter_status(inventory.root, request)
         findings.append(
             Finding(
                 "info",
-                "hooks-codex-adapter-plan",
+                f"{prefix}-plan",
                 (
-                    f"would ensure Codex native hook adapter events={','.join(CODEX_NATIVE_HOOKS)}; status={status}; "
+                    f"would ensure {label} native hook adapter events={','.join(NATIVE_ADAPTER_HOOKS)}; status={status}; "
                     f"config={_rel_path(inventory.root, config_path)}; script={_rel_path(inventory.root, script_path)}"
                 ),
                 _rel_path(inventory.root, config_path),
@@ -210,13 +240,15 @@ def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHook
 
 
 def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
+    prefix = _hook_adapter_code_prefix(request)
+    label = _native_hook_client_label(request.client)
     findings = [
         Finding(
             "info",
-            "hooks-codex-adapter-apply",
+            f"{prefix}-apply",
             (
-                f"explicit Codex native hook adapter apply started; client={request.client}; scope={request.scope}; "
-                "this route writes only the reviewed project-local hooks.json entry and helper script"
+                f"explicit {label} native hook adapter apply started; client={request.client}; scope={request.scope}; "
+                "this route writes only the reviewed project-local hook config and helper script"
             ),
         )
     ]
@@ -226,12 +258,12 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
         findings.extend(_hook_boundary_findings())
         return findings
 
-    config_path = _codex_hooks_config_path(inventory.root, request)
-    script_path = _codex_hook_script_path(inventory.root, request)
+    config_path = _native_hooks_config_path(inventory.root, request)
+    script_path = _native_hook_script_path(inventory.root, request)
     before_config = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     before_script = script_path.read_text(encoding="utf-8") if script_path.exists() else None
-    config_text = render_codex_hooks_json(inventory.root, request)
-    script_text = render_codex_session_start_script()
+    config_text = render_native_hooks_json(inventory.root, request)
+    script_text = render_native_hook_script(request.client)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,8 +274,8 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
         findings.append(
             Finding(
                 "info",
-                "hooks-codex-adapter-apply-unchanged",
-                f"Codex native hook adapter already current at {_rel_path(inventory.root, config_path)}",
+                f"{prefix}-apply-unchanged",
+                f"{label} native hook adapter already current at {_rel_path(inventory.root, config_path)}",
                 _rel_path(inventory.root, config_path),
             )
         )
@@ -251,9 +283,9 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
         findings.append(
             Finding(
                 "info",
-                "hooks-codex-adapter-apply-written",
+                f"{prefix}-apply-written",
                 (
-                    f"installed Codex native hook adapter at {_rel_path(inventory.root, config_path)} "
+                    f"installed {label} native hook adapter at {_rel_path(inventory.root, config_path)} "
                     f"with helper {_rel_path(inventory.root, script_path)}"
                 ),
                 _rel_path(inventory.root, config_path),
@@ -386,11 +418,63 @@ def codex_session_start_command_output(inventory: Inventory) -> dict[str, object
     return codex_hook_command_output(inventory, HOOK_SESSION_START)
 
 
+def hook_client_command_output(inventory: Inventory, hook_id: str, client: str, hook_input_text: str = "") -> dict[str, object]:
+    if client in {CODEX_CLIENT, CLAUDE_CODE_CLIENT}:
+        return codex_hook_command_output(inventory, hook_id, hook_input_text)
+    if client != GITHUB_COPILOT_CLIENT:
+        return hook_client_failure_output(client, hook_id, f"unsupported native hook client={client}")
+
+    payload = hook_event_payload(inventory, hook_id, [], hook_input_text)
+    blocked = bool(payload.get("block"))
+    system_message = payload.get("system_message")
+    reason = system_message if isinstance(system_message, str) and system_message else "MyLittleHarness blocked this deterministic shortcut attempt."
+    additional_context = payload.get("additional_context")
+
+    if hook_id == HOOK_PRE_TOOL_USE and blocked:
+        return {"permissionDecision": "deny", "permissionDecisionReason": reason}
+    if hook_id == HOOK_SESSION_START and isinstance(additional_context, str) and additional_context:
+        return {"additionalContext": additional_context}
+    if hook_id == HOOK_STOP and blocked:
+        return {"decision": "block", "reason": reason}
+    return {}
+
+
+def hook_client_failure_output(client: str, hook_id: str, message: str) -> dict[str, object]:
+    if client == GITHUB_COPILOT_CLIENT:
+        if hook_id == HOOK_SESSION_START:
+            return {"additionalContext": f"MyLittleHarness hook failed open: {message}"}
+        return {}
+    event_name = CODEX_HOOK_EVENTS.get(hook_id, CODEX_SESSION_START_EVENT)
+    return {
+        "continue": True,
+        "systemMessage": f"MLH hook failed: {message}",
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": "MyLittleHarness context unavailable; run `mylittleharness --root <root> check` before lifecycle-sensitive work.",
+        },
+    }
+
+
 def render_codex_hooks_json(root: Path, request: CodexHookAdapterRequest | None = None) -> str:
     request = request or CodexHookAdapterRequest()
     config_path = _codex_hooks_config_path(root, request)
     existing = _read_codex_hooks_config(config_path)
     merged = _merge_codex_native_hooks(existing)
+    return json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+
+
+def render_native_hooks_json(root: Path, request: CodexHookAdapterRequest | None = None) -> str:
+    request = request or CodexHookAdapterRequest()
+    if request.client == CODEX_CLIENT:
+        return render_codex_hooks_json(root, request)
+    config_path = _native_hooks_config_path(root, request)
+    existing = _read_native_hooks_config(config_path, request.client)
+    if request.client == CLAUDE_CODE_CLIENT:
+        merged = _merge_claude_code_native_hooks(existing)
+    elif request.client == GITHUB_COPILOT_CLIENT:
+        merged = _merge_github_copilot_native_hooks(existing)
+    else:
+        raise ValueError(f"unsupported native hook client={request.client}")
     return json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
 
 
@@ -437,6 +521,55 @@ def render_codex_session_start_script() -> str:
             "                \"additionalContext\": \"MyLittleHarness first-contact context unavailable; run `mylittleharness --root <root> check` before lifecycle-sensitive work.\",",
             "            },",
             "        }",
+            "    json.dump(payload, sys.stdout, ensure_ascii=True)",
+            "    sys.stdout.write(\"\\n\")",
+            "    raise SystemExit(0)",
+        ]
+    ) + "\n"
+
+
+def render_native_hook_script(client: str) -> str:
+    if client == CODEX_CLIENT:
+        return render_codex_session_start_script()
+    import_root_literal = repr(str(_module_import_root()))
+    client_literal = repr(client)
+    return "\n".join(
+        [
+            "# Generated by MyLittleHarness. Do not edit by hand unless replacing the hook adapter.",
+            "from __future__ import annotations",
+            "",
+            "import os",
+            "import sys",
+            "from pathlib import Path",
+            "",
+            f"MLH_IMPORT_ROOT = {import_root_literal}",
+            "if MLH_IMPORT_ROOT and MLH_IMPORT_ROOT not in sys.path:",
+            "    sys.path.insert(0, MLH_IMPORT_ROOT)",
+            "",
+            "import json",
+            "",
+            "from mylittleharness.hooks import HOOK_SESSION_START, hook_client_command_output, hook_client_failure_output",
+            "from mylittleharness.inventory import load_inventory",
+            "",
+            f"MLH_HOOK_CLIENT = {client_literal}",
+            "",
+            "",
+            "def _operating_root() -> Path:",
+            "    cwd = Path.cwd().resolve()",
+            "    for candidate in (cwd, *cwd.parents):",
+            "        if (candidate / 'project' / 'project-state.md').is_file():",
+            "            return candidate",
+            "    return Path(__file__).resolve().parents[2]",
+            "",
+            "",
+            "if __name__ == \"__main__\":",
+            "    root = _operating_root()",
+            "    hook_event = os.environ.get(\"MLH_HOOK_EVENT\") or HOOK_SESSION_START",
+            "    hook_input = sys.stdin.read()",
+            "    try:",
+            "        payload = hook_client_command_output(load_inventory(root), hook_event, MLH_HOOK_CLIENT, hook_input)",
+            "    except Exception as exc:",
+            "        payload = hook_client_failure_output(MLH_HOOK_CLIENT, hook_event, str(exc))",
             "    json.dump(payload, sys.stdout, ensure_ascii=True)",
             "    sys.stdout.write(\"\\n\")",
             "    raise SystemExit(0)",
@@ -498,23 +631,26 @@ def _hooks_summary_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "hooks-doctor-first-contact",
-            "first-contact context is a runnable native-client event (`hooks --run session-start --json`); Codex activation uses `hooks adapter --client codex --dry-run|--apply --scope project`; Git pre-commit is only a warning shim",
+            "first-contact context is a runnable native-client event (`hooks --run session-start --json`); activation uses `hooks adapter --client <client> --dry-run|--apply --scope project`; Git pre-commit is only a warning shim",
         ),
     ]
 
 
 def _codex_hook_adapter_target_findings(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
-    config_path = _codex_hooks_config_path(inventory.root, request)
-    script_path = _codex_hook_script_path(inventory.root, request)
+    config_path = _native_hooks_config_path(inventory.root, request)
+    script_path = _native_hook_script_path(inventory.root, request)
     status = _codex_hook_adapter_status(inventory.root, request)
+    prefix = _hook_adapter_code_prefix(request)
+    label = _native_hook_client_label(request.client)
+    event_names = _native_hook_event_names(request.client)
     return [
-        Finding("info", "hooks-codex-adapter-target", f"client={request.client}; scope={request.scope}; config={_rel_path(inventory.root, config_path)}", _rel_path(inventory.root, config_path)),
-        Finding("info", "hooks-codex-adapter-script", f"helper script target={_rel_path(inventory.root, script_path)}", _rel_path(inventory.root, script_path)),
-        Finding("info", "hooks-codex-adapter-status", f"Codex SessionStart hook adapter status={status}; project-local hooks require a trusted project and may need /hooks review or a new Codex session", _rel_path(inventory.root, config_path)),
+        Finding("info", f"{prefix}-target", f"client={request.client}; scope={request.scope}; config={_rel_path(inventory.root, config_path)}", _rel_path(inventory.root, config_path)),
+        Finding("info", f"{prefix}-script", f"helper script target={_rel_path(inventory.root, script_path)}", _rel_path(inventory.root, script_path)),
+        Finding("info", f"{prefix}-status", f"{label} hook adapter status={status}; project-local hooks require a trusted project and may need client hook review or a new session", _rel_path(inventory.root, config_path)),
         Finding(
             "info",
-            "hooks-codex-adapter-event",
-            "Codex native events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop; hook stdout provides client-valid JSON for context, warning, or deterministic denial",
+            f"{prefix}-event",
+            f"{label} native events: {', '.join(event_names)}; hook stdout provides client-valid JSON for context, warning, or deterministic denial",
             _rel_path(inventory.root, config_path),
         ),
     ]
@@ -559,7 +695,7 @@ def _hook_first_contact_adoption_findings(inventory: Inventory) -> list[Finding]
         Finding(
             "info",
             "hooks-first-contact-codex-adapter",
-            "Codex native activation is project-local and explicit: mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project, then --apply after review",
+            "Native client activation is project-local and explicit: mylittleharness --root <root> hooks adapter --client codex|claude-code|github-copilot --dry-run --scope project, then --apply after review",
             ".codex/hooks.json",
         ),
         Finding(
@@ -571,7 +707,7 @@ def _hook_first_contact_adoption_findings(inventory: Inventory) -> list[Finding]
         Finding(
             "info",
             "hooks-first-contact-native-client-boundary",
-            "MLH installs Codex native hook configuration only through the explicit project-local adapter dry-run/apply rail; other IDE/native clients remain future scoped adapters",
+            "MLH installs Codex, Claude Code, and GitHub Copilot native hook configuration only through the explicit project-local adapter dry-run/apply rail",
         ),
     ]
 
@@ -616,37 +752,36 @@ def _hook_install_errors(inventory: Inventory, request: HookInstallRequest) -> l
 
 def _codex_hook_adapter_errors(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
     findings: list[Finding] = []
-    if request.client != CODEX_CLIENT:
-        findings.append(Finding("error", "hooks-codex-adapter-refused", f"unsupported native hook client={request.client}; only codex is implemented"))
+    prefix = _hook_adapter_code_prefix(request)
+    label = _native_hook_client_label(request.client)
+    if request.client not in NATIVE_HOOK_CLIENTS:
+        findings.append(Finding("error", f"{prefix}-refused", f"unsupported native hook client={request.client}; supported clients={','.join(NATIVE_HOOK_CLIENTS)}"))
         return findings
     if request.scope != "project":
-        findings.append(Finding("error", "hooks-codex-adapter-refused", f"unsupported Codex hook adapter scope={request.scope}; only project scope is implemented"))
+        findings.append(Finding("error", f"{prefix}-refused", f"unsupported {label} hook adapter scope={request.scope}; only project scope is implemented"))
         return findings
     if inventory.root_kind != "live_operating_root":
         findings.append(
             Finding(
                 "error",
-                "hooks-codex-adapter-refused",
-                f"Codex project hook adapter apply requires a live operating root; got root_kind={inventory.root_kind}; product fixtures and archive roots remain non-authority",
+                f"{prefix}-refused",
+                f"{label} project hook adapter apply requires a live operating root; got root_kind={inventory.root_kind}; product fixtures and archive roots remain non-authority",
             )
         )
-    codex_dir = inventory.root / ".codex"
-    hooks_dir = _codex_hook_script_path(inventory.root, request).parent
-    for path, label in ((codex_dir, ".codex"), (hooks_dir, ".codex/hooks")):
-        if path.is_symlink() or (path.exists() and not path.is_dir()):
-            findings.append(Finding("error", "hooks-codex-adapter-refused", f"{label} is not a safe directory target", label))
-    config_path = _codex_hooks_config_path(inventory.root, request)
-    script_path = _codex_hook_script_path(inventory.root, request)
+    config_path = _native_hooks_config_path(inventory.root, request)
+    script_path = _native_hook_script_path(inventory.root, request)
+    for path in (config_path, script_path):
+        findings.extend(_unsafe_parent_directory_findings(inventory.root, path, f"{prefix}-refused"))
     for path in (config_path, script_path):
         if not _is_within_root(inventory.root, path):
-            findings.append(Finding("error", "hooks-codex-adapter-refused", f"Codex hook target escapes root: {path}", _rel_path(inventory.root, path)))
+            findings.append(Finding("error", f"{prefix}-refused", f"{label} hook target escapes root: {path}", _rel_path(inventory.root, path)))
         if path.is_symlink() or (path.exists() and not path.is_file()):
-            findings.append(Finding("error", "hooks-codex-adapter-refused", f"Codex hook target is not a regular file: {_rel_path(inventory.root, path)}", _rel_path(inventory.root, path)))
+            findings.append(Finding("error", f"{prefix}-refused", f"{label} hook target is not a regular file: {_rel_path(inventory.root, path)}", _rel_path(inventory.root, path)))
     if config_path.exists() and config_path.is_file() and not config_path.is_symlink():
         try:
-            _read_codex_hooks_config(config_path)
+            _read_native_hooks_config(config_path, request.client)
         except ValueError as exc:
-            findings.append(Finding("error", "hooks-codex-adapter-refused", str(exc), _rel_path(inventory.root, config_path)))
+            findings.append(Finding("error", f"{prefix}-refused", str(exc), _rel_path(inventory.root, config_path)))
     return findings
 
 
@@ -1211,26 +1346,39 @@ def _product_relative_path(inventory: Inventory, path: str) -> str:
 
 
 def _codex_hooks_config_path(root: Path, request: CodexHookAdapterRequest) -> Path:
+    return _native_hooks_config_path(root, request)
+
+
+def _native_hooks_config_path(root: Path, request: CodexHookAdapterRequest) -> Path:
+    if request.config_path:
+        candidate = Path(request.config_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        return candidate
     if request.scope == "project":
-        return root / CODEX_HOOKS_REL_PATH
-    return root / ".mylittleharness" / "unsupported-codex-hooks.json"
+        return root / _native_hooks_config_rel_path(request.client)
+    return root / ".mylittleharness" / f"unsupported-{request.client}-hooks.json"
 
 
 def _codex_hook_script_path(root: Path, request: CodexHookAdapterRequest) -> Path:
+    return _native_hook_script_path(root, request)
+
+
+def _native_hook_script_path(root: Path, request: CodexHookAdapterRequest) -> Path:
     if request.scope == "project":
-        return root / CODEX_HOOK_SCRIPT_REL_PATH
-    return root / ".mylittleharness" / "unsupported-codex-hook.py"
+        return root / _native_hook_script_rel_path(request.client)
+    return root / ".mylittleharness" / f"unsupported-{request.client}-hook.py"
 
 
 def _codex_hook_adapter_status(root: Path, request: CodexHookAdapterRequest) -> str:
-    config_path = _codex_hooks_config_path(root, request)
-    script_path = _codex_hook_script_path(root, request)
+    config_path = _native_hooks_config_path(root, request)
+    script_path = _native_hook_script_path(root, request)
     try:
-        config_current = config_path.is_file() and not config_path.is_symlink() and config_path.read_text(encoding="utf-8") == render_codex_hooks_json(root, request)
+        config_current = config_path.is_file() and not config_path.is_symlink() and config_path.read_text(encoding="utf-8") == render_native_hooks_json(root, request)
     except (OSError, ValueError):
         config_current = False
     try:
-        script_current = script_path.is_file() and not script_path.is_symlink() and script_path.read_text(encoding="utf-8") == render_codex_session_start_script()
+        script_current = script_path.is_file() and not script_path.is_symlink() and script_path.read_text(encoding="utf-8") == render_native_hook_script(request.client)
     except OSError:
         script_current = False
     if config_current and script_current:
@@ -1241,23 +1389,29 @@ def _codex_hook_adapter_status(root: Path, request: CodexHookAdapterRequest) -> 
 
 
 def _read_codex_hooks_config(config_path: Path) -> dict[str, object]:
+    return _read_native_hooks_config(config_path, CODEX_CLIENT)
+
+
+def _read_native_hooks_config(config_path: Path, client: str) -> dict[str, object]:
     if not config_path.exists():
         return {}
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Codex hooks config is not valid JSON: {exc}") from exc
+        raise ValueError(f"{_native_hook_client_label(client)} hooks config is not valid JSON: {exc}") from exc
     except OSError as exc:
-        raise ValueError(f"Codex hooks config could not be read: {exc}") from exc
+        raise ValueError(f"{_native_hook_client_label(client)} hooks config could not be read: {exc}") from exc
     if not isinstance(payload, dict):
-        raise ValueError("Codex hooks config root must be a JSON object")
+        raise ValueError(f"{_native_hook_client_label(client)} hooks config root must be a JSON object")
     hooks = payload.get("hooks", {})
     if not isinstance(hooks, dict):
-        raise ValueError("Codex hooks config `hooks` field must be a JSON object")
-    for codex_event in CODEX_HOOK_EVENTS.values():
-        event_hooks = hooks.get(codex_event, [])
+        raise ValueError(f"{_native_hook_client_label(client)} hooks config `hooks` field must be a JSON object")
+    if client == GITHUB_COPILOT_CLIENT and "version" in payload and payload.get("version") != 1:
+        raise ValueError("GitHub Copilot hooks config `version` must be 1 when present")
+    for event_name in _native_hook_event_names(client):
+        event_hooks = hooks.get(event_name, [])
         if not isinstance(event_hooks, list):
-            raise ValueError(f"Codex hooks config `hooks.{codex_event}` field must be a JSON array")
+            raise ValueError(f"{_native_hook_client_label(client)} hooks config `hooks.{event_name}` field must be a JSON array")
     return payload
 
 
@@ -1278,6 +1432,41 @@ def _merge_codex_native_hooks(existing: dict[str, object]) -> dict[str, object]:
     return merged
 
 
+def _merge_claude_code_native_hooks(existing: dict[str, object]) -> dict[str, object]:
+    merged = json.loads(json.dumps(existing))
+    hooks = merged.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        merged["hooks"] = hooks
+    for hook_id in NATIVE_ADAPTER_HOOKS:
+        event_name = CODEX_HOOK_EVENTS[hook_id]
+        existing_groups = hooks.get(event_name, [])
+        if not isinstance(existing_groups, list):
+            existing_groups = []
+        filtered_groups = [group for group in existing_groups if not _is_mlh_native_hook_group(group, CLAUDE_CODE_HOOK_SCRIPT_REL_PATH)]
+        filtered_groups.append(_claude_code_hook_group(hook_id))
+        hooks[event_name] = filtered_groups
+    return merged
+
+
+def _merge_github_copilot_native_hooks(existing: dict[str, object]) -> dict[str, object]:
+    merged = json.loads(json.dumps(existing))
+    merged["version"] = 1
+    hooks = merged.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        merged["hooks"] = hooks
+    for hook_id in NATIVE_ADAPTER_HOOKS:
+        event_name = GITHUB_COPILOT_HOOK_EVENTS[hook_id]
+        existing_entries = hooks.get(event_name, [])
+        if not isinstance(existing_entries, list):
+            existing_entries = []
+        filtered_entries = [entry for entry in existing_entries if not _is_mlh_github_copilot_hook_entry(entry)]
+        filtered_entries.append(_github_copilot_hook_entry(hook_id))
+        hooks[event_name] = filtered_entries
+    return merged
+
+
 def _codex_hook_group(hook_id: str) -> dict[str, object]:
     return {
         "matcher": CODEX_HOOK_MATCHERS[hook_id],
@@ -1292,20 +1481,57 @@ def _codex_hook_group(hook_id: str) -> dict[str, object]:
     }
 
 
+def _claude_code_hook_group(hook_id: str) -> dict[str, object]:
+    group: dict[str, object] = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": _native_hook_command(CLAUDE_CODE_CLIENT, hook_id),
+                "timeout": 30,
+                "statusMessage": CODEX_HOOK_STATUS_MESSAGES[hook_id],
+            }
+        ],
+    }
+    if hook_id not in {HOOK_USER_PROMPT_SUBMIT, HOOK_STOP}:
+        group["matcher"] = CODEX_HOOK_MATCHERS[hook_id]
+    return group
+
+
+def _github_copilot_hook_entry(hook_id: str) -> dict[str, object]:
+    return {
+        "type": "command",
+        "command": _native_hook_command(GITHUB_COPILOT_CLIENT, hook_id),
+        "timeoutSec": 30,
+    }
+
+
 def _codex_hook_command(hook_id: str) -> str:
-    script_rel = CODEX_HOOK_SCRIPT_REL_PATH
+    return _native_hook_command(CODEX_CLIENT, hook_id)
+
+
+def _native_hook_command(client: str, hook_id: str) -> str:
+    if client == CODEX_CLIENT:
+        script_rel = CODEX_HOOK_SCRIPT_REL_PATH
+    else:
+        script_rel = _native_hook_script_rel_path(client)
+    parts_literal = _py_literal(tuple(script_rel.split("/")))
+    script_label = "MLH Codex hook script" if client == CODEX_CLIENT else f"MLH {client} hook script"
     return (
         "python -c \"from pathlib import Path; import os; import runpy; "
         "p=Path.cwd().resolve(); roots=(p, *p.parents); "
-        f"script=next((r/{_py_literal(script_rel.split('/')[0])}/{_py_literal(script_rel.split('/')[1])}/{_py_literal(script_rel.split('/')[2])} "
-        f"for r in roots if (r/{_py_literal(script_rel.split('/')[0])}/{_py_literal(script_rel.split('/')[1])}/{_py_literal(script_rel.split('/')[2])}).is_file()), None); "
-        "assert script is not None, 'MLH Codex hook script not found from cwd'; "
+        f"parts={parts_literal}; "
+        "script=next((r.joinpath(*parts) for r in roots if r.joinpath(*parts).is_file()), None); "
+        f"assert script is not None, {_py_literal(script_label + ' not found from cwd')}; "
         f"os.environ['MLH_HOOK_EVENT']={_py_literal(hook_id)}; "
         "runpy.run_path(str(script), run_name='__main__')\""
     )
 
 
 def _is_mlh_codex_hook_group(group: object) -> bool:
+    return _is_mlh_native_hook_group(group, CODEX_HOOK_SCRIPT_REL_PATH)
+
+
+def _is_mlh_native_hook_group(group: object, script_rel_path: str) -> bool:
     if not isinstance(group, dict):
         return False
     handlers = group.get("hooks")
@@ -1315,12 +1541,70 @@ def _is_mlh_codex_hook_group(group: object) -> bool:
         if not isinstance(handler, dict):
             continue
         command = str(handler.get("command") or "")
-        if "mylittleharness_session_start.py" in command:
+        if Path(script_rel_path).name in command:
             return True
     return False
 
 
-def _py_literal(value: str) -> str:
+def _is_mlh_github_copilot_hook_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    command = str(entry.get("command") or "")
+    return Path(GITHUB_COPILOT_HOOK_SCRIPT_REL_PATH).name in command
+
+
+def _native_hooks_config_rel_path(client: str) -> str:
+    if client == CLAUDE_CODE_CLIENT:
+        return CLAUDE_CODE_HOOKS_REL_PATH
+    if client == GITHUB_COPILOT_CLIENT:
+        return GITHUB_COPILOT_HOOKS_REL_PATH
+    return CODEX_HOOKS_REL_PATH
+
+
+def _native_hook_script_rel_path(client: str) -> str:
+    if client == CLAUDE_CODE_CLIENT:
+        return CLAUDE_CODE_HOOK_SCRIPT_REL_PATH
+    if client == GITHUB_COPILOT_CLIENT:
+        return GITHUB_COPILOT_HOOK_SCRIPT_REL_PATH
+    return CODEX_HOOK_SCRIPT_REL_PATH
+
+
+def _native_hook_event_names(client: str) -> list[str]:
+    if client == GITHUB_COPILOT_CLIENT:
+        return [GITHUB_COPILOT_HOOK_EVENTS[hook_id] for hook_id in NATIVE_ADAPTER_HOOKS]
+    return [CODEX_HOOK_EVENTS[hook_id] for hook_id in NATIVE_ADAPTER_HOOKS]
+
+
+def _native_hook_client_label(client: str) -> str:
+    if client == CLAUDE_CODE_CLIENT:
+        return "Claude Code"
+    if client == GITHUB_COPILOT_CLIENT:
+        return "GitHub Copilot"
+    if client == CODEX_CLIENT:
+        return "Codex"
+    return client
+
+
+def _hook_adapter_code_prefix(request: CodexHookAdapterRequest) -> str:
+    return "hooks-codex-adapter" if request.client == CODEX_CLIENT else "hooks-native-adapter"
+
+
+def _unsafe_parent_directory_findings(root: Path, path: Path, code: str) -> list[Finding]:
+    findings: list[Finding] = []
+    current = path.parent
+    while True:
+        if not _is_within_root(root, current):
+            break
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            findings.append(Finding("error", code, f"hook target parent is not a safe directory: {_rel_path(root, current)}", _rel_path(root, current)))
+            break
+        if current == root:
+            break
+        current = current.parent
+    return findings
+
+
+def _py_literal(value: object) -> str:
     return repr(value)
 
 

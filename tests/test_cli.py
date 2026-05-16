@@ -17701,6 +17701,164 @@ class CliTests(unittest.TestCase):
             self.assertEqual("deny", pre_tool_payload["hookSpecificOutput"]["permissionDecision"])
             self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_hooks_native_adapter_writes_claude_code_project_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "claude-code", "--dry-run", "--scope", "project"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_rendered = dry_run_output.getvalue()
+            self.assertIn("hooks-native-adapter-dry-run", dry_rendered)
+            self.assertIn("hooks-native-adapter-plan", dry_rendered)
+            self.assertIn(".claude/settings.json", dry_rendered)
+            self.assertFalse((root / ".claude/settings.json").exists())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "claude-code", "--apply", "--scope", "project"])
+
+            self.assertEqual(code, 0)
+            rendered = apply_output.getvalue()
+            self.assertIn("hooks-native-adapter-apply-written", rendered)
+            settings_path = root / ".claude/settings.json"
+            script_path = root / ".claude/hooks/mylittleharness_hook.py"
+            self.assertTrue(settings_path.is_file())
+            self.assertTrue(script_path.is_file())
+            config = json.loads(settings_path.read_text(encoding="utf-8"))
+            for event_name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+                groups = config["hooks"][event_name]
+                command = groups[-1]["hooks"][0]["command"]
+                self.assertIn("mylittleharness_hook.py", command)
+                self.assertIn("MLH_HOOK_EVENT", command)
+                self.assertIn("statusMessage", groups[-1]["hooks"][0])
+            self.assertEqual("*", config["hooks"]["PreToolUse"][-1]["matcher"])
+            self.assertNotIn("matcher", config["hooks"]["UserPromptSubmit"][-1])
+            script_text = script_path.read_text(encoding="utf-8")
+            self.assertIn("MLH_HOOK_CLIENT = 'claude-code'", script_text)
+            self.assertIn("hook_client_command_output", script_text)
+            self.assertIn("json.dump(payload, sys.stdout", script_text)
+
+            script_output = io.StringIO()
+            cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch("sys.stdin", io.StringIO("")), redirect_stdout(script_output), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            payload = json.loads(script_output.getvalue())
+            self.assertTrue(payload["continue"])
+            self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("MyLittleHarness first-contact context", payload["hookSpecificOutput"]["additionalContext"])
+
+            pre_tool_input = json.dumps({"toolName": "shell_command", "command": "Set-Content project/research/deep.md '# missing frontmatter'"})
+            pre_tool_output = io.StringIO()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ, {"MLH_HOOK_EVENT": "pre-tool-use"}), patch("sys.stdin", io.StringIO(pre_tool_input)), redirect_stdout(pre_tool_output), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            pre_tool_payload = json.loads(pre_tool_output.getvalue())
+            self.assertEqual("PreToolUse", pre_tool_payload["hookSpecificOutput"]["hookEventName"])
+            self.assertEqual("deny", pre_tool_payload["hookSpecificOutput"]["permissionDecision"])
+            self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_hooks_native_adapter_writes_github_copilot_project_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "github-copilot", "--dry-run", "--scope", "project"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_rendered = dry_run_output.getvalue()
+            self.assertIn("hooks-native-adapter-dry-run", dry_rendered)
+            self.assertIn("hooks-native-adapter-plan", dry_rendered)
+            self.assertIn(".github/hooks/mylittleharness.json", dry_rendered)
+            self.assertFalse((root / ".github/hooks/mylittleharness.json").exists())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "github-copilot", "--apply", "--scope", "project"])
+
+            self.assertEqual(code, 0)
+            rendered = apply_output.getvalue()
+            self.assertIn("hooks-native-adapter-apply-written", rendered)
+            hooks_path = root / ".github/hooks/mylittleharness.json"
+            script_path = root / ".github/hooks/mylittleharness_hook.py"
+            self.assertTrue(hooks_path.is_file())
+            self.assertTrue(script_path.is_file())
+            config = json.loads(hooks_path.read_text(encoding="utf-8"))
+            self.assertEqual(1, config["version"])
+            for event_name in ("sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop"):
+                entries = config["hooks"][event_name]
+                self.assertEqual("command", entries[-1]["type"])
+                self.assertEqual(30, entries[-1]["timeoutSec"])
+                self.assertIn("mylittleharness_hook.py", entries[-1]["command"])
+                self.assertIn("MLH_HOOK_EVENT", entries[-1]["command"])
+            script_text = script_path.read_text(encoding="utf-8")
+            self.assertIn("MLH_HOOK_CLIENT = 'github-copilot'", script_text)
+            self.assertIn("hook_client_command_output", script_text)
+
+            script_output = io.StringIO()
+            cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch("sys.stdin", io.StringIO("")), redirect_stdout(script_output), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            payload = json.loads(script_output.getvalue())
+            self.assertIn("additionalContext", payload)
+            self.assertIn("MyLittleHarness first-contact context", payload["additionalContext"])
+
+            pre_tool_input = json.dumps({"toolName": "shell_command", "command": "Set-Content project/research/deep.md '# missing frontmatter'"})
+            pre_tool_output = io.StringIO()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ, {"MLH_HOOK_EVENT": "pre-tool-use"}), patch("sys.stdin", io.StringIO(pre_tool_input)), redirect_stdout(pre_tool_output), self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            pre_tool_payload = json.loads(pre_tool_output.getvalue())
+            self.assertEqual("deny", pre_tool_payload["permissionDecision"])
+            self.assertIn("frontmatter", pre_tool_payload["permissionDecisionReason"])
+
+    def test_hooks_native_adapter_refuses_unsafe_config_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "claude-code", "--apply", "--scope", "project", "--config-path", "..\\escape.json"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("hooks-native-adapter-refused", rendered)
+            self.assertIn("hook target escapes root", rendered)
+            self.assertFalse((root.parent / "escape.json").exists())
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                main(["--root", str(root), "hooks", "--dry-run", "--config-path", ".claude/settings.json"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("hooks --config-path is only valid with hooks adapter", stderr.getvalue())
+
     def test_hooks_native_events_read_input_and_block_lifecycle_shortcuts_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

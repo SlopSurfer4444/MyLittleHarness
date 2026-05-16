@@ -499,8 +499,9 @@ def build_parser() -> argparse.ArgumentParser:
     hooks.add_argument("--input-file", dest="input_file", help="Read native hook JSON/text input from a UTF-8 file, or '-' for stdin; valid with --run.")
     hooks.add_argument("--hook", choices=("git-pre-commit",), default="git-pre-commit", help="Hook shim to install. Defaults to git-pre-commit.")
     hooks.add_argument("--adapter", action="store_true", help="Manage a native client hook adapter; compatible with dry-run/apply.")
-    hooks.add_argument("--client", choices=("codex",), help="Native hook client to configure with --adapter. Only codex is implemented.")
+    hooks.add_argument("--client", choices=("codex", "claude-code", "github-copilot"), help="Native hook client to configure with --adapter.")
     hooks.add_argument("--scope", choices=("project",), default="project", help="Native hook adapter scope. Only project scope is implemented.")
+    hooks.add_argument("--config-path", dest="config_path", help="Optional root-relative or absolute project-local hook config path for adapter tests; must stay inside --root.")
     hooks.add_argument("--force", action="store_true", help="Replace an existing non-MLH hook only after explicit review.")
     hooks.add_argument("hook_args", nargs=argparse.REMAINDER, help="Optional raw hook arguments after --run.")
     tasks = subparsers.add_parser(

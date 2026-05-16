@@ -312,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("hooks adapter is only valid with --dry-run or --apply")
             if getattr(args, "force", False):
                 parser.error("hooks --force is only valid for local Git hook shim installation")
+        elif getattr(args, "config_path", None):
+            parser.error("hooks --config-path is only valid with hooks adapter")
     if args.command == "adapter" and args.serve and args.root is None:
         return serve_mcp_read_projection(None, sys.stdin, sys.stdout)
 
