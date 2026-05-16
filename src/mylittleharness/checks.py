@@ -2688,6 +2688,7 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
         )
 
     preflight_errors = _attach_apply_preflight_errors(inventory, normalized_project)
+    preflight_errors.extend(_attach_codex_hook_preflight_errors(inventory))
     if preflight_errors:
         findings.extend(
             Finding(
@@ -2700,6 +2701,15 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
             for error in preflight_errors
         )
         return findings
+
+    findings.append(
+        Finding(
+            "warn",
+            "attach-codex-hooks-plan",
+            "would ensure project-local Codex native hooks by default: .codex/hooks.json and .codex/hooks/mylittleharness_session_start.py",
+            ".codex/hooks.json",
+        )
+    )
 
     missing_dirs = [rel_path for rel_path in WORKFLOW_ATTACH_DIRECTORIES if not (inventory.root / rel_path).exists()]
     if missing_dirs:
@@ -2743,7 +2753,7 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
 
     normalized_project = _normalize_project_name(project_name)
     if _is_attach_already_attached_live_root(inventory, normalized_project):
-        return _attach_already_attached_apply_findings()
+        return _attach_already_attached_apply_findings(inventory)
 
     state_path = inventory.root / ATTACH_STATE_REL_PATH
     if not state_path.exists() and normalized_project is None:
@@ -2758,6 +2768,7 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
 
     errors = _attach_apply_preflight_errors(inventory, normalized_project)
     errors.extend(_attach_generated_projection_preflight_errors(inventory))
+    errors.extend(_attach_codex_hook_preflight_errors(inventory))
     if errors:
         return errors
 
@@ -2793,10 +2804,11 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         Finding(
             "info",
             "attach-apply-boundary",
-            "attach --apply wrote eager scaffold directories, absent manifest/state templates, and attach-time disposable generated projection output",
+            "attach --apply wrote eager scaffold directories, absent manifest/state templates, project-local Codex native hooks, and attach-time disposable generated projection output",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
+    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory))
     findings.extend(_attach_generated_projection_findings(refreshed_inventory))
     return findings
 
@@ -2907,23 +2919,59 @@ def _attach_already_attached_dry_run_findings() -> list[Finding]:
         ),
         Finding("info", "attach-existing", f"existing workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
         Finding("info", "attach-existing", f"existing project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
-        Finding("info", "attach-proposal", "no-op: root is already attached; first-run template conflict checks and generated projection setup are skipped"),
+        Finding("info", "attach-codex-hooks-plan", "attach --apply would still ensure project-local Codex native hooks by default", ".codex/hooks.json"),
+        Finding("info", "attach-proposal", "root is already attached; first-run template conflict checks and generated projection setup are skipped"),
     ]
 
 
-def _attach_already_attached_apply_findings() -> list[Finding]:
-    return [
+def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Finding]:
+    findings = [
         Finding(
             "info",
             "attach-already-attached",
-            "already-attached live operating root; attach --apply left repo-visible authority and generated projection output unchanged",
+            "already-attached live operating root; attach --apply preserved authority files and ensured project-local Codex native hooks",
             ATTACH_STATE_REL_PATH,
         ),
         Finding("info", "attach-existing", f"preserved workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
         Finding("info", "attach-existing", f"preserved project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
-        Finding("info", "attach-unchanged", "no file, directory, or generated projection changes were needed"),
-        Finding("info", "attach-apply-boundary", "already-attached apply is a true no-op; create-only template and attach-time generated projection writes were skipped"),
+        Finding("info", "attach-apply-boundary", "already-attached apply skips create-only template and generated projection writes, but keeps project-local Codex native hooks current"),
     ]
+    hook_errors = _attach_codex_hook_preflight_errors(inventory)
+    if hook_errors:
+        return hook_errors
+    findings.extend(_attach_codex_hook_apply_findings(inventory))
+    return findings
+
+
+def _attach_codex_hook_preflight_errors(inventory: Inventory) -> list[Finding]:
+    from .hooks import CodexHookAdapterRequest, codex_hook_adapter_validation_findings
+
+    errors = codex_hook_adapter_validation_findings(inventory, CodexHookAdapterRequest(), require_live_root=False)
+    return [
+        Finding(
+            "error",
+            "attach-codex-hooks-refused",
+            f"attach-time Codex hook adoption refused before scaffold mutation: {error.message}",
+            error.source,
+            error.line,
+        )
+        for error in errors
+    ]
+
+
+def _attach_codex_hook_apply_findings(inventory: Inventory) -> list[Finding]:
+    from .hooks import CodexHookAdapterRequest, codex_hook_adapter_apply_findings
+
+    findings = [
+        Finding(
+            "info",
+            "attach-codex-hooks-autoadoption",
+            "attach --apply keeps the project-local Codex native hook adapter current by default",
+            ".codex/hooks.json",
+        )
+    ]
+    findings.extend(codex_hook_adapter_apply_findings(inventory, CodexHookAdapterRequest()))
+    return findings
 
 
 def _is_attach_already_attached_live_root(inventory: Inventory, project_name: str | None) -> bool:

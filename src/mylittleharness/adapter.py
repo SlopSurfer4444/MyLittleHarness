@@ -434,6 +434,7 @@ def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path
             "writesUserConfig": False,
             "writesUserConfigOnApplyOnly": True,
             "writesRepoFiles": False,
+            "writesProjectCodexHooksOnInstallApplyOnly": True,
             "storesSecrets": False,
             "authorizesLifecycle": False,
             "fallback": "repo-visible files and generic CLI remain authoritative when no MCP client is active",
@@ -447,6 +448,8 @@ def codex_mcp_adoption_payload(
     codex_config_path: str | Path | None = None,
     include_snippet: bool = False,
 ) -> dict[str, object]:
+    from .hooks import codex_hook_adapter_adoption_payload
+
     command = mcp_read_projection_serve_command(inventory)
     config_path = _codex_config_path(codex_config_path)
     expected_server = _codex_expected_server(command)
@@ -469,10 +472,12 @@ def codex_mcp_adoption_payload(
             "dryRunCommand": "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
             "applyCommand": "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --apply",
             "backupExistingConfigOnApply": True,
-            "writesUserConfigOnlyOnApply": True,
+            "writesUserConfigOnApply": True,
+            "writesProjectCodexHooksOnApply": True,
             "storesSecrets": False,
             "printsExistingConfigValues": False,
         },
+        "projectHooks": codex_hook_adapter_adoption_payload(inventory),
         "dashboardPacketAvailable": True,
         "firstPass": [
             "mylittleharness --root <root> dashboard --inspect --json",
@@ -487,7 +492,7 @@ def codex_mcp_adoption_payload(
             "reason": "MCP search and SQLite accelerate discovery; exact source claims still need rg or bounded source reads",
         },
         "boundary": (
-            "MCP adoption is helper tooling only; mounted or missing status cannot approve lifecycle movement, repair, "
+            "Codex MCP and project-hook adoption is helper tooling only; mounted or missing status cannot approve lifecycle movement, repair, "
             "archive, roadmap status, staging, commit, push, provider routing, product diffs, or cache truth"
         ),
     }
@@ -506,17 +511,20 @@ def codex_mcp_install_sections(
     codex_config_path: str | Path | None = None,
     apply: bool = False,
 ) -> list[tuple[str, list[Finding]]]:
+    from .hooks import CodexHookAdapterRequest, codex_hook_adapter_apply_findings, codex_hook_adapter_dry_run_findings
+
     command = mcp_read_projection_serve_command(inventory)
     config_path = _codex_config_path(codex_config_path)
     expected_server = _codex_expected_server(command)
     status, mounted, reason, extra_keys = _codex_config_status(config_path, expected_server)
+    hook_request = CodexHookAdapterRequest()
     findings: list[Finding] = [
         Finding(
             "info",
             "adapter-codex-config-boundary",
             (
                 "Codex MCP config adoption is explicit and client-local; dry-run writes nothing, apply writes only "
-                "the reviewed MCP server table, and repo-visible files remain authority"
+                "the reviewed MCP server table plus project-local MLH Codex native hooks, and repo-visible files remain authority"
             ),
         ),
         Finding(
@@ -567,13 +575,41 @@ def codex_mcp_install_sections(
                     f"would append MCP server table to {config_path}; no workstation file was changed",
                 )
             )
+        hook_findings = [
+            Finding(
+                "info",
+                "adapter-codex-hook-autoadoption",
+                "project-local Codex native hooks are included in the same adoption preview by default",
+                ".codex/hooks.json",
+            )
+        ]
+        hook_findings.extend(codex_hook_adapter_dry_run_findings(inventory, hook_request))
         findings.extend(_codex_config_install_boundary_findings())
-        return [("Codex MCP Config", findings)]
+        return [("Codex MCP Config", findings), ("Codex Native Hooks", hook_findings)]
 
     apply_findings = _apply_codex_mcp_config(config_path, command, status, mounted)
     findings.extend(apply_findings)
+    hook_findings = [
+        Finding(
+            "info",
+            "adapter-codex-hook-autoadoption",
+            "project-local Codex native hooks are included in the same adoption apply by default",
+            ".codex/hooks.json",
+        )
+    ]
+    if any(finding.severity == "error" for finding in apply_findings):
+        hook_findings.append(
+            Finding(
+                "warn",
+                "adapter-codex-hook-autoadoption-skipped",
+                "project-local Codex hooks were not written because the Codex MCP config apply was refused",
+                ".codex/hooks.json",
+            )
+        )
+    else:
+        hook_findings.extend(codex_hook_adapter_apply_findings(inventory, hook_request))
     findings.extend(_codex_config_install_boundary_findings())
-    return [("Codex MCP Config", findings)]
+    return [("Codex MCP Config", findings), ("Codex Native Hooks", hook_findings)]
 
 
 def _mcp_navigation_tool_coverage_payload() -> dict[str, object]:

@@ -1060,16 +1060,15 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
             code_prefix="writeback",
         )
     )
-    errors.extend(
-        product_diff_write_scope_findings(
-            inventory,
-            closeout_plan.values,
-            completion_reason=completion_reason,
-            apply=True,
-            code_prefix="writeback",
-            preflight=True,
-        )
+    product_diff_preflight = product_diff_write_scope_findings(
+        inventory,
+        closeout_plan.values,
+        completion_reason=completion_reason,
+        apply=True,
+        code_prefix="writeback",
+        preflight=True,
     )
+    errors.extend(finding for finding in product_diff_preflight if finding.severity == "error")
 
     plan = inventory.active_plan_surface
     if plan and plan.exists:

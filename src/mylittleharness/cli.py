@@ -2433,7 +2433,7 @@ def _suggestions(command: str, findings) -> list[str]:
         return ["preflight completed as a terminal-only optional report; it did not install hooks, add CI, write reports, or approve lifecycle decisions."]
     if command == "hooks":
         if any(finding.code == "hooks-codex-adapter-apply-written" for finding in findings):
-            return ["hooks adapter apply installed only the project-local Codex SessionStart adapter; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
+            return ["hooks adapter apply installed only the project-local Codex native event adapter; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
         if any(finding.code == "hooks-install-written" for finding in findings):
             return ["hooks apply installed only the selected warning-only shim; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
         if any(finding.code == "hooks-install-refused" for finding in findings):

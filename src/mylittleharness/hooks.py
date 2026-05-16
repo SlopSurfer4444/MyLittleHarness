@@ -103,6 +103,15 @@ LIFECYCLE_AUTHORITY_PATHS = (
     "project/roadmap.md",
 )
 GENERATED_CACHE_PREFIXES = (".mylittleharness/generated/",)
+CODE_WRITE_PREFIXES = ("src/", "tests/")
+GIT_WRITE_COMMANDS = (
+    " git add ",
+    " git stage ",
+    " git commit ",
+    "git add ",
+    "git stage ",
+    "git commit ",
+)
 PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])((?:\.?[\\/])?(?:project|src|tests|docs|\.mylittleharness)[\\/][^\s\"'`]+)")
 
 
@@ -237,6 +246,41 @@ def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHook
         )
     findings.extend(_hook_boundary_findings())
     return findings
+
+
+def codex_hook_adapter_validation_findings(
+    inventory: Inventory,
+    request: CodexHookAdapterRequest,
+    *,
+    require_live_root: bool = True,
+) -> list[Finding]:
+    return _codex_hook_adapter_errors(inventory, request, require_live_root=require_live_root)
+
+
+def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHookAdapterRequest | None = None) -> dict[str, object]:
+    request = request or CodexHookAdapterRequest()
+    config_path = _native_hooks_config_path(inventory.root, request)
+    script_path = _native_hook_script_path(inventory.root, request)
+    return {
+        "schema": CODEX_HOOK_ADAPTER_SCHEMA,
+        "client": request.client,
+        "scope": request.scope,
+        "status": _codex_hook_adapter_status(inventory.root, request),
+        "configPath": _rel_path(inventory.root, config_path),
+        "scriptPath": _rel_path(inventory.root, script_path),
+        "events": [_native_hook_event_name(request.client, hook_id) for hook_id in NATIVE_ADAPTER_HOOKS],
+        "dryRunCommand": "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
+        "applyCommand": "mylittleharness --root <root> hooks adapter --client codex --apply --scope project",
+        "includedInCodexMcpInstall": True,
+        "includedInAttachApply": True,
+        "boundary": {
+            "writesRepoFilesOnApplyOnly": True,
+            "writesUserConfig": False,
+            "startsRuntime": False,
+            "authorizesLifecycle": False,
+            "eventsAreSensors": True,
+        },
+    }
 
 
 def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
@@ -750,7 +794,7 @@ def _hook_install_errors(inventory: Inventory, request: HookInstallRequest) -> l
     return findings
 
 
-def _codex_hook_adapter_errors(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
+def _codex_hook_adapter_errors(inventory: Inventory, request: CodexHookAdapterRequest, *, require_live_root: bool = True) -> list[Finding]:
     findings: list[Finding] = []
     prefix = _hook_adapter_code_prefix(request)
     label = _native_hook_client_label(request.client)
@@ -760,7 +804,7 @@ def _codex_hook_adapter_errors(inventory: Inventory, request: CodexHookAdapterRe
     if request.scope != "project":
         findings.append(Finding("error", f"{prefix}-refused", f"unsupported {label} hook adapter scope={request.scope}; only project scope is implemented"))
         return findings
-    if inventory.root_kind != "live_operating_root":
+    if require_live_root and inventory.root_kind != "live_operating_root":
         findings.append(
             Finding(
                 "error",
@@ -1002,12 +1046,50 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else "project",
             )
         )
-    if _looks_like_unsafe_mlh_mutation(lowered) and " --dry-run" not in lowered and " --apply" not in lowered:
+    if _looks_like_code_write(paths, command):
+        out_of_scope = [path for path in paths if _is_code_path(path) and not _is_active_plan_target_artifact(inventory, path)]
+        if not _has_active_plan(inventory):
+            findings.append(
+                Finding(
+                    "warn",
+                    "hooks-policy-warn-code-write-without-plan",
+                    "tool request appears to write source/test code while no active implementation plan is open; keep edits bounded and record lifecycle evidence before closeout",
+                    out_of_scope[0] if out_of_scope else (paths[0] if paths else None),
+                )
+            )
+        elif out_of_scope:
+            findings.append(
+                Finding(
+                    "error",
+                    "hooks-policy-block-code-write-outside-plan-scope",
+                    "blocked source/test write outside the active plan target_artifacts; update the roadmap/plan scope before editing this path",
+                    out_of_scope[0],
+                )
+            )
+    if _looks_like_unsafe_mlh_mutation(lowered) and not _has_explicit_mlh_review_mode(lowered):
         findings.append(
             Finding(
                 "error",
                 "hooks-policy-block-mlh-mutation-without-mode",
-                "blocked MLH mutating command without explicit --dry-run or --apply review mode",
+                "blocked MLH mutating command without explicit dry-run/apply or a recognized read-only/cache route",
+            )
+        )
+    if _looks_like_next_plan_apply(lowered) and _has_active_plan(inventory):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-next-plan-while-active",
+                "blocked opening a new active plan while the current plan is still active; close, cancel, or explicitly update the active plan first",
+                "project/implementation-plan.md",
+            )
+        )
+    if _looks_like_git_stage_or_commit(lowered) and _active_plan_not_ready_for_git(inventory):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-git-before-lifecycle-closeout",
+                "blocked Git staging/commit while an active plan phase is not complete; record verification and lifecycle state transfer before Git mutation",
+                "project/implementation-plan.md",
             )
         )
     if _looks_like_product_root_direct_edit(inventory, paths, command):
@@ -1259,9 +1341,25 @@ def _looks_like_product_root_direct_edit(inventory: Inventory, paths: list[str],
     return any(_is_under_configured_product_root(inventory, path) and not _is_active_plan_product_artifact(inventory, path) for path in paths)
 
 
+def _looks_like_code_write(paths: list[str], command: str) -> bool:
+    return _looks_like_write_command(command) and any(_is_code_path(path) for path in paths)
+
+
 def _looks_like_write_command(command: str) -> bool:
     lowered = f" {command.casefold()} "
     return any(token in lowered for token in WRITING_COMMAND_TOKENS)
+
+
+def _looks_like_git_stage_or_commit(lowered_command: str) -> bool:
+    padded = f" {lowered_command} "
+    return any(token in padded for token in GIT_WRITE_COMMANDS)
+
+
+def _looks_like_next_plan_apply(lowered_command: str) -> bool:
+    padded = f" {lowered_command} "
+    if " --update-active" in padded:
+        return False
+    return "mylittleharness" in padded and " plan " in padded and " --apply" in padded
 
 
 def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
@@ -1283,9 +1381,46 @@ def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
     return any(term in padded for term in mutating_terms)
 
 
+def _has_explicit_mlh_review_mode(lowered_command: str) -> bool:
+    padded = f" {lowered_command} "
+    if " --dry-run" in padded or " --apply" in padded or " --help" in padded or " -h" in padded:
+        return True
+    if " mylittleharness" in padded and " projection " in padded:
+        return any(
+            term in padded
+            for term in (
+                " --inspect",
+                " --warm-cache",
+                " --rebuild",
+                " --build",
+                " --delete",
+            )
+        )
+    if " mylittleharness" in padded and " hooks " in padded:
+        return " --doctor" in padded or " --run " in padded
+    return False
+
+
 def _is_generated_cache_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return any(rel.startswith(prefix) for prefix in GENERATED_CACHE_PREFIXES)
+
+
+def _is_code_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.endswith(".py") and any(rel.startswith(prefix) for prefix in CODE_WRITE_PREFIXES)
+
+
+def _has_active_plan(inventory: Inventory) -> bool:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return str(state.get("plan_status") or "").strip().casefold() == "active" and bool(str(state.get("active_plan") or "").strip())
+
+
+def _active_plan_not_ready_for_git(inventory: Inventory) -> bool:
+    if not _has_active_plan(inventory):
+        return False
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return str(state.get("phase_status") or "").strip().casefold() != "complete"
 
 
 def _is_lifecycle_authority_path(path: str) -> bool:
@@ -1329,6 +1464,36 @@ def _is_active_plan_product_artifact(inventory: Inventory, path: str) -> bool:
         if candidate and normalized == candidate:
             return True
     return False
+
+
+def _is_active_plan_target_artifact(inventory: Inventory, path: str) -> bool:
+    plan = inventory.active_plan_surface
+    if not plan or not plan.exists:
+        return False
+    artifacts = plan.frontmatter.data.get("target_artifacts")
+    if not isinstance(artifacts, list):
+        return False
+    normalized = _normalize_plan_artifact_candidate(inventory, path)
+    if not normalized:
+        return False
+    for artifact in artifacts:
+        candidate = _normalize_hook_path(str(artifact or "")).casefold()
+        if candidate and normalized == candidate:
+            return True
+    return False
+
+
+def _normalize_plan_artifact_candidate(inventory: Inventory, path: str) -> str:
+    rel = _product_relative_path(inventory, path)
+    if rel:
+        return _normalize_hook_path(rel).casefold()
+    try:
+        candidate = Path(path).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve().relative_to(inventory.root.resolve()).as_posix().casefold()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    return _normalize_hook_path(path).casefold()
 
 
 def _product_relative_path(inventory: Inventory, path: str) -> str:
@@ -1573,6 +1738,12 @@ def _native_hook_event_names(client: str) -> list[str]:
     if client == GITHUB_COPILOT_CLIENT:
         return [GITHUB_COPILOT_HOOK_EVENTS[hook_id] for hook_id in NATIVE_ADAPTER_HOOKS]
     return [CODEX_HOOK_EVENTS[hook_id] for hook_id in NATIVE_ADAPTER_HOOKS]
+
+
+def _native_hook_event_name(client: str, hook_id: str) -> str:
+    if client == GITHUB_COPILOT_CLIENT:
+        return GITHUB_COPILOT_HOOK_EVENTS[hook_id]
+    return CODEX_HOOK_EVENTS[hook_id]
 
 
 def _native_hook_client_label(client: str) -> str:

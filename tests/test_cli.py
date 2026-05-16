@@ -7631,6 +7631,51 @@ class CliTests(unittest.TestCase):
             self.assertIn("writeback-product-diff-write-scope-blocked", rendered)
             self.assertIn("docs/out.md", rendered)
 
+    def test_writeback_allows_in_scope_product_diff_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = root / "project/project-state.md"
+            changed = (VcsChangedPath("M", "src/allowed.py"),)
+            posture = VcsPosture(
+                root=product_root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                top_level=str(product_root),
+                changed_count=len(changed),
+                changed_samples=changed,
+                changed_paths=changed,
+            )
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Implemented product-diff-scope-gate in src/allowed.py",
+                        "--verification",
+                        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed for src/allowed.py",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "none known",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-product-diff-write-scope", rendered)
+            self.assertNotIn("writeback-product-diff-write-scope-blocked", rendered)
+            self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
+
     def test_writeback_allows_disclosed_out_of_scope_product_diff_residual_risk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, product_root = make_product_diff_scope_fixture(Path(tmp))
@@ -17903,6 +17948,107 @@ class CliTests(unittest.TestCase):
             self.assertTrue(prompt_payload["continue"])
             self.assertIn("dashboard_packet=available", prompt_payload["additional_context"])
 
+            out_of_scope_input = root / "pre_tool_out_of_scope_input.json"
+            out_of_scope_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": "Set-Content src/rogue.py 'x'"}),
+                encoding="utf-8",
+            )
+            before_out_of_scope = snapshot_tree_bytes(root)
+            out_of_scope_output = io.StringIO()
+            with redirect_stdout(out_of_scope_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(out_of_scope_input), "--json"])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(before_out_of_scope, snapshot_tree_bytes(root))
+            out_of_scope_payload = json.loads(out_of_scope_output.getvalue())
+            self.assertTrue(out_of_scope_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-code-write-outside-plan-scope",
+                {finding["code"] for finding in out_of_scope_payload["findings"]},
+            )
+            self.assertIn("target_artifacts", out_of_scope_payload["hookSpecificOutput"]["permissionDecisionReason"])
+
+            git_input = root / "pre_tool_git_input.json"
+            git_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": "git add src/mylittleharness/hooks.py"}),
+                encoding="utf-8",
+            )
+            before_git = snapshot_tree_bytes(root)
+            git_output = io.StringIO()
+            with redirect_stdout(git_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(git_input), "--json"])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(before_git, snapshot_tree_bytes(root))
+            git_payload = json.loads(git_output.getvalue())
+            self.assertTrue(git_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-git-before-lifecycle-closeout",
+                {finding["code"] for finding in git_payload["findings"]},
+            )
+
+            next_plan_input = root / "pre_tool_next_plan_input.json"
+            next_plan_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": "mylittleharness --root . plan --apply --roadmap-item next-slice"}),
+                encoding="utf-8",
+            )
+            before_next_plan = snapshot_tree_bytes(root)
+            next_plan_output = io.StringIO()
+            with redirect_stdout(next_plan_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(next_plan_input), "--json"])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(before_next_plan, snapshot_tree_bytes(root))
+            next_plan_payload = json.loads(next_plan_output.getvalue())
+            self.assertTrue(next_plan_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-next-plan-while-active",
+                {finding["code"] for finding in next_plan_payload["findings"]},
+            )
+
+            warm_cache_input = root / "pre_tool_warm_cache_input.json"
+            warm_cache_command = " ".join(["my" + "littleharness", "--root", ".", "projection", "--warm-cache", "--target", "all", "--quiet-period-seconds", "0"])
+            warm_cache_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": warm_cache_command}),
+                encoding="utf-8",
+            )
+            before_warm_cache = snapshot_tree_bytes(root)
+            warm_cache_output = io.StringIO()
+            with redirect_stdout(warm_cache_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(warm_cache_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_warm_cache, snapshot_tree_bytes(root))
+            warm_cache_payload = json.loads(warm_cache_output.getvalue())
+            self.assertFalse(warm_cache_payload["block"])
+            self.assertNotIn(
+                "hooks-policy-block-mlh-mutation-without-mode",
+                {finding["code"] for finding in warm_cache_payload["findings"]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            planless_input = root / "pre_tool_planless_input.json"
+            planless_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": "Set-Content src/new.py 'x'"}),
+                encoding="utf-8",
+            )
+            before_planless = snapshot_tree_bytes(root)
+            planless_output = io.StringIO()
+            with redirect_stdout(planless_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(planless_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_planless, snapshot_tree_bytes(root))
+            planless_payload = json.loads(planless_output.getvalue())
+            self.assertFalse(planless_payload["block"])
+            self.assertEqual("warn", planless_payload["status"])
+            self.assertIn(
+                "hooks-policy-warn-code-write-without-plan",
+                {finding["code"] for finding in planless_payload["findings"]},
+            )
+            self.assertIn("no active implementation plan", planless_payload["system_message"])
+
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -18277,7 +18423,11 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(dry_code, 0)
             self.assertFalse(config_path.exists())
+            self.assertFalse((root / ".codex/hooks.json").exists())
+            self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
             self.assertIn("adapter-codex-config-dry-run", dry_output.getvalue())
+            self.assertIn("adapter-codex-hook-autoadoption", dry_output.getvalue())
+            self.assertIn("hooks-codex-adapter-plan", dry_output.getvalue())
             self.assertIn("stores_secrets=false", dry_output.getvalue())
 
             apply_output = io.StringIO()
@@ -18298,8 +18448,16 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(apply_code, 0)
             config_text = config_path.read_text(encoding="utf-8")
+            hook_text = (root / ".codex/hooks.json").read_text(encoding="utf-8")
+            hook_script = (root / ".codex/hooks/mylittleharness_session_start.py").read_text(encoding="utf-8")
+            hook_config = json.loads(hook_text)
             self.assertIn("[mcp_servers.mylittleharness]", config_text)
             self.assertIn("adapter-codex-config-apply-written", apply_output.getvalue())
+            self.assertIn("adapter-codex-hook-autoadoption", apply_output.getvalue())
+            self.assertIn("hooks-codex-adapter-apply-written", apply_output.getvalue())
+            for event_name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+                self.assertIn(event_name, hook_config["hooks"])
+            self.assertIn("MLH_HOOK_EVENT", hook_script)
 
             second_apply_output = io.StringIO()
             with redirect_stdout(second_apply_output):
@@ -18319,7 +18477,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(second_code, 0)
             self.assertEqual(config_text, config_path.read_text(encoding="utf-8"))
+            self.assertEqual(hook_text, (root / ".codex/hooks.json").read_text(encoding="utf-8"))
+            self.assertEqual(hook_script, (root / ".codex/hooks/mylittleharness_session_start.py").read_text(encoding="utf-8"))
             self.assertIn("adapter-codex-config-apply-unchanged", second_apply_output.getvalue())
+            self.assertIn("hooks-codex-adapter-apply-unchanged", second_apply_output.getvalue())
 
     def test_adapter_install_client_config_refuses_conflicting_existing_server_without_secret_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18359,6 +18520,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(before, config_path.read_text(encoding="utf-8"))
             self.assertIn("adapter-codex-config-apply-refused", rendered)
+            self.assertIn("adapter-codex-hook-autoadoption-skipped", rendered)
+            self.assertFalse((root / ".codex/hooks.json").exists())
+            self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
             self.assertNotIn("should-not-print", rendered)
 
     def test_adapter_install_client_config_replaces_legacy_root_bound_server(self) -> None:
@@ -18410,6 +18574,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("[mcp_servers.mylittleharness]", config_text)
             self.assertNotIn('"--root"', config_text)
             self.assertNotIn(str(old_root), config_text)
+            self.assertTrue((root / ".codex/hooks.json").is_file())
+            self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
+            self.assertIn("hooks-codex-adapter-apply-written", rendered)
 
     def test_adapter_reports_stale_generated_projection_as_optional_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -19544,6 +19711,8 @@ class CliTests(unittest.TestCase):
                 self.assertTrue((root / rel_path).is_dir(), rel_path)
                 self.assertIn(rel_path, rendered)
             self.assertTrue((root / ".codex/project-workflow.toml").is_file())
+            self.assertTrue((root / ".codex/hooks.json").is_file())
+            self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
             self.assertTrue((root / "project/project-state.md").is_file())
             self.assertIn('project: "Sample"', (root / "project/project-state.md").read_text(encoding="utf-8"))
             self.assertFalse((root / ".agents/docmap.yaml").exists())
@@ -19551,6 +19720,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual([], list((root / "project/specs/workflow").glob("*.md")))
             self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
             self.assertTrue((root / INDEX_REL_PATH).is_file())
+            self.assertIn("attach-codex-hooks-autoadoption", rendered)
+            self.assertIn("hooks-codex-adapter-apply-written", rendered)
             self.assertIn("attach-generated-projection-build", rendered)
 
     def test_attach_apply_is_idempotent_and_preserves_contents(self) -> None:
@@ -19569,10 +19740,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(first_code, 0)
             self.assertEqual(second_code, 0)
             self.assertEqual(before, {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths})
+            self.assertTrue((root / ".codex/hooks.json").is_file())
+            self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
             self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
             self.assertTrue((root / INDEX_REL_PATH).is_file())
             self.assertIn("attach-already-attached", output.getvalue())
-            self.assertIn("attach-unchanged", output.getvalue())
+            self.assertIn("hooks-codex-adapter-apply-unchanged", output.getvalue())
             self.assertNotIn("attach-generated-projection-build", output.getvalue())
 
     def test_init_attach_dry_run_reports_already_attached_live_root_noop_without_writes(self) -> None:
@@ -19593,22 +19766,22 @@ class CliTests(unittest.TestCase):
                     self.assertIn("project/project-state.md", rendered)
                     self.assertNotIn("attach-target-conflict", rendered)
 
-    def test_init_attach_apply_already_attached_live_root_is_true_noop(self) -> None:
+    def test_init_attach_apply_already_attached_live_root_keeps_codex_hooks_current(self) -> None:
         for command in ("init", "attach"):
             with self.subTest(command=command):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = make_live_root(Path(tmp))
-                    before = snapshot_tree_bytes(root)
                     output = io.StringIO()
                     with redirect_stdout(output):
                         code = main(["--root", str(root), command, "--apply", "--project", "Sample"])
                     rendered = output.getvalue()
                     self.assertEqual(code, 0)
-                    self.assertEqual(before, snapshot_tree_bytes(root))
                     self.assertFalse((root / ARTIFACT_DIR_REL).exists())
+                    self.assertTrue((root / ".codex/hooks.json").is_file())
+                    self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
                     self.assertIn("attach-already-attached", rendered)
-                    self.assertIn("attach-unchanged", rendered)
-                    self.assertIn("true no-op", rendered)
+                    self.assertIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertIn("hooks-codex-adapter-apply-written", rendered)
                     self.assertNotIn("attach-generated-projection-build", rendered)
 
     def test_init_attach_refuses_detached_live_root_without_noop(self) -> None:
