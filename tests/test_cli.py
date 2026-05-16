@@ -19670,6 +19670,43 @@ class CliTests(unittest.TestCase):
             self.assertIn("projection-index-build", rendered)
             self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
 
+            inspect_output = io.StringIO()
+            with redirect_stdout(inspect_output):
+                inspect_code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+            self.assertEqual(inspect_code, 0)
+            self.assertIn("projection-index-current", inspect_output.getvalue())
+
+    def test_projection_warm_cache_revalidates_successful_refresh_before_returning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            build_output = io.StringIO()
+            with redirect_stdout(build_output):
+                build_code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+            self.assertEqual(build_code, 0)
+
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\npost refresh validation probe\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+
+            forced_stale = Finding("warn", "projection-index-hash", "forced stale validation", INDEX_REL_PATH)
+            output = io.StringIO()
+            with patch(
+                "mylittleharness.projection_index._post_refresh_blocking_findings",
+                side_effect=([forced_stale], []),
+            ), redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--warm-cache", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-warm-cache-validation-rebuild", rendered)
+            self.assertIn("projection-index-build", rendered)
+
+            inspect_output = io.StringIO()
+            with redirect_stdout(inspect_output):
+                inspect_code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+            self.assertEqual(inspect_code, 0)
+            self.assertIn("projection-index-current", inspect_output.getvalue())
+
     def test_projection_warm_cache_crash_degrades_without_blocking_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)

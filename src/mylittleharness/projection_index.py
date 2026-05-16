@@ -332,6 +332,7 @@ def warm_projection_index(
             ]
 
     refresh_findings = _incremental_or_rebuild_projection_index(inventory, projection, reason, inspect_findings)
+    refresh_findings = _validated_warm_cache_refresh_findings(inventory, refresh_findings)
     findings = [
         Finding(
             "info",
@@ -355,6 +356,56 @@ def warm_projection_index(
             )
         )
     return findings
+
+
+def _validated_warm_cache_refresh_findings(inventory: Inventory, refresh_findings: list[Finding]) -> list[Finding]:
+    if any(finding.severity in {"warn", "error"} for finding in refresh_findings):
+        return refresh_findings
+
+    validation = _post_refresh_blocking_findings(inventory)
+    if validation is None:
+        return refresh_findings
+    if not validation:
+        return refresh_findings
+
+    reason = validation[0]
+    rebuild_findings = rebuild_projection_index(inventory)
+    retry_validation = _post_refresh_blocking_findings(inventory)
+    if retry_validation is None or not retry_validation:
+        return [
+            *refresh_findings,
+            Finding(
+                "info",
+                "projection-index-warm-cache-validation-rebuild",
+                (
+                    f"post-refresh validation still saw {reason.code}; "
+                    "ran one source-bound full rebuild to leave the disposable index current"
+                ),
+                reason.source or INDEX_REL_PATH,
+                reason.line,
+            ),
+            *rebuild_findings,
+        ]
+    return [
+        *refresh_findings,
+        Finding(
+            "warn",
+            "projection-index-warm-cache-validation-degraded",
+            (
+                f"post-refresh validation still reports {retry_validation[0].code}; "
+                "direct source reads and in-memory projection remain authoritative"
+            ),
+            retry_validation[0].source or INDEX_REL_PATH,
+            retry_validation[0].line,
+        ),
+    ]
+
+
+def _post_refresh_blocking_findings(inventory: Inventory) -> list[Finding] | None:
+    try:
+        return _warm_cache_blocking_findings(inspect_projection_index(inventory))
+    except Exception:
+        return None
 
 
 def _incremental_or_rebuild_projection_index(
