@@ -355,11 +355,28 @@ def codex_hook_command_output(inventory: Inventory, hook_id: str, hook_input_tex
     codex_output = codex_hints.get(CODEX_CLIENT) if isinstance(codex_hints, dict) else {}
     if not isinstance(codex_output, dict):
         codex_output = {}
-    result: dict[str, object] = {"continue": bool(codex_output.get("continue", True))}
     system_message = codex_output.get("systemMessage")
+    hook_specific = codex_output.get("hookSpecificOutput")
+    blocked = bool(payload.get("block"))
+
+    if hook_id == HOOK_PRE_TOOL_USE:
+        result: dict[str, object] = {}
+        if isinstance(system_message, str) and system_message:
+            result["systemMessage"] = system_message
+        if isinstance(hook_specific, dict):
+            result["hookSpecificOutput"] = hook_specific
+        return result
+
+    if hook_id == HOOK_USER_PROMPT_SUBMIT and blocked:
+        reason = system_message if isinstance(system_message, str) and system_message else "MyLittleHarness blocked this prompt by deterministic policy."
+        result = {"decision": "block", "reason": reason}
+        if isinstance(hook_specific, dict):
+            result["hookSpecificOutput"] = hook_specific
+        return result
+
+    result = {"continue": bool(codex_output.get("continue", True))}
     if isinstance(system_message, str) and system_message:
         result["systemMessage"] = system_message
-    hook_specific = codex_output.get("hookSpecificOutput")
     if isinstance(hook_specific, dict):
         result["hookSpecificOutput"] = hook_specific
     return result
@@ -738,7 +755,11 @@ def _codex_hook_specific_output(hook_id: str, additional_context: str, blocked: 
         "additionalContext": additional_context,
     }
     if blocked:
-        output["deny"] = system_message or "MyLittleHarness blocked this deterministic shortcut attempt."
+        reason = system_message or "MyLittleHarness blocked this deterministic shortcut attempt."
+        if hook_id == HOOK_PRE_TOOL_USE:
+            output.pop("additionalContext", None)
+            output["permissionDecision"] = "deny"
+            output["permissionDecisionReason"] = reason
     return output
 
 
@@ -750,6 +771,7 @@ def _hook_event_context(inventory: Inventory, hook_id: str) -> str:
         [
             f"MyLittleHarness hook context for {hook_id}:",
             f"- lifecycle: plan_status={plan_status}; active_phase={active_phase}",
+            "- first-pass navigation: dashboard packet, MCP read/search/bundle when mounted, projection warm-cache if stale, then rg or bounded source reads for exact verification.",
             "- policy: deterministic unsafe shortcuts may be blocked; ambiguous cases are advisory warnings.",
             "- boundary: hook output cannot approve lifecycle, archive, roadmap, staging, commit, push, release, provider routing, daemon state, or cache truth.",
         ]
@@ -924,8 +946,10 @@ def _hook_additional_context(agent_packet: object, cache_posture: object, accele
             f"- lifecycle: plan_status={_payload_value(lifecycle, 'plan_status')}; active_plan={_payload_value(lifecycle, 'active_plan')}; active_phase={_payload_value(lifecycle, 'active_phase')}; phase_status={_payload_value(lifecycle, 'phase_status')}",
             f"- cache: artifacts={_component_status(components, 'artifacts')}; sqlite_index={_component_status(components, 'sqlite_index')}",
             f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; warm_cache=mylittleharness --root <root> projection --warm-cache --target all; rg_verification=required",
+            "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
             f"- recommended first-pass commands: {', '.join(str(command) for command in recommended[:4])}",
+            "- exact verification: use `rg` or `mylittleharness.read_source` before source edits or closeout claims.",
             "- boundary: this hook is advisory context only and approves no lifecycle, Git, dispatcher, provider, product-diff, cache, archive, staging, commit, push, or release action.",
         ]
     )

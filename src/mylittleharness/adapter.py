@@ -480,6 +480,12 @@ def codex_mcp_adoption_payload(
             "mylittleharness --root <root> projection --warm-cache --target all",
             "rg \"<exact symbol or route>\"",
         ],
+        "toolCoverage": _mcp_navigation_tool_coverage_payload(),
+        "exactVerification": {
+            "required": True,
+            "methods": ["rg", MCP_READ_SOURCE_TOOL, "direct source reads"],
+            "reason": "MCP search and SQLite accelerate discovery; exact source claims still need rg or bounded source reads",
+        },
         "boundary": (
             "MCP adoption is helper tooling only; mounted or missing status cannot approve lifecycle movement, repair, "
             "archive, roadmap status, staging, commit, push, provider routing, product diffs, or cache truth"
@@ -568,6 +574,16 @@ def codex_mcp_install_sections(
     findings.extend(apply_findings)
     findings.extend(_codex_config_install_boundary_findings())
     return [("Codex MCP Config", findings)]
+
+
+def _mcp_navigation_tool_coverage_payload() -> dict[str, object]:
+    return {
+        MCP_READ_PROJECTION_TOOL: "current root posture, cache posture, source records, adapter boundary, and root selection",
+        MCP_READ_SOURCE_TOOL: "bounded source slices for exact line-level verification",
+        MCP_SEARCH_TOOL: "source-verified exact, path, and SQLite full-text navigation",
+        MCP_RELATED_OR_BUNDLE_TOOL: "links, fan-in, relationship rows, and nearby bundle source records",
+        "nextSafeGuidance": "dashboard and check still name the next legal dry-run/apply candidate; MCP output stays advisory",
+    }
 
 
 def serve_mcp_read_projection(

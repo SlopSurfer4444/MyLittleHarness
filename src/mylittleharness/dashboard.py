@@ -378,6 +378,8 @@ def _value(data: dict[str, object], key: str) -> str:
 def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
     data = _state_data(inventory)
     adoption = _accelerator_adoption_payload(inventory)
+    mcp_tool_coverage = _mcp_tool_coverage_payload()
+    exact_verification = _exact_verification_payload()
     return {
         "schema": "mylittleharness.dashboard-agent-packet.v1",
         "source_refs": [
@@ -402,6 +404,15 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
             "mylittleharness --root <root> projection --warm-cache --target all",
             "rg \"<exact symbol or route>\"",
         ],
+        "firstPassSequence": [
+            "dashboard --inspect --json",
+            "intelligence --query for fuzzy route discovery",
+            "MCP read_projection/search/related_or_bundle when mounted",
+            "projection --warm-cache --target all when cache posture is stale or dirty",
+            "rg or mylittleharness.read_source for exact source verification",
+        ],
+        "mcpToolCoverage": mcp_tool_coverage,
+        "exactVerification": exact_verification,
         "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
         "acceleratorAdoption": adoption,
         "lifecycle": {
@@ -419,9 +430,11 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
         "schema": "mylittleharness.agent-accelerator-adoption.v1",
         "dashboardPacketAvailable": True,
         "mcp": codex_mcp_adoption_payload(inventory),
+        "mcpToolCoverage": _mcp_tool_coverage_payload(),
         "firstContactHookCommand": "mylittleharness --root <root> hooks --run session-start --json",
         "codexHookAdapterCommand": "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
         "projectionWarmCacheCommand": "mylittleharness --root <root> projection --warm-cache --target all",
+        "exactVerification": _exact_verification_payload(),
         "rgVerificationRequired": True,
         "sequence": [
             "dashboard packet",
@@ -434,6 +447,24 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
             "accelerators are first-contact helpers only; they cannot approve lifecycle movement, repair, archive, "
             "roadmap status, staging, commit, push, provider routing, product diffs, or cache truth"
         ),
+    }
+
+
+def _mcp_tool_coverage_payload() -> dict[str, object]:
+    return {
+        "read_projection": "current root posture, cache posture, source records, adapter boundary, and next-safe navigation hints",
+        "read_source": "bounded source slices for exact line-level verification without copying whole route bodies",
+        "search": "source-verified exact, path, and SQLite full-text lookup when the generated index is current",
+        "related_or_bundle": "links, fan-in, relationship rows, and nearby source bundle records for impact navigation",
+        "boundary": "MCP tools are read-only accelerators and cannot approve lifecycle, mutation, archive, staging, commit, push, or cache truth",
+    }
+
+
+def _exact_verification_payload() -> dict[str, object]:
+    return {
+        "required": True,
+        "methods": ["rg", "mylittleharness.read_source", "direct source reads"],
+        "reason": "dashboard, MCP, SQLite, and hooks accelerate navigation; exact symbols, files, and closeout claims still need source verification",
     }
 
 

@@ -17612,6 +17612,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
             self.assertIn("dashboard_packet=available", payload["hookSpecificOutput"]["additionalContext"])
             self.assertIn("accelerators: dashboard_packet=available", payload["additional_context"])
+            self.assertIn("mcp coverage: read_projection=current posture", payload["additional_context"])
+            self.assertIn("exact verification: use `rg` or `mylittleharness.read_source`", payload["additional_context"])
             self.assertIn("rg_verification=required", payload["additional_context"])
             self.assertIn("next legal dry-run", payload["additional_context"])
             self.assertIn("hookSpecificOutput", payload["client_hints"]["codex"])
@@ -17694,10 +17696,10 @@ class CliTests(unittest.TestCase):
                 os.chdir(cwd)
             self.assertEqual(raised.exception.code, 0)
             pre_tool_payload = json.loads(pre_tool_output.getvalue())
-            self.assertFalse(pre_tool_payload["continue"])
+            self.assertNotIn("continue", pre_tool_payload)
             self.assertEqual("PreToolUse", pre_tool_payload["hookSpecificOutput"]["hookEventName"])
-            self.assertIn("deny", pre_tool_payload["hookSpecificOutput"])
-            self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["deny"])
+            self.assertEqual("deny", pre_tool_payload["hookSpecificOutput"]["permissionDecision"])
+            self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_hooks_native_events_read_input_and_block_lifecycle_shortcuts_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -17722,7 +17724,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["continue"])
             self.assertTrue(payload["block"])
             self.assertEqual("PreToolUse", payload["hookSpecificOutput"]["hookEventName"])
-            self.assertIn("deny", payload["hookSpecificOutput"])
+            self.assertEqual("deny", payload["hookSpecificOutput"]["permissionDecision"])
+            self.assertIn("frontmatter", payload["hookSpecificOutput"]["permissionDecisionReason"])
             self.assertIn("frontmatter", payload["system_message"])
             self.assertTrue(payload["hook_input"]["provided"])
             self.assertTrue(payload["hook_input"]["json"])
@@ -18069,6 +18072,8 @@ class CliTests(unittest.TestCase):
             self.assertIn(payload["adoption"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["adoption"]["merge"]["idempotent"])
             self.assertFalse(payload["adoption"]["merge"]["storesSecrets"])
+            self.assertIn("bounded source", payload["adoption"]["toolCoverage"]["mylittleharness.read_source"])
+            self.assertTrue(payload["adoption"]["exactVerification"]["required"])
             self.assertIn("[mcp_servers.mylittleharness]", payload["codex"]["toml"])
             self.assertNotIn('"--root"', payload["codex"]["toml"])
             self.assertEqual(
@@ -21004,8 +21009,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("project/project-state.md", payload["agentPacket"]["source_refs"])
             self.assertIn("mylittleharness --root <root> intelligence --query", payload["agentPacket"]["recommendedCommands"][1])
             self.assertIn("adapter --install-client-config --target mcp-read-projection --dry-run", payload["agentPacket"]["recommendedCommands"][3])
+            self.assertIn("dashboard --inspect --json", payload["agentPacket"]["firstPassSequence"][0])
+            self.assertIn("bounded source", payload["agentPacket"]["mcpToolCoverage"]["read_source"])
+            self.assertTrue(payload["agentPacket"]["exactVerification"]["required"])
             self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
             self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
+            self.assertIn("relationship", payload["acceleratorAdoption"]["mcpToolCoverage"]["related_or_bundle"])
             self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
             self.assertIn("writeback --dry-run --phase-status complete", payload["agentPacket"]["nextLegalDryRun"]["command"])
@@ -21034,6 +21043,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse(structured["cachePosture"]["refreshable_by_adapter"])
             self.assertTrue(structured["cachePosture"]["self_healable_by_command"])
             self.assertIn("recommended_refresh_commands", structured["cachePosture"])
+            self.assertIn("bounded source", structured["activation"]["adoption"]["toolCoverage"]["mylittleharness.read_source"])
+            self.assertTrue(structured["activation"]["adoption"]["exactVerification"]["required"])
 
     def test_suggest_start_pass_prefers_dashboard_then_intelligence_and_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
