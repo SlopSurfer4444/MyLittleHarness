@@ -19083,6 +19083,139 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
 
+    def test_hooks_pre_tool_allows_existing_frontmatter_route_apply_patch_updates(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            route_specs = (
+                ("project", "plan-incubation", "patchable.md"),
+                ("project", "research", "patchable.md"),
+                ("project", "verification", "patchable.md"),
+                ("project", "specs", "workflow", "patchable.md"),
+                ("project", "decisions", "patchable.md"),
+                ("project", "adrs", "patchable.md"),
+                ("project", "archive", "reference", "patchable.md"),
+            )
+            rel_paths = ["/".join(parts) for parts in route_specs]
+            for index, parts in enumerate(route_specs):
+                route_path = root.joinpath(*parts)
+                route_path.parent.mkdir(parents=True, exist_ok=True)
+                route_path.write_text(
+                    "---\n"
+                    'status: "draft"\n'
+                    "---\n"
+                    f"# Patchable {index}\n",
+                    encoding="utf-8",
+                )
+            patch_text = "*** Begin Patch\n"
+            for index, rel_path in enumerate(rel_paths):
+                patch_text += (
+                    f"*** Update File: {rel_path}\n"
+                    "@@\n"
+                    f" # Patchable {index}\n"
+                    f"+Patched {index}\n"
+                )
+            patch_text += "*** End Patch\n"
+            patch_input = json.dumps({"toolName": "apply_patch", "input": patch_text})
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
+
+            self.assertFalse(payload["block"])
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertIn("hooks-policy-allow-existing-route-markdown-patch", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+    def test_hooks_pre_tool_keeps_route_patch_boundary_blocks(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            research_path = root / "project" / "research" / "plain.md"
+            research_path.write_text("# Plain\n", encoding="utf-8")
+            missing_frontmatter_rel = "/".join(("project", "research", "plain.md"))
+            new_route_rel = "/".join(("project", "research", "new.md"))
+            authority_rel = "project/" + "project-state" + ".md"
+
+            missing_frontmatter_patch = json.dumps(
+                {
+                    "toolName": "apply_patch",
+                    "input": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {missing_frontmatter_rel}\n"
+                        "@@\n"
+                        " # Plain\n"
+                        "+Patched\n"
+                        "*** End Patch\n"
+                    ),
+                }
+            )
+            add_route_patch = json.dumps(
+                {
+                    "toolName": "apply_patch",
+                    "input": (
+                        "*** Begin Patch\n"
+                        f"*** Add File: {new_route_rel}\n"
+                        "+---\n"
+                        '+status: "draft"\n'
+                        "+---\n"
+                        "+# New\n"
+                        "*** End Patch\n"
+                    ),
+                }
+            )
+            authority_patch = json.dumps(
+                {
+                    "toolName": "apply_patch",
+                    "input": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {authority_rel}\n"
+                        "@@\n"
+                        " # Operating Project State\n"
+                        "+Patched\n"
+                        "*** End Patch\n"
+                    ),
+                }
+            )
+            shell_write = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content {missing_frontmatter_rel} '# bypass'",
+                }
+            )
+
+            missing_frontmatter_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                missing_frontmatter_patch,
+            )
+            add_route_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], add_route_patch)
+            authority_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], authority_patch)
+            shell_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], shell_write)
+
+            self.assertTrue(missing_frontmatter_payload["block"])
+            self.assertTrue(add_route_payload["block"])
+            self.assertTrue(authority_payload["block"])
+            self.assertTrue(shell_write_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in missing_frontmatter_payload["findings"]},
+            )
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in add_route_payload["findings"]},
+            )
+            self.assertIn(
+                "hooks-policy-block-lifecycle-authority-path",
+                {finding["code"] for finding in authority_payload["findings"]},
+            )
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in shell_write_payload["findings"]},
+            )
+
     def test_hooks_pre_tool_allows_active_plan_product_root_patch_targets(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness_payload
 from .inventory import Inventory
 from .models import Finding
+from .parsing import parse_frontmatter
 from .preflight import preflight_sections
 from .routes import classify_memory_route
 
@@ -127,6 +128,15 @@ LIFECYCLE_AUTHORITY_PATHS = (
     "project/project-state.md",
     "project/implementation-plan.md",
     "project/roadmap.md",
+)
+EDITABLE_ROUTE_PATCH_IDS = (
+    "adrs",
+    "archive",
+    "decisions",
+    "incubation",
+    "research",
+    "stable-specs",
+    "verification",
 )
 GENERATED_CACHE_PREFIXES = (".mylittleharness/generated/",)
 NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
@@ -1118,11 +1128,13 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     ]
     allow_read_only_source_paths = _is_read_only_source_discovery_command(command) or _is_bounded_mlh_read_tool_request(data)
     allow_mlh_owner_route_paths = _is_mlh_owner_route_review_command(command)
+    allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, data)
     for finding in _path_policy_findings(
         inventory,
         paths,
         allow_read_only_source_paths=allow_read_only_source_paths,
         allow_mlh_owner_route_paths=allow_mlh_owner_route_paths,
+        allow_existing_route_patch=allow_existing_route_patch,
     ):
         findings.append(finding)
     if _looks_like_generated_cache_write(paths, write_command):
@@ -1134,13 +1146,22 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 ".mylittleharness/generated",
             )
         )
-    if _looks_like_lifecycle_markdown_write(paths, write_command):
+    if _looks_like_lifecycle_markdown_write(paths, write_command) and not allow_existing_route_patch:
         findings.append(
             Finding(
                 "error",
                 "hooks-policy-block-lifecycle-markdown-shortcut",
                 "blocked direct lifecycle Markdown write without MLH route/frontmatter evidence; use the owning dry-run/apply rail or repair route",
                 paths[0] if paths else "project",
+            )
+        )
+    if allow_existing_route_patch:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-existing-route-markdown-patch",
+                "allowed bounded apply_patch update of existing frontmatter-bearing route Markdown; authority paths, create/delete, and malformed route files remain blocked",
+                paths[0] if paths else None,
             )
         )
     nonroute_markdown = _nonroute_project_markdown_write_path(paths, write_command)
@@ -1440,6 +1461,85 @@ def _hook_apply_patch_target_paths(data: dict[str, object]) -> list[str]:
     return targets
 
 
+def _is_existing_route_markdown_patch_request(inventory: Inventory, data: dict[str, object]) -> bool:
+    operations = _hook_apply_patch_target_operations(data)
+    if not operations:
+        return False
+    if any(operation != "update" for operation, _path in operations):
+        return False
+    paths = [path for _operation, path in operations]
+    return bool(paths) and all(_is_editable_route_patch_path(inventory, path) for path in paths)
+
+
+def _hook_apply_patch_target_operations(data: dict[str, object]) -> list[tuple[str, str]]:
+    tool_names = (
+        data.get("toolName"),
+        data.get("tool_name"),
+        data.get("tool"),
+        data.get("recipient_name"),
+    )
+    if not any("apply_patch" in str(candidate or "").casefold() for candidate in tool_names):
+        return []
+    patch_text = _hook_apply_patch_text(data)
+    if not patch_text:
+        return []
+    operations: list[tuple[str, str]] = []
+    markers = (
+        ("update", "*** Update File: "),
+        ("add", "*** Add File: "),
+        ("delete", "*** Delete File: "),
+        ("move", "*** Move to: "),
+    )
+    for line in patch_text.splitlines():
+        for operation, marker in markers:
+            if line.startswith(marker):
+                target = line[len(marker) :].strip()
+                if target:
+                    operations.append((operation, target))
+    return operations
+
+
+def _is_editable_route_patch_path(inventory: Inventory, path: str) -> bool:
+    rel = _hook_route_rel_path(inventory, path)
+    if not rel or _is_lifecycle_authority_path(rel):
+        return False
+    if classify_memory_route(rel).route_id not in EDITABLE_ROUTE_PATCH_IDS:
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return frontmatter.has_frontmatter and not frontmatter.errors
+
+
+def _hook_route_rel_path(inventory: Inventory, path: str) -> str:
+    normalized = _normalize_hook_path(path)
+    try:
+        candidate = Path(path).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve().relative_to(inventory.root.resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    return normalized
+
+
+def _hook_route_file_path(inventory: Inventory, path: str) -> Path | None:
+    rel = _hook_route_rel_path(inventory, path)
+    if not rel:
+        return None
+    try:
+        route_path = (inventory.root / rel).resolve()
+        route_path.relative_to(inventory.root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return route_path
+
+
 def _hook_apply_patch_text(data: dict[str, object]) -> str:
     candidates = (
         data.get("input"),
@@ -1481,6 +1581,7 @@ def _path_policy_findings(
     warn_only: bool = False,
     allow_read_only_source_paths: bool = False,
     allow_mlh_owner_route_paths: bool = False,
+    allow_existing_route_patch: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
     severity = "warn" if warn_only else "error"
@@ -1497,6 +1598,8 @@ def _path_policy_findings(
         if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and (
             _is_lifecycle_authority_path(rel) or _is_lifecycle_markdown_path(rel)
         ):
+            continue
+        if allow_existing_route_patch and _is_editable_route_patch_path(inventory, rel):
             continue
         if _is_lifecycle_authority_path(rel):
             findings.append(
