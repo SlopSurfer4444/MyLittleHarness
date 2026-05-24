@@ -432,9 +432,13 @@ def _normalize_product_rel(value: str) -> str:
 def _looks_like_product_scope(path: str) -> bool:
     if not path:
         return False
-    operating_prefixes = (".agents/", ".codex/", ".mylittleharness/", "project/")
+    operating_prefixes = (".agents/", ".codex/", ".mylittleharness/")
     if path.startswith(operating_prefixes):
         return False
+    if path.startswith("project/"):
+        # Product-source compatibility fixtures can carry workflow specs under
+        # project/specs/, but other project/ routes remain operating memory.
+        return path.startswith("project/specs/")
     return True
 
 

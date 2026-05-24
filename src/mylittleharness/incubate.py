@@ -17,7 +17,7 @@ from .roadmap import RoadmapItem, roadmap_items_for_diagnostics
 
 
 INCUBATION_DIR_REL = "project/plan-incubation"
-INCUBATION_SOURCE = "incubate cli"
+INCUBATION_SOURCE = "MyLittleHarness incubation route"
 DEFAULT_PLAN_REL = "project/implementation-plan.md"
 ROADMAP_REL = "project/roadmap.md"
 NON_AUTHORITY_NOTE = (

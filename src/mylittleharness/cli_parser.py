@@ -248,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     intake_text.add_argument("--text", help="Incoming information to classify or write.")
     intake_text.add_argument("--text-file", dest="text_file", help="Read incoming information from a UTF-8 file; use - for stdin.")
     intake.add_argument("--title", help="Optional Markdown title for the applied intake note.")
+    intake.add_argument("--status", choices=("pending", "passed", "failed", "partial", "partially-verified", "archived"), help="Explicit status for verification intake frontmatter.")
     intake.add_argument("--target", help="Explicit root-relative Markdown target for --apply.")
     research_import = subparsers.add_parser(
         "research-import",
@@ -259,8 +260,8 @@ def build_parser() -> argparse.ArgumentParser:
     research_import_mode.add_argument("--apply", action="store_true", help="Write one imported research artifact in an eligible live operating root.")
     research_import.add_argument("--title", required=True, help="Research artifact title and default filename slug.")
     research_import_text = research_import.add_mutually_exclusive_group(required=True)
-    research_import_text.add_argument("--text", help="External or human-run research output to import.")
-    research_import_text.add_argument("--text-file", dest="text_file", help="Read research output from a UTF-8 file; use - for stdin.")
+    research_import_text.add_argument("--text", help="External or human-run research output to import; prefer --text-file for multiline decision packets.")
+    research_import_text.add_argument("--text-file", dest="text_file", help="Read research output from a UTF-8 file; use - for stdin; preserves multiline decision packets.")
     research_import.add_argument("--target", help="Optional explicit root-relative target under project/research/*.md.")
     research_import.add_argument("--topic", help="Optional frontmatter topic. Defaults to --title.")
     research_import.add_argument("--source", dest="source_label", help="Optional source/provenance label for the imported research.")
@@ -361,6 +362,13 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--last-archived-plan", dest="last_archived_plan", help="Lifecycle last_archived_plan value to write to project-state frontmatter.")
     writeback.add_argument("--product-source-root", dest="product_source_root", help="Structured product_source_root value to write to project-state frontmatter.")
     writeback.add_argument("--archive-active-plan", action="store_true", help="Move the active implementation plan to the canonical archive and close the active lifecycle pointer.")
+    writeback.add_argument(
+        "--on-archive-collision",
+        dest="archive_collision_policy",
+        choices=("refuse", "preserve-existing"),
+        default="refuse",
+        help="Archive target collision policy. Default refuses; preserve-existing keeps the old archive and writes this closeout to a deterministic collision path.",
+    )
     writeback.add_argument("--from-active-plan", action="store_true", help="Harvest closeout facts from the active plan Closeout Summary/Facts/Fields section.")
     writeback.add_argument("--compact-only", action="store_true", help="Only preview or apply safe project-state history compaction.")
     writeback.add_argument("--source-hash", dest="source_hash", help="Full sha256 hash reported by compact-only dry-run; required for compact-only apply when compaction would write.")
@@ -379,6 +387,13 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--review-token", help="Review token printed by the matching transition dry-run; required for --apply.")
     transition.add_argument("--complete-current-phase", action="store_true", help="First write phase_status complete through writeback.")
     transition.add_argument("--archive-active-plan", action="store_true", help="Archive the current active plan through writeback after any phase completion step.")
+    transition.add_argument(
+        "--on-archive-collision",
+        dest="archive_collision_policy",
+        choices=("refuse", "preserve-existing"),
+        default="refuse",
+        help="Archive target collision policy for the delegated archive-active-plan step.",
+    )
     transition.add_argument("--allow-auto-compaction", action="store_true", help="Allow writeback steps in this transition to run project-state auto-compaction when the dry-run reports it would cross the size threshold.")
     transition.add_argument("--from-active-plan", action="store_true", help="Harvest archive closeout facts from the active plan.")
     transition.add_argument("--current-roadmap-item", dest="current_roadmap_item", help="Explicit current roadmap item to mark done during archive closeout.")
@@ -434,13 +449,14 @@ def build_parser() -> argparse.ArgumentParser:
     roadmap = subparsers.add_parser(
         "roadmap",
         help=argparse.SUPPRESS,
-        description="Advanced mutating command: add, update, or normalize explicit accepted-work roadmap items.",
+        description="Advanced mutating command: add, batch-add, update, or normalize explicit accepted-work roadmap items.",
     )
     roadmap.add_argument("operation", nargs="?", choices=("normalize",), help="Run a whole-roadmap housekeeping operation, such as normalize.")
     roadmap_mode = roadmap.add_mutually_exclusive_group(required=True)
     roadmap_mode.add_argument("--dry-run", action="store_true", help="Preview roadmap item changes without writing files.")
-    roadmap_mode.add_argument("--apply", action="store_true", help="Write one bounded roadmap item change in an eligible live operating root.")
-    roadmap.add_argument("--action", choices=("add", "update", "normalize"), help="Roadmap mutation action.")
+    roadmap_mode.add_argument("--apply", action="store_true", help="Write one bounded roadmap change in an eligible live operating root.")
+    roadmap.add_argument("--action", choices=("add", "add-many", "update", "normalize"), help="Roadmap mutation action.")
+    roadmap.add_argument("--items-file", dest="items_file", help="Read add-many roadmap items from a UTF-8 JSON or YAML manifest; use - for stdin.")
     roadmap.add_argument("--item-id", help="Stable roadmap item id to add or update.")
     roadmap.add_argument("--title", help="Roadmap item heading. Required for --action add.")
     roadmap.add_argument("--status", help="Roadmap item status.")

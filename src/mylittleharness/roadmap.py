@@ -32,6 +32,7 @@ FUTURE_QUEUE_FIELD = "future_execution_slice_queue"
 FUTURE_QUEUE_TITLE = "Future Execution Slice Queue"
 ARCHIVED_HISTORY_FIELD = "archived_completed_history"
 ARCHIVED_HISTORY_TITLE = "Archived Completed History"
+COMPACTED_ITEM_REPLAY_FIELD = "compacted_roadmap_item_replay"
 TERMINAL_RELATED_PLAN_RETARGET_FIELD = "terminal_related_plan_retarget"
 ROADMAP_PHYSICAL_ORDER_FIELD = "roadmap_physical_order"
 DETAILED_DONE_TAIL_LIMIT = 4
@@ -51,6 +52,7 @@ ROADMAP_PHYSICAL_ORDER_BUCKETS = {
     "rejected": 7,
 }
 ITEM_ID_LIST_FIELDS = ("dependencies", "slice_members", "slice_dependencies", "supersedes", "superseded_by")
+ARCHIVED_PREREQUISITE_REFERENCE_FIELDS = {"dependencies", "slice_dependencies"}
 PATH_LIST_FIELDS = (SOURCE_MEMBERS_FIELD, "related_specs")
 ARTIFACT_LIST_FIELDS = ("target_artifacts",)
 LIST_FIELDS = (*ITEM_ID_LIST_FIELDS, *PATH_LIST_FIELDS, *ARTIFACT_LIST_FIELDS)
@@ -146,6 +148,34 @@ BATCH_AUTHORIZATION_TRUTHY = {
     "human-reviewed",
     "human-gate",
 }
+SLICE_RESULT_GATE_FIELDS = (
+    "slice_result_gate",
+    "requires_slice_result",
+    "requires_result_gate",
+)
+SLICE_RESULT_GATE_TRUTHY = {
+    "1",
+    "true",
+    "yes",
+    "required",
+    "decision-packet",
+    "result-required",
+    "slice-result",
+}
+SLICE_RESULT_ARTIFACT_FIELDS = (
+    "slice_result_artifact",
+    "slice_result_artifacts",
+    "decision_packet",
+    "decision_packets",
+)
+SLICE_RESULT_SAFE_FIELD = "safe_to_continue_existing_sequence"
+SLICE_RESULT_FORK_FIELDS = (
+    "new_slice_candidates",
+    "scope_expansions",
+    "blocked_followups",
+    "fork_decision",
+    "roadmap_updates_required",
+)
 IMPLEMENTATION_STAGE_VALUES = {"implementation", "implement", "fix", "bugfix", "feature", "product-implementation"}
 NON_IMPLEMENTATION_DELIVERABLE_CLASSES = {
     "audit",
@@ -155,6 +185,7 @@ NON_IMPLEMENTATION_DELIVERABLE_CLASSES = {
     "fan-in-review",
     "proposal",
     "research",
+    "route-hygiene",
 }
 IMPLEMENTATION_DELIVERABLE_VALUES = {
     "implementation",
@@ -178,6 +209,8 @@ NON_IMPLEMENTATION_WORK_VALUES = {
     "proposal",
     "research",
     "review",
+    "route-hygiene",
+    "route-hygiene-cleanup",
 }
 DELIVERABLE_CLASS_FIELDS = ("deliverable_class", "deliverable_type", "work_class")
 IMPLEMENTATION_PROMOTION_FIELDS = (
@@ -198,6 +231,26 @@ DELIVERABLE_CLASS_PROMOTION_NEXT_SAFE_TEMPLATE = (
     "mylittleharness --root <root> roadmap --dry-run --action update "
     "--item-id {item_id} --field deliverable_class=implementation"
 )
+ACTIVE_PLAN_OPEN_NEXT_SAFE_COMMAND = (
+    "mylittleharness --root <root> check; when the active phase is ready, run "
+    "mylittleharness --root <root> writeback --dry-run --phase-status complete "
+    "--docs-decision <updated|not-needed|uncertain>"
+)
+ACTIVE_PLAN_ROADMAP_PROMOTION_FIELDS = {
+    "status",
+    "stage",
+    "order",
+    "execution_slice",
+    "slice_goal",
+    "slice_members",
+    "slice_dependencies",
+    "slice_closeout_boundary",
+    "dependencies",
+    "target_artifacts",
+    "supersedes",
+    "superseded_by",
+    ACCEPTED_ITEM_ORDER_FIELD,
+}
 
 
 @dataclass(frozen=True)
@@ -251,9 +304,22 @@ class RoadmapPlan:
     retargeted_terminal_item_ids: tuple[str, ...]
     current_text: str
     updated_text: str
+    target_existed: bool = True
     relationship_plan: RelationshipUpdatePlan | None = None
     related_incubation_source: str = ""
     related_incubation_reason: str = ""
+    replayed_item_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RoadmapBatchPlan:
+    target_rel: str
+    target_path: Path
+    requests: tuple[RoadmapRequest, ...]
+    plans: tuple[RoadmapPlan, ...]
+    current_text: str
+    updated_text: str
+    target_existed: bool = True
 
 
 @dataclass(frozen=True)
@@ -352,6 +418,344 @@ def make_roadmap_request(
     )
 
 
+def roadmap_batch_requests_from_manifest(manifest_text: str, source_label: str) -> tuple[tuple[RoadmapRequest, ...], list[Finding]]:
+    manifest, errors = _load_roadmap_batch_manifest(manifest_text, source_label)
+    if errors:
+        return (), errors
+    if isinstance(manifest, dict):
+        extra_keys = sorted(str(key) for key in manifest if key != "items")
+        if extra_keys:
+            return (), [
+                Finding(
+                    "error",
+                    "roadmap-batch-refused",
+                    f"batch manifest top-level keys must be only 'items'; unexpected: {', '.join(extra_keys)}",
+                    source_label,
+                )
+            ]
+        items = manifest.get("items")
+    else:
+        items = manifest
+    if not isinstance(items, list) or not items:
+        return (), [Finding("error", "roadmap-batch-refused", "batch manifest must contain a non-empty items list", source_label)]
+
+    requests: list[RoadmapRequest] = []
+    errors = []
+    for index, item in enumerate(items, start=1):
+        request, item_errors = _roadmap_request_from_batch_item(item, index, source_label)
+        errors.extend(item_errors)
+        if request is not None:
+            requests.append(request)
+    errors.extend(_batch_duplicate_item_id_errors(tuple(requests), source_label))
+    if errors:
+        return (), errors
+    return tuple(requests), []
+
+
+def _load_roadmap_batch_manifest(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
+    suffix = "" if source_label == "-" else Path(source_label).suffix.casefold()
+    if suffix == ".json":
+        return _load_roadmap_batch_json(manifest_text, source_label)
+    if suffix in {".yaml", ".yml"}:
+        return _load_roadmap_batch_yaml(manifest_text, source_label)
+
+    parsed, errors = _load_roadmap_batch_json(manifest_text, source_label)
+    if not errors:
+        return parsed, []
+    yaml_parsed, yaml_errors = _load_roadmap_batch_yaml(manifest_text, source_label)
+    if not yaml_errors:
+        return yaml_parsed, []
+    return None, [
+        Finding(
+            "error",
+            "roadmap-batch-refused",
+            "batch manifest must be valid JSON or the supported simple YAML subset",
+            source_label,
+        )
+    ]
+
+
+def _load_roadmap_batch_json(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
+    try:
+        return json.loads(manifest_text), []
+    except json.JSONDecodeError as exc:
+        return None, [Finding("error", "roadmap-batch-refused", f"batch JSON manifest is malformed: {exc}", source_label)]
+
+
+def _load_roadmap_batch_yaml(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except Exception:
+        return _load_simple_roadmap_batch_yaml(manifest_text, source_label)
+    try:
+        return yaml.safe_load(manifest_text), []
+    except Exception as exc:
+        return None, [Finding("error", "roadmap-batch-refused", f"batch YAML manifest is malformed: {exc}", source_label)]
+
+
+def _load_simple_roadmap_batch_yaml(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
+    raw_lines = manifest_text.splitlines()
+    lines = [
+        (len(line) - len(line.lstrip(" ")), line.strip())
+        for line in raw_lines
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not lines:
+        return None, [Finding("error", "roadmap-batch-refused", "batch YAML manifest is empty", source_label)]
+
+    root_items: list[dict[str, object]]
+    start = 0
+    if lines[0][1] == "items:":
+        root_items = []
+        start = 1
+    elif lines[0][1].startswith("items:"):
+        value = lines[0][1].split(":", 1)[1].strip()
+        parsed_value, value_error = _parse_simple_yaml_scalar(value, source_label)
+        if value_error:
+            return None, [value_error]
+        return {"items": parsed_value}, []
+    elif lines[0][1].startswith("- "):
+        root_items = []
+    else:
+        return None, [
+            Finding(
+                "error",
+                "roadmap-batch-refused",
+                "batch YAML manifest must start with 'items:' or a top-level item list",
+                source_label,
+            )
+        ]
+
+    index = start
+    while index < len(lines):
+        indent, stripped = lines[index]
+        if not stripped.startswith("- "):
+            return None, [Finding("error", "roadmap-batch-refused", f"expected YAML item at line {index + 1}: {stripped}", source_label)]
+        item: dict[str, object] = {}
+        remainder = stripped[2:].strip()
+        if remainder:
+            key, value, error = _split_simple_yaml_key_value(remainder, source_label)
+            if error:
+                return None, [error]
+            item[key] = value
+        index += 1
+        while index < len(lines) and lines[index][0] > indent:
+            child_indent, child = lines[index]
+            key, value, error = _split_simple_yaml_key_value(child, source_label)
+            if error:
+                return None, [error]
+            if value == "":
+                values: list[object] = []
+                index += 1
+                while index < len(lines) and lines[index][0] > child_indent:
+                    list_line = lines[index][1]
+                    if not list_line.startswith("- "):
+                        return None, [
+                            Finding(
+                                "error",
+                                "roadmap-batch-refused",
+                                f"expected YAML list entry under {key!r} at line {index + 1}: {list_line}",
+                                source_label,
+                            )
+                        ]
+                    parsed, scalar_error = _parse_simple_yaml_scalar(list_line[2:].strip(), source_label)
+                    if scalar_error:
+                        return None, [scalar_error]
+                    values.append(parsed)
+                    index += 1
+                item[key] = values
+                continue
+            item[key] = value
+            index += 1
+        root_items.append(item)
+    return {"items": root_items}, []
+
+
+def _split_simple_yaml_key_value(text: str, source_label: str) -> tuple[str, object, Finding | None]:
+    if ":" not in text:
+        return "", "", Finding("error", "roadmap-batch-refused", f"expected YAML key/value pair: {text}", source_label)
+    key, raw_value = text.split(":", 1)
+    key = key.strip()
+    if not key:
+        return "", "", Finding("error", "roadmap-batch-refused", f"expected non-empty YAML key: {text}", source_label)
+    value_text = raw_value.strip()
+    if value_text == "":
+        return key, "", None
+    value, error = _parse_simple_yaml_scalar(value_text, source_label)
+    return key, value, error
+
+
+def _parse_simple_yaml_scalar(text: str, source_label: str) -> tuple[object, Finding | None]:
+    if text in {"[]", "{}"} or text.startswith(("[", "{", "\"", "'")):
+        try:
+            return ast.literal_eval(text), None
+        except (SyntaxError, ValueError) as exc:
+            return "", Finding("error", "roadmap-batch-refused", f"unsupported YAML scalar {text!r}: {exc}", source_label)
+    if re.fullmatch(r"-?\d+", text):
+        return int(text), None
+    if text.casefold() == "true":
+        return True, None
+    if text.casefold() == "false":
+        return False, None
+    if text.casefold() in {"null", "~"}:
+        return None, None
+    return text, None
+
+
+def _roadmap_request_from_batch_item(item: object, index: int, source_label: str) -> tuple[RoadmapRequest | None, list[Finding]]:
+    if not isinstance(item, dict):
+        return None, [Finding("error", "roadmap-batch-refused", f"items[{index}] must be an object", source_label)]
+    normalized = {_batch_key(str(key)): value for key, value in item.items()}
+    action = _batch_scalar(normalized.pop("action", "add"))
+    if action and str(action).strip().casefold().replace("_", "-") != "add":
+        return None, [Finding("error", "roadmap-batch-refused", f"items[{index}].action must be 'add' for add-many", source_label)]
+
+    custom_fields = _batch_custom_fields(normalized.pop("fields", ()), index, source_label)
+    custom_field_values, custom_field_errors = _batch_custom_field_values(normalized.pop("custom_fields", ()), index, source_label)
+    custom_fields.extend(custom_field_values)
+    if "field" in normalized:
+        field_values, field_errors = _batch_custom_field_values(normalized.pop("field"), index, source_label)
+        custom_fields.extend(field_values)
+        custom_field_errors.extend(field_errors)
+    if custom_field_errors:
+        return None, custom_field_errors
+
+    item_id = normalized.pop("item_id", normalized.pop("id", ""))
+    values = {
+        "title": normalized.pop("title", ""),
+        "status": normalized.pop("status", ""),
+        "stage": normalized.pop("stage", ""),
+        "order": normalized.pop("order", None),
+        "execution_slice": normalized.pop("execution_slice", ""),
+        "slice_goal": normalized.pop("slice_goal", ""),
+        "slice_closeout_boundary": normalized.pop("slice_closeout_boundary", ""),
+        "source_incubation": normalized.pop("source_incubation", ""),
+        "source_research": normalized.pop("source_research", ""),
+        "related_plan": normalized.pop("related_plan", ""),
+        "archived_plan": normalized.pop("archived_plan", ""),
+        "verification_summary": normalized.pop("verification_summary", ""),
+        "docs_decision": normalized.pop("docs_decision", ""),
+        "carry_forward": normalized.pop("carry_forward", ""),
+    }
+    list_values = {
+        "dependencies": _batch_list(normalized.pop("dependencies", normalized.pop("dependency", ()))),
+        "slice_members": _batch_list(normalized.pop("slice_members", normalized.pop("slice_member", ()))),
+        "slice_dependencies": _batch_list(normalized.pop("slice_dependencies", normalized.pop("slice_dependency", ()))),
+        "related_specs": _batch_list(normalized.pop("related_specs", normalized.pop("related_spec", ()))),
+        "target_artifacts": _batch_list(normalized.pop("target_artifacts", normalized.pop("target_artifact", ()))),
+        "supersedes": _batch_list(normalized.pop("supersedes", ())),
+        "superseded_by": _batch_list(normalized.pop("superseded_by", ())),
+        "source_members": _batch_list(normalized.pop("source_members", normalized.pop("source_member", ()))),
+    }
+    if "clear_fields" in normalized or "clear_field" in normalized:
+        return None, [Finding("error", "roadmap-batch-refused", f"items[{index}] cannot use clear_fields with add-many", source_label)]
+    if normalized:
+        unknown = ", ".join(sorted(normalized))
+        return None, [Finding("error", "roadmap-batch-refused", f"items[{index}] has unknown field(s): {unknown}", source_label)]
+
+    order_value, order_error = _batch_order(values["order"], index, source_label)
+    if order_error:
+        return None, [order_error]
+    return (
+        make_roadmap_request(
+            action="add",
+            item_id=_batch_scalar(item_id),
+            title=_batch_scalar(values["title"]),
+            status=_batch_scalar(values["status"]),
+            stage=_batch_scalar(values["stage"]),
+            order=order_value,
+            execution_slice=_batch_scalar(values["execution_slice"]),
+            slice_goal=_batch_scalar(values["slice_goal"]),
+            slice_closeout_boundary=_batch_scalar(values["slice_closeout_boundary"]),
+            source_incubation=_batch_scalar(values["source_incubation"]),
+            source_research=_batch_scalar(values["source_research"]),
+            related_plan=_batch_scalar(values["related_plan"]),
+            archived_plan=_batch_scalar(values["archived_plan"]),
+            verification_summary=_batch_scalar(values["verification_summary"]),
+            docs_decision=_batch_scalar(values["docs_decision"]),
+            carry_forward=_batch_scalar(values["carry_forward"]),
+            dependencies=list_values["dependencies"],
+            slice_members=list_values["slice_members"],
+            slice_dependencies=list_values["slice_dependencies"],
+            related_specs=list_values["related_specs"],
+            target_artifacts=list_values["target_artifacts"],
+            supersedes=list_values["supersedes"],
+            superseded_by=list_values["superseded_by"],
+            source_members=list_values["source_members"],
+            custom_fields=custom_fields,
+        ),
+        [],
+    )
+
+
+def _batch_key(value: str) -> str:
+    return value.strip().replace("-", "_")
+
+
+def _batch_scalar(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip()
+
+
+def _batch_list(value: object) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [_batch_scalar(item) for item in value]
+    return [_batch_scalar(value)]
+
+
+def _batch_order(value: object, index: int, source_label: str) -> tuple[int | None, Finding | None]:
+    if value in (None, ""):
+        return None, None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value, None
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text), None
+    return None, Finding("error", "roadmap-batch-refused", f"items[{index}].order must be an integer", source_label)
+
+
+def _batch_custom_fields(value: object, index: int, source_label: str) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, dict):
+        return [f"{_batch_key(str(key))}={_batch_scalar(item)}" for key, item in value.items()]
+    return _batch_list(value)
+
+
+def _batch_custom_field_values(value: object, index: int, source_label: str) -> tuple[list[str], list[Finding]]:
+    if value in (None, ""):
+        return [], []
+    if isinstance(value, dict):
+        return _batch_custom_fields(value, index, source_label), []
+    if isinstance(value, (list, tuple)):
+        return [_batch_scalar(item) for item in value], []
+    text = _batch_scalar(value)
+    return ([text], []) if "=" in text else (
+        [],
+        [Finding("error", "roadmap-batch-refused", f"items[{index}].custom_fields entries must use key=value", source_label)],
+    )
+
+
+def _batch_duplicate_item_id_errors(requests: tuple[RoadmapRequest, ...], source_label: str) -> list[Finding]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for request in requests:
+        if not request.item_id:
+            continue
+        if request.item_id in seen:
+            duplicates.append(request.item_id)
+        seen.add(request.item_id)
+    return [
+        Finding("error", "roadmap-batch-refused", f"batch manifest contains duplicate item id: {item_id}", source_label)
+        for item_id in _dedupe_nonempty(duplicates)
+    ]
+
+
 def roadmap_plan_for_request(
     inventory: Inventory,
     request: RoadmapRequest,
@@ -367,38 +771,128 @@ def roadmap_plans_for_requests(
     *,
     allowed_missing_paths: set[str] | None = None,
 ) -> tuple[tuple[RoadmapPlan, ...], list[Finding]]:
-    if not requests:
-        return (), []
-
-    errors: list[Finding] = []
-    for request in requests:
-        errors.extend(_request_errors(inventory, request))
-    target_path = inventory.root / ROADMAP_REL
-    errors.extend(_roadmap_target_errors(inventory, target_path))
+    batch_plan, errors = _roadmap_batch_plan(inventory, requests, allowed_missing_paths=allowed_missing_paths)
     if errors:
         return (), errors
+    if batch_plan is None:
+        return (), []
+    return batch_plan.plans, []
 
-    try:
-        text = target_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return (), [Finding("error", "roadmap-refused", f"roadmap could not be read: {exc}", ROADMAP_REL)]
 
-    plans: list[RoadmapPlan] = []
-    current_text = text
-    for request in requests:
-        plan, request_errors = _roadmap_plan_from_text(
-            inventory,
-            request,
-            target_path,
-            current_text,
-            allowed_missing_paths=allowed_missing_paths or set(),
+def roadmap_batch_dry_run_findings(inventory: Inventory, manifest_text: str, source_label: str) -> list[Finding]:
+    findings = [
+        Finding("info", "roadmap-batch-dry-run", "roadmap batch proposal only; no files were written"),
+        _root_posture_finding(inventory),
+        Finding("info", "roadmap-target", f"would target roadmap: {ROADMAP_REL}", ROADMAP_REL),
+        Finding("info", "roadmap-action", "requested action: add-many", ROADMAP_REL),
+        Finding("info", "roadmap-batch-source", f"would read roadmap batch manifest: {source_label}", ROADMAP_REL),
+    ]
+    requests, manifest_errors = roadmap_batch_requests_from_manifest(manifest_text, source_label)
+    if manifest_errors:
+        findings.extend(_with_severity(manifest_errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-validation-posture",
+                "batch dry-run refused before apply; fix manifest refusal reasons, then rerun dry-run before writing roadmap changes",
+                ROADMAP_REL,
+            )
         )
-        if request_errors:
-            return (), request_errors
-        assert plan is not None
-        plans.append(plan)
-        current_text = plan.updated_text
-    return tuple(plans), []
+        return findings
+
+    batch_plan, errors = _roadmap_batch_plan(inventory, requests)
+    if batch_plan:
+        findings.extend(_batch_plan_findings(inventory, batch_plan, apply=False))
+        item_ids = tuple(request.item_id for request in requests)
+        findings.extend(_roadmap_human_review_gate_findings_from_text(inventory, batch_plan.updated_text, item_ids=item_ids))
+        findings.extend(_roadmap_acceptance_readiness_findings_from_text(inventory, batch_plan.updated_text, item_ids=item_ids))
+        findings.extend(_batch_route_write_findings(inventory, batch_plan, apply=False))
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-validation-posture",
+                "batch dry-run refused before apply; fix refusal reasons, then rerun dry-run before writing roadmap changes",
+                ROADMAP_REL,
+            )
+        )
+        return findings
+    findings.extend(_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-validation-posture",
+            "apply would validate every batch item before writing project/roadmap.md once in an eligible live operating root; dry-run writes no files",
+            ROADMAP_REL,
+        )
+    )
+    return findings
+
+
+def roadmap_batch_apply_findings(
+    inventory: Inventory,
+    manifest_text: str,
+    source_label: str,
+    *,
+    allowed_missing_paths: set[str] | None = None,
+) -> list[Finding]:
+    requests, manifest_errors = roadmap_batch_requests_from_manifest(manifest_text, source_label)
+    if manifest_errors:
+        return manifest_errors
+
+    batch_plan, errors = _roadmap_batch_plan(inventory, requests, allowed_missing_paths=allowed_missing_paths)
+    if errors:
+        return errors
+    assert batch_plan is not None
+
+    if not _batch_plan_has_changes(batch_plan):
+        item_ids = ", ".join(request.item_id for request in requests)
+        return [
+            Finding("info", "roadmap-batch-apply", "roadmap batch apply started"),
+            _root_posture_finding(inventory),
+            Finding("info", "roadmap-batch-source", f"read roadmap batch manifest: {source_label}", ROADMAP_REL),
+            Finding("info", "roadmap-noop", f"roadmap batch already matches requested items: {item_ids}; no file was rewritten", batch_plan.target_rel),
+            *_batch_plan_findings(inventory, batch_plan, apply=True),
+            *_batch_route_write_findings(inventory, batch_plan, apply=True),
+            *_boundary_findings(),
+        ]
+
+    operations, tmp_errors = _batch_plan_atomic_operations(inventory, batch_plan)
+    if tmp_errors:
+        return tmp_errors
+    route_writes = _batch_route_write_evidence(batch_plan)
+    guard_findings = route_reference_transaction_guard_findings(inventory, route_writes, apply=True)
+    if any(finding.severity == "error" for finding in guard_findings):
+        return [
+            *guard_findings,
+            Finding(
+                "info",
+                "roadmap-validation-posture",
+                "roadmap batch apply refused before writing files; review unresolved required route references, then rerun dry-run",
+                batch_plan.target_rel,
+            ),
+        ]
+    try:
+        cleanup_warnings = apply_file_transaction(operations)
+    except FileTransactionError as exc:
+        return [Finding("error", "roadmap-refused", f"roadmap batch apply failed before all target writes completed: {exc}", batch_plan.target_rel)]
+
+    item_ids = ", ".join(request.item_id for request in requests)
+    findings = [
+        Finding("info", "roadmap-batch-apply", "roadmap batch apply started"),
+        _root_posture_finding(inventory),
+        Finding("info", "roadmap-batch-source", f"read roadmap batch manifest: {source_label}", ROADMAP_REL),
+        Finding("info", "roadmap-batch-written", f"updated roadmap items with one batch write: {item_ids}", batch_plan.target_rel),
+        *_batch_plan_findings(inventory, batch_plan, apply=True),
+        *route_write_findings("roadmap-route-write", route_writes, apply=True),
+        *guard_findings,
+        *_boundary_findings(),
+        Finding("info", "roadmap-validation-posture", "run check after apply to verify the live operating root remains healthy; roadmap output is not lifecycle approval", batch_plan.target_rel),
+    ]
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "roadmap-backup-cleanup", warning, batch_plan.target_rel))
+    return findings
 
 
 def roadmap_item_fields(inventory: Inventory, item_id: str) -> dict[str, object]:
@@ -431,6 +925,24 @@ def roadmap_item_title(inventory: Inventory, item_id: str) -> str:
     _items_start, _items_end, items = parse_result[0]
     item = items.get(_normalized_item_id(item_id))
     return str(item.title).strip() if item else ""
+
+
+def roadmap_compacted_item_archived_plan(inventory: Inventory, item_id: str) -> str:
+    target_path = inventory.root / ROADMAP_REL
+    normalized_item_id = _normalized_item_id(item_id)
+    if not target_path.is_file() or not normalized_item_id:
+        return ""
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return ""
+    _items_start, _items_end, items = parse_result[0]
+    if normalized_item_id in items:
+        return ""
+    return _archived_history_item_plan_map(text).get(normalized_item_id, "")
 
 
 def roadmap_plan_scope_blockers(
@@ -513,6 +1025,41 @@ def roadmap_plan_deliverable_class_blockers(
 
 def roadmap_plan_deliverable_class_next_safe_command(item_id: str) -> str:
     return DELIVERABLE_CLASS_PROMOTION_NEXT_SAFE_TEMPLATE.format(item_id=_normalized_item_id(item_id) or "<item-id>")
+
+
+def roadmap_slice_result_gate_blockers(
+    inventory: Inventory,
+    item_id: str,
+    fields: dict[str, object] | None = None,
+) -> tuple[str, ...]:
+    normalized_item_id = _normalized_item_id(item_id)
+    if not normalized_item_id:
+        return ()
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return ()
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return ()
+    _items_start, _items_end, items = parse_result[0]
+    item = items.get(normalized_item_id)
+    if item is None:
+        return ()
+    if fields is not None:
+        item = replace(item, fields=fields)
+    return _roadmap_slice_result_gate_blockers(inventory, normalized_item_id, item, items)
+
+
+def roadmap_slice_result_gate_next_safe_command(item_id: str) -> str:
+    normalized = _normalized_item_id(item_id) or "<item-id>"
+    return (
+        "review the upstream decision packet, then run "
+        f"`mylittleharness --root <root> roadmap --dry-run --action update --item-id {normalized} [fields]`"
+    )
 
 
 def roadmap_item_deliverable_class(inventory: Inventory, fields: dict[str, object]) -> str:
@@ -1433,7 +1980,8 @@ def roadmap_apply_findings(
             *_boundary_findings(),
         ]
 
-    tmp_path = plan.target_path.with_name(f".{plan.target_path.name}.roadmap.tmp") if plan.current_text != plan.updated_text else None
+    target_write_needed = (not plan.target_existed) or plan.current_text != plan.updated_text
+    tmp_path = plan.target_path.with_name(f".{plan.target_path.name}.roadmap.tmp") if target_write_needed else None
     backup_path = plan.target_path.with_name(f".{plan.target_path.name}.roadmap.backup") if tmp_path else None
     relationship_tmp = _relationship_tmp_path(plan.relationship_plan)
     relationship_backup = _relationship_backup_path(plan.relationship_plan) if relationship_tmp else None
@@ -1651,6 +2199,70 @@ def _roadmap_normalize_plan_from_text(
     )
 
 
+def _roadmap_batch_plan(
+    inventory: Inventory,
+    requests: tuple[RoadmapRequest, ...],
+    *,
+    allowed_missing_paths: set[str] | None = None,
+) -> tuple[RoadmapBatchPlan | None, list[Finding]]:
+    if not requests:
+        return None, []
+
+    errors: list[Finding] = []
+    for request in requests:
+        errors.extend(_request_errors(inventory, request))
+    target_path = inventory.root / ROADMAP_REL
+    allow_missing_roadmap = all(request.action == "add" for request in requests)
+    errors.extend(_roadmap_target_errors(inventory, target_path, allow_missing=allow_missing_roadmap))
+    if errors:
+        return None, errors
+
+    target_existed = target_path.exists()
+    if target_existed:
+        try:
+            original_text = target_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return None, [Finding("error", "roadmap-refused", f"roadmap could not be read: {exc}", ROADMAP_REL)]
+    else:
+        original_text = _empty_roadmap_text()
+
+    plans: list[RoadmapPlan] = []
+    current_text = original_text
+    current_target_existed = target_existed
+    for request in requests:
+        plan, request_errors = _roadmap_plan_from_text(
+            inventory,
+            request,
+            target_path,
+            current_text,
+            allowed_missing_paths=allowed_missing_paths or set(),
+            allow_empty_items=not current_target_existed and request.action == "add",
+            target_existed=current_target_existed,
+        )
+        if request_errors:
+            return None, request_errors
+        assert plan is not None
+        plans.append(plan)
+        current_text = plan.updated_text
+        current_target_existed = True
+
+    duplicate_relationship_errors = _batch_relationship_target_errors(tuple(plans))
+    if duplicate_relationship_errors:
+        return None, duplicate_relationship_errors
+    return (
+        RoadmapBatchPlan(
+            target_rel=ROADMAP_REL,
+            target_path=target_path,
+            requests=requests,
+            plans=tuple(plans),
+            current_text=original_text,
+            updated_text=current_text,
+            target_existed=target_existed,
+        ),
+        [],
+    )
+
+
 def _roadmap_plan(
     inventory: Inventory,
     request: RoadmapRequest,
@@ -1660,14 +2272,19 @@ def _roadmap_plan(
     errors: list[Finding] = []
     errors.extend(_request_errors(inventory, request))
     target_path = inventory.root / ROADMAP_REL
-    errors.extend(_roadmap_target_errors(inventory, target_path))
+    allow_missing_roadmap = request.action == "add"
+    errors.extend(_roadmap_target_errors(inventory, target_path, allow_missing=allow_missing_roadmap))
     if errors:
         return None, errors
 
-    try:
-        text = target_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return None, [Finding("error", "roadmap-refused", f"roadmap could not be read: {exc}", ROADMAP_REL)]
+    target_existed = target_path.exists()
+    if target_existed:
+        try:
+            text = target_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return None, [Finding("error", "roadmap-refused", f"roadmap could not be read: {exc}", ROADMAP_REL)]
+    else:
+        text = _empty_roadmap_text()
 
     return _roadmap_plan_from_text(
         inventory,
@@ -1675,6 +2292,8 @@ def _roadmap_plan(
         target_path,
         text,
         allowed_missing_paths=allowed_missing_paths or set(),
+        allow_empty_items=not target_existed and request.action == "add",
+        target_existed=target_existed,
     )
 
 
@@ -1685,19 +2304,44 @@ def _roadmap_plan_from_text(
     text: str,
     *,
     allowed_missing_paths: set[str],
+    allow_empty_items: bool = False,
+    target_existed: bool = True,
 ) -> tuple[RoadmapPlan | None, list[Finding]]:
-    parse_result = _parse_roadmap_items_for_sync(text)
+    parse_result = _parse_roadmap_items_for_sync(text, allow_empty_items=allow_empty_items)
     if parse_result[1]:
         return None, parse_result[1]
     items_start, items_end, items = parse_result[0]
     existing = items.get(request.item_id)
+    archived_history = _archived_history_item_plan_map(text)
+    replay_archived_plan = ""
     if request.action == "add" and existing:
         return None, [Finding("error", "roadmap-refused", f"roadmap item id already exists: {request.item_id}", ROADMAP_REL)]
     if request.action == "update" and not existing:
-        return None, [Finding("error", "roadmap-refused", f"roadmap item id does not exist: {request.item_id}", ROADMAP_REL)]
+        replay_archived_plan = archived_history.get(request.item_id, "")
+        if not replay_archived_plan:
+            return None, [Finding("error", "roadmap-refused", f"roadmap item id does not exist: {request.item_id}", ROADMAP_REL)]
+        if request.status and request.status not in {"accepted", "active"}:
+            return None, [
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    "compacted roadmap item replay requires --status accepted or active; omit --status to default accepted",
+                    ROADMAP_REL,
+                )
+            ]
+        problem = _archived_plan_evidence_problem(inventory, replay_archived_plan)
+        if problem:
+            return None, [
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    f"compacted roadmap item {request.item_id!r} archived-plan evidence is {problem}: {replay_archived_plan}",
+                    ROADMAP_REL,
+                )
+            ]
 
     errors: list[Finding] = []
-    errors.extend(_relationship_errors(inventory, request, set(items), allowed_missing_paths or set()))
+    errors.extend(_relationship_errors(inventory, request, set(items), archived_history, allowed_missing_paths or set()))
     if errors:
         return None, errors
     relationship_plan = None
@@ -1732,6 +2376,7 @@ def _roadmap_plan_from_text(
             relationship_plan = _relationship_plan_without_queued_active_plan_leak(inventory, request, relationship_plan)
 
     lines = text.splitlines(keepends=True)
+    replayed_item_ids: tuple[str, ...] = ()
     if request.action == "add":
         if items_start < 0:
             return None, [
@@ -1754,6 +2399,22 @@ def _roadmap_plan_from_text(
         updated_lines = [*lines[:insert_at], block, *lines[insert_at:]]
         changed_fields = tuple(_rendered_item_field_keys(fields))
         updated_text = "".join(updated_lines)
+    elif replay_archived_plan:
+        fields = _compacted_replay_item_fields(
+            request,
+            items,
+            replay_archived_plan,
+            source_incubation=source_incubation_field,
+            related_incubation=related_incubation_field or "",
+        )
+        block = _render_item_block(_compacted_replay_title(inventory, request, replay_archived_plan), fields)
+        insert_at = items_end
+        if insert_at > 0 and lines[insert_at - 1].strip():
+            block = "\n" + block
+        updated_lines = [*lines[:insert_at], block, *lines[insert_at:]]
+        changed_fields = tuple(_dedupe_nonempty((COMPACTED_ITEM_REPLAY_FIELD, *_rendered_item_field_keys(fields))))
+        updated_text = "".join(updated_lines)
+        replayed_item_ids = (request.item_id,)
     else:
         assert existing is not None
         fields = _updated_item_fields(
@@ -1793,6 +2454,12 @@ def _roadmap_plan_from_text(
         changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
         updated_text = refreshed_text
 
+    if replayed_item_ids:
+        refreshed_text = _without_archived_history_entries(updated_text, replayed_item_ids)
+        if refreshed_text != updated_text:
+            changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
+            updated_text = refreshed_text
+
     refreshed_text, retargeted_terminal_item_ids = roadmap_text_with_terminal_related_plan_retargets(
         updated_text,
         active_item_ids=active_plan_roadmap_item_ids(inventory),
@@ -1809,25 +2476,26 @@ def _roadmap_plan_from_text(
     post_write_errors = _canonical_roadmap_post_write_errors(updated_text, items_start)
     if post_write_errors:
         return None, post_write_errors
+    policy_errors = _active_plan_roadmap_mutation_policy_findings(inventory, request, changed_fields)
 
-    return (
-        RoadmapPlan(
-            action=request.action,
-            item_id=request.item_id,
-            target_rel=ROADMAP_REL,
-            target_path=target_path,
-            changed_fields=changed_fields,
-            reordered_item_ids=reordered_item_ids,
-            compacted_item_ids=compacted_item_ids,
-            retargeted_terminal_item_ids=retargeted_terminal_item_ids,
-            current_text=text,
-            updated_text=updated_text,
-            relationship_plan=relationship_plan,
-            related_incubation_source=related_incubation_source,
-            related_incubation_reason=related_incubation_reason,
-        ),
-        [],
+    plan = RoadmapPlan(
+        action=request.action,
+        item_id=request.item_id,
+        target_rel=ROADMAP_REL,
+        target_path=target_path,
+        changed_fields=changed_fields,
+        reordered_item_ids=reordered_item_ids,
+        compacted_item_ids=compacted_item_ids,
+        retargeted_terminal_item_ids=retargeted_terminal_item_ids,
+        current_text=text,
+        updated_text=updated_text,
+        target_existed=target_existed,
+        relationship_plan=relationship_plan,
+        related_incubation_source=related_incubation_source,
+        related_incubation_reason=related_incubation_reason,
+        replayed_item_ids=replayed_item_ids,
     )
+    return plan, policy_errors
 
 
 def _request_errors(inventory: Inventory, request: RoadmapRequest) -> list[Finding]:
@@ -1882,6 +2550,62 @@ def _request_errors(inventory: Inventory, request: RoadmapRequest) -> list[Findi
     return errors
 
 
+def _active_plan_roadmap_mutation_policy_findings(
+    inventory: Inventory,
+    request: RoadmapRequest,
+    changed_fields: tuple[str, ...],
+) -> list[Finding]:
+    if not _inventory_has_active_plan(inventory):
+        return []
+    active_ids = set(active_plan_roadmap_item_ids(inventory))
+    if not active_ids or request.item_id in active_ids:
+        return []
+    direct_fields = tuple(
+        field
+        for field in changed_fields
+        if field
+        and field
+        in ACTIVE_PLAN_ROADMAP_PROMOTION_FIELDS
+    )
+    if not direct_fields:
+        return []
+    active_label = ", ".join(sorted(active_ids))
+    changed_label = ", ".join(direct_fields)
+    return [
+        Finding(
+            "error",
+            "roadmap-active-plan-intake-policy",
+            (
+                f"active plan is open for roadmap item(s): {active_label}; requested roadmap {request.action} "
+                f"would change item {request.item_id!r} outside active-plan coverage (changed_fields={changed_label}). "
+                "Capture candidate evidence through meta-feedback/incubation now, or wait until plan_status=none before "
+                "accepted roadmap status/order/dependency/next-item promotion; "
+                f"next_safe_command={_active_plan_roadmap_mutation_next_safe_command(request)}"
+            ),
+            ROADMAP_REL,
+        )
+    ]
+
+
+def _active_plan_roadmap_mutation_next_safe_command(request: RoadmapRequest) -> str:
+    if request.action == "add":
+        after_close = (
+            "mylittleharness --root <root> roadmap --dry-run --action add "
+            f"--item-id {request.item_id} --title <title> --status <status> --order <order>"
+        )
+    else:
+        after_close = (
+            "mylittleharness --root <root> roadmap --dry-run --action update "
+            f"--item-id {request.item_id} [reviewed fields]"
+        )
+    return f"mylittleharness --root <root> meta-feedback --dry-run ...; after plan_status=none run {after_close}"
+
+
+def _inventory_has_active_plan(inventory: Inventory) -> bool:
+    state_data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return str(state_data.get("plan_status") or "").strip().casefold() == "active"
+
+
 def _roadmap_context_errors(inventory: Inventory) -> list[Finding]:
     errors: list[Finding] = []
     if inventory.root_kind == "product_source_fixture":
@@ -1905,7 +2629,7 @@ def _roadmap_context_errors(inventory: Inventory) -> list[Finding]:
     return errors
 
 
-def _roadmap_target_errors(inventory: Inventory, target_path: Path) -> list[Finding]:
+def _roadmap_target_errors(inventory: Inventory, target_path: Path, *, allow_missing: bool = False) -> list[Finding]:
     errors: list[Finding] = []
     if _path_escapes_root(inventory.root, target_path):
         errors.append(Finding("error", "roadmap-refused", "roadmap path escapes the target root", ROADMAP_REL))
@@ -1917,6 +2641,8 @@ def _roadmap_target_errors(inventory: Inventory, target_path: Path) -> list[Find
         elif parent.exists() and not parent.is_dir():
             errors.append(Finding("error", "roadmap-refused", f"roadmap path contains a non-directory segment: {rel}", rel))
     if not target_path.exists():
+        if allow_missing:
+            return errors
         errors.append(Finding("error", "roadmap-refused", "project/roadmap.md is missing", ROADMAP_REL))
     elif target_path.is_symlink():
         errors.append(Finding("error", "roadmap-refused", "project/roadmap.md is a symlink", ROADMAP_REL))
@@ -1925,7 +2651,7 @@ def _roadmap_target_errors(inventory: Inventory, target_path: Path) -> list[Find
     return errors
 
 
-def _parse_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
+def _parse_roadmap_items(text: str, *, allow_empty_items: bool = False) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
     lines = text.splitlines(keepends=True)
     if lines and lines[0].strip() == "---":
         closing_index = None
@@ -1952,6 +2678,8 @@ def _parse_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, RoadmapIt
 
     block_starts = [index for index in range(items_heading + 1, items_end) if re.match(r"^###\s+.+\s*$", lines[index].strip())]
     if not block_starts:
+        if allow_empty_items:
+            return (items_heading + 1, items_end, {}), []
         return (0, 0, {}), [Finding("error", "roadmap-refused", "project/roadmap.md ## Items section has no managed item blocks", ROADMAP_REL)]
 
     items: dict[str, RoadmapItem] = {}
@@ -1973,9 +2701,11 @@ def _parse_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, RoadmapIt
     return (items_heading + 1, items_end, items), []
 
 
-def _parse_roadmap_items_for_sync(text: str) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
-    parse_result = _parse_roadmap_items(text)
+def _parse_roadmap_items_for_sync(text: str, *, allow_empty_items: bool = False) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
+    parse_result = _parse_roadmap_items(text, allow_empty_items=allow_empty_items)
     if not parse_result[1]:
+        return parse_result
+    if allow_empty_items:
         return parse_result
     findings = parse_result[1]
     if len(findings) != 1 or "must contain a ## Items section" not in findings[0].message:
@@ -2168,6 +2898,20 @@ def _archived_history_item_plan_map(text: str) -> dict[str, str]:
         if item_id and archived_plan:
             entries[item_id] = archived_plan
     return entries
+
+
+def _without_archived_history_entries(text: str, item_ids: tuple[str, ...]) -> str:
+    normalized_item_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    if not normalized_item_ids:
+        return text
+    lines = text.splitlines(keepends=True)
+    updated_lines: list[str] = []
+    for line in lines:
+        match = _compacted_history_entry_match(line)
+        if match and _normalized_item_id(match.group(1)) in normalized_item_ids:
+            continue
+        updated_lines.append(line)
+    return "".join(updated_lines)
 
 
 def _archived_plan_evidence_problem(inventory: Inventory, archived_plan: str) -> str:
@@ -2625,6 +3369,86 @@ def _updated_item_fields(
     return fields
 
 
+def _compacted_replay_item_fields(
+    request: RoadmapRequest,
+    items: dict[str, RoadmapItem],
+    archived_plan: str,
+    *,
+    source_incubation: str | None = None,
+    related_incubation: str = "",
+) -> dict[str, object]:
+    replay_status = request.status or "accepted"
+    replay_order = request.order if request.order is not None else _next_roadmap_order(items, replay_status)
+    replay_custom_fields = (
+        ("lifecycle_replay", "compacted-roadmap-history"),
+        ("replay_source", archived_plan),
+        *request.custom_fields,
+    )
+    replay_request = replace(
+        request,
+        status=replay_status,
+        order=replay_order,
+        execution_slice=request.execution_slice or request.item_id,
+        slice_goal=request.slice_goal or f"Replay compacted roadmap item {request.item_id} from archived history.",
+        slice_members=request.slice_members or (request.item_id,),
+        slice_closeout_boundary=request.slice_closeout_boundary or "explicit closeout/writeback only",
+        related_plan=request.related_plan,
+        archived_plan=request.archived_plan or archived_plan,
+        verification_summary=request.verification_summary
+        or f"Replayed from Archived Completed History evidence: {archived_plan}.",
+        docs_decision=request.docs_decision or "uncertain",
+        carry_forward=request.carry_forward or "Review archived plan evidence before executing the replayed slice.",
+        custom_fields=replay_custom_fields,
+    )
+    return _new_item_fields(
+        replay_request,
+        source_incubation=source_incubation,
+        related_incubation=related_incubation,
+    )
+
+
+def _compacted_replay_title(inventory: Inventory, request: RoadmapRequest, archived_plan: str) -> str:
+    if request.title:
+        return request.title
+    path = inventory.root / archived_plan
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return _title_from_item_id(request.item_id)
+    frontmatter_match = re.search(r"(?m)^title:\s*['\"]?(.+?)['\"]?\s*$", text)
+    if frontmatter_match:
+        title = frontmatter_match.group(1).strip().strip("'\"")
+        if title:
+            return title
+    heading_match = re.search(r"(?m)^#\s+(.+?)\s*$", text)
+    if heading_match:
+        title = heading_match.group(1).strip()
+        if title:
+            return title
+    return _title_from_item_id(request.item_id)
+
+
+def _title_from_item_id(item_id: str) -> str:
+    return " ".join(part.capitalize() for part in item_id.split("-") if part) or "Roadmap Item"
+
+
+def _next_roadmap_order(items: dict[str, RoadmapItem], status: str) -> int:
+    matching_orders: list[int] = []
+    normalized_status = _normalized_status(status)
+    for item in items.values():
+        if _normalized_status(item.fields.get("status")) != normalized_status:
+            continue
+        order = item.fields.get("order")
+        if isinstance(order, int):
+            matching_orders.append(order)
+            continue
+        try:
+            matching_orders.append(int(str(order or "0")))
+        except ValueError:
+            continue
+    return (max(matching_orders) + 10) if matching_orders else 10
+
+
 def _render_item_block(title: str, fields: dict[str, object]) -> str:
     lines = [f"### {title}\n", "\n"]
     for key in _rendered_item_field_keys(fields):
@@ -2640,6 +3464,20 @@ def _render_item_block(title: str, fields: dict[str, object]) -> str:
         lines.append(f"- `{key}`: `{rendered}`\n")
     lines.append("\n")
     return "".join(lines)
+
+
+def _empty_roadmap_text() -> str:
+    return (
+        "---\n"
+        'id: "memory-routing-roadmap"\n'
+        'status: "active"\n'
+        "---\n"
+        "# Roadmap\n\n"
+        "## Item Schema\n\n"
+        "- `id`: stable item identifier.\n"
+        "- `status`: known roadmap status.\n\n"
+        "## Items\n\n"
+    )
 
 
 def _should_render_item_field(field: str, value: object) -> bool:
@@ -2783,6 +3621,7 @@ def _relationship_errors(
     inventory: Inventory,
     request: RoadmapRequest,
     item_ids: set[str],
+    archived_history: dict[str, str],
     allowed_missing_paths: set[str],
 ) -> list[Finding]:
     errors: list[Finding] = []
@@ -2799,8 +3638,68 @@ def _relationship_errors(
             allowed_item_ids.add(request.item_id)
         for value in values:
             if value not in allowed_item_ids:
+                if field in ARCHIVED_PREREQUISITE_REFERENCE_FIELDS:
+                    archived_plan = archived_history.get(value)
+                    if archived_plan:
+                        problem = _archived_plan_evidence_problem(inventory, archived_plan)
+                        if problem:
+                            errors.append(
+                                Finding(
+                                    "error",
+                                    "roadmap-refused",
+                                    (
+                                        f"--{field.replace('_', '-')} archived dependency evidence for {value!r} "
+                                        f"is {problem}: {archived_plan}"
+                                    ),
+                                    ROADMAP_REL,
+                                )
+                            )
+                        continue
                 errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} target item id is missing: {value}", ROADMAP_REL))
     return errors
+
+
+def _archived_prerequisite_reference_findings(
+    inventory: Inventory,
+    plan: RoadmapPlan,
+    prefix: str,
+) -> list[Finding]:
+    parse_result = _parse_roadmap_items_for_sync(plan.updated_text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+    item = items.get(plan.item_id)
+    if item is None:
+        return []
+
+    archived_history = _archived_history_item_plan_map(plan.updated_text)
+    refs: list[str] = []
+    for field in ARCHIVED_PREREQUISITE_REFERENCE_FIELDS:
+        for value in _field_list(item.fields, field):
+            dependency = _normalized_item_id(value)
+            if not dependency or dependency in items:
+                continue
+            archived_plan = archived_history.get(dependency)
+            if not archived_plan:
+                continue
+            problem = _archived_plan_evidence_problem(inventory, archived_plan)
+            suffix = f" ({problem})" if problem else ""
+            refs.append(f"{field} {dependency} -> {archived_plan}{suffix}")
+    refs = _dedupe_nonempty(refs)
+    if not refs:
+        return []
+    return [
+        Finding(
+            "info",
+            "roadmap-archived-prerequisite-reference",
+            (
+                f"{prefix}keep archived prerequisite reference(s) via Archived Completed History: "
+                f"{'; '.join(refs)}; this does not recreate archives, reopen roadmap items, "
+                "or approve lifecycle movement"
+            ),
+            plan.target_rel,
+        )
+    ]
 
 
 def _path_relationship_errors(
@@ -2860,6 +3759,29 @@ def _route_destination_allowed(field: str, rel_path: str) -> bool:
     return True
 
 
+def _batch_plan_findings(inventory: Inventory, batch_plan: RoadmapBatchPlan, apply: bool) -> list[Finding]:
+    prefix = "" if apply else "would "
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "roadmap-batch-plan",
+            f"{prefix}process {len(batch_plan.requests)} roadmap item(s) through one add-many batch",
+            batch_plan.target_rel,
+        )
+    ]
+    for position, plan in enumerate(batch_plan.plans, start=1):
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-batch-item",
+                f"{prefix}create item {position}: {plan.item_id}",
+                batch_plan.target_rel,
+            )
+        )
+        findings.extend(_plan_findings(inventory, plan, apply))
+    return findings
+
+
 def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list[Finding]:
     prefix = "" if apply else "would "
     plan_message = (
@@ -2871,6 +3793,15 @@ def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list
         Finding("info", "roadmap-plan", plan_message, plan.target_rel),
         Finding("info", "roadmap-target-file", f"{prefix}write boundary: {plan.target_rel}", plan.target_rel),
     ]
+    if not plan.target_existed:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-bootstrap",
+                f"{prefix}bootstrap missing optional roadmap route before applying the item mutation",
+                plan.target_rel,
+            )
+        )
     if plan.changed_fields:
         findings.extend(
             Finding("info", "roadmap-changed-field", f"{prefix}change field: {field}", plan.target_rel)
@@ -2888,6 +3819,15 @@ def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list
                 plan.target_rel,
             )
         )
+    if plan.replayed_item_ids:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-compacted-item-replay",
+                f"{prefix}restore compacted roadmap item block(s) from Archived Completed History: {', '.join(plan.replayed_item_ids)}",
+                plan.target_rel,
+            )
+        )
     if plan.retargeted_terminal_item_ids:
         findings.append(
             Finding(
@@ -2897,6 +3837,7 @@ def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list
                 plan.target_rel,
             )
         )
+    findings.extend(_archived_prerequisite_reference_findings(inventory, plan, prefix))
     target_artifacts = _roadmap_item_target_artifacts(plan.updated_text, plan.item_id)
     findings.extend(_target_artifact_ownership_findings(inventory, target_artifacts, prefix, "roadmap-target-artifact-ownership", plan.target_rel))
     if plan.reordered_item_ids:
@@ -2966,7 +3907,8 @@ def _target_artifact_ownership_findings(
 
 
 def _route_write_evidence(plan: RoadmapPlan) -> tuple[RouteWriteEvidence, ...]:
-    writes = [RouteWriteEvidence(plan.target_rel, plan.current_text, plan.updated_text)]
+    before_text = plan.current_text if plan.target_existed else None
+    writes = [RouteWriteEvidence(plan.target_rel, before_text, plan.updated_text)]
     if plan.relationship_plan:
         writes.append(RouteWriteEvidence(plan.relationship_plan.target_rel, plan.relationship_plan.current_text, plan.relationship_plan.updated_text))
     return tuple(writes)
@@ -2974,6 +3916,22 @@ def _route_write_evidence(plan: RoadmapPlan) -> tuple[RouteWriteEvidence, ...]:
 
 def _route_write_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list[Finding]:
     writes = _route_write_evidence(plan)
+    return [
+        *route_write_findings("roadmap-route-write", writes, apply=apply),
+        *route_reference_transaction_guard_findings(inventory, writes, apply=apply),
+    ]
+
+
+def _batch_route_write_evidence(batch_plan: RoadmapBatchPlan) -> tuple[RouteWriteEvidence, ...]:
+    before_text = batch_plan.current_text if batch_plan.target_existed else None
+    writes = [RouteWriteEvidence(batch_plan.target_rel, before_text, batch_plan.updated_text)]
+    for relationship_plan in _batch_relationship_plans(batch_plan):
+        writes.append(RouteWriteEvidence(relationship_plan.target_rel, relationship_plan.current_text, relationship_plan.updated_text))
+    return tuple(writes)
+
+
+def _batch_route_write_findings(inventory: Inventory, batch_plan: RoadmapBatchPlan, apply: bool) -> list[Finding]:
+    writes = _batch_route_write_evidence(batch_plan)
     return [
         *route_write_findings("roadmap-route-write", writes, apply=apply),
         *route_reference_transaction_guard_findings(inventory, writes, apply=apply),
@@ -3112,7 +4070,12 @@ def _roadmap_readiness_blockers(
 
     if status == "active" and active_ids and item_id not in active_ids:
         blockers.append("roadmap item is active but the current active plan does not cover it")
+    if status == "accepted" and active_ids and item_id not in active_ids:
+        blockers.append(
+            "current active plan is open for other roadmap item(s); finish or archive that plan before opening the next roadmap item"
+        )
     blockers.extend(roadmap_plan_scope_blockers(inventory, item_id, fields))
+    blockers.extend(_roadmap_slice_result_gate_blockers(inventory, item_id, item, items))
 
     source_fields = ("source_incubation", RELATED_INCUBATION_FIELD, "source_research")
     source_member_rels = tuple(_normalize_rel(value) for value in _field_list(fields, SOURCE_MEMBERS_FIELD))
@@ -3173,6 +4136,153 @@ def _roadmap_readiness_blockers(
     return tuple(_dedupe_nonempty(blockers))
 
 
+def _roadmap_slice_result_gate_blockers(
+    inventory: Inventory,
+    item_id: str,
+    item: RoadmapItem,
+    items: dict[str, RoadmapItem],
+) -> tuple[str, ...]:
+    fields = item.fields
+    dependencies = tuple(
+        _dedupe_nonempty(
+            (
+                *(_normalized_item_id(value) for value in _field_list(fields, "dependencies")),
+                *(_normalized_item_id(value) for value in _field_list(fields, "slice_dependencies")),
+            )
+        )
+    )
+    if not dependencies:
+        return ()
+    covered = set(_covered_item_ids(items, item_id, item))
+    blockers: list[str] = []
+    for dependency in dependencies:
+        dependency_item = items.get(dependency)
+        if dependency_item is None or dependency in covered:
+            continue
+        dependency_fields = dependency_item.fields
+        if not _slice_result_gate_enabled(dependency_fields):
+            continue
+        dependency_status = _normalized_status(dependency_fields.get("status"))
+        if dependency_status != "done":
+            blockers.append(
+                f"slice result gate dependency {dependency!r} has status {dependency_status or '<missing>'!r}; "
+                f"finish that upstream slice and record a decision packet with {SLICE_RESULT_SAFE_FIELD}: true "
+                "or explicit fork fields before opening this downstream plan"
+            )
+            continue
+        blockers.extend(
+            _slice_result_decision_packet_blockers(
+                inventory,
+                downstream_item_id=item_id,
+                dependency_item_id=dependency,
+                dependency_fields=dependency_fields,
+            )
+        )
+    return tuple(_dedupe_nonempty(blockers))
+
+
+def _slice_result_decision_packet_blockers(
+    inventory: Inventory,
+    *,
+    downstream_item_id: str,
+    dependency_item_id: str,
+    dependency_fields: dict[str, object],
+) -> tuple[str, ...]:
+    artifact_rels = _slice_result_artifact_rels(dependency_fields)
+    if not artifact_rels:
+        return (
+            f"slice result gate dependency {dependency_item_id!r} has no decision packet artifact; "
+            "record slice_result_artifact or a project/verification target_artifact before opening "
+            f"downstream item {downstream_item_id!r}",
+        )
+
+    missing_or_incomplete: list[str] = []
+    for artifact_rel in artifact_rels:
+        problem = _roadmap_readiness_path_problem(inventory, artifact_rel)
+        if problem:
+            missing_or_incomplete.append(f"{artifact_rel} is {problem}")
+            continue
+        try:
+            artifact_text = (inventory.root / artifact_rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            missing_or_incomplete.append(f"{artifact_rel} is unreadable: {exc}")
+            continue
+        decision, detail = _slice_result_packet_decision(artifact_text)
+        if decision == "safe":
+            return ()
+        if decision == "fork":
+            return (
+                f"slice result gate dependency {dependency_item_id!r} decision packet {artifact_rel} records {detail}; "
+                "update/add the required roadmap slice(s) or mark the downstream item blocked before opening "
+                f"{downstream_item_id!r}",
+            )
+        missing_or_incomplete.append(f"{artifact_rel} lacks {SLICE_RESULT_SAFE_FIELD}: true or explicit fork fields")
+
+    detail = "; ".join(missing_or_incomplete) if missing_or_incomplete else "no usable decision packet was found"
+    return (
+        f"slice result gate dependency {dependency_item_id!r} blocks downstream item {downstream_item_id!r}: {detail}",
+    )
+
+
+def _slice_result_gate_enabled(fields: dict[str, object]) -> bool:
+    for field in SLICE_RESULT_GATE_FIELDS:
+        value = fields.get(field)
+        if value in (None, [], ()):
+            continue
+        normalized = str(value or "").strip().casefold().replace("_", "-")
+        if normalized in HUMAN_REVIEW_GATE_FALSEY:
+            continue
+        if normalized in SLICE_RESULT_GATE_TRUTHY:
+            return True
+    return False
+
+
+def _slice_result_artifact_rels(fields: dict[str, object]) -> tuple[str, ...]:
+    explicit = tuple(
+        _normalize_rel(value)
+        for field in SLICE_RESULT_ARTIFACT_FIELDS
+        for value in _field_list(fields, field)
+    )
+    if explicit:
+        return tuple(_dedupe_nonempty(explicit))
+    targets = tuple(_normalize_rel(value) for value in _field_list(fields, "target_artifacts"))
+    decision_targets = tuple(
+        target
+        for target in targets
+        if target.startswith("project/verification/") or target.startswith("project/research/")
+    )
+    return tuple(_dedupe_nonempty(decision_targets or targets))
+
+
+def _slice_result_packet_decision(text: str) -> tuple[str, str]:
+    safe_value = _slice_result_packet_field_value(text, SLICE_RESULT_SAFE_FIELD)
+    if _decision_value_is_true(safe_value):
+        return "safe", f"{SLICE_RESULT_SAFE_FIELD}: true"
+    if safe_value and not _decision_value_is_falsey(safe_value):
+        return "fork", f"{SLICE_RESULT_SAFE_FIELD}: {safe_value}"
+    for field in SLICE_RESULT_FORK_FIELDS:
+        value = _slice_result_packet_field_value(text, field)
+        if value and not _decision_value_is_falsey(value):
+            return "fork", f"{field}: {value}"
+    return "missing", ""
+
+
+def _slice_result_packet_field_value(text: str, field: str) -> str:
+    match = re.search(rf"(?im)^\s*(?:[-*]\s*)?`?{re.escape(field)}`?\s*[:=]\s*(.*?)\s*$", text)
+    if not match:
+        return ""
+    return match.group(1).strip().strip("`\"'")
+
+
+def _decision_value_is_true(value: str) -> bool:
+    return value.strip().casefold().replace("_", "-") in {"1", "true", "yes", "safe", "continue", "safe-to-continue"}
+
+
+def _decision_value_is_falsey(value: str) -> bool:
+    normalized = value.strip().casefold().replace("_", "-")
+    return normalized in {"", "0", "false", "no", "none", "not-needed", "not needed", "[]"}
+
+
 def _roadmap_readiness_path_problem(inventory: Inventory, rel_path: str) -> str:
     if _rel_has_absolute_or_parent_parts(rel_path):
         return "not a safe root-relative path"
@@ -3212,6 +4322,10 @@ def _roadmap_readiness_state(
         return "active-roadmap-drift", "mylittleharness --root <root> check"
     if status == "accepted":
         if blockers:
+            if any("current active plan is open" in blocker for blocker in blockers):
+                return "blocked-active-plan-open", ACTIVE_PLAN_OPEN_NEXT_SAFE_COMMAND
+            if any("slice result gate" in blocker for blocker in blockers):
+                return "blocked-before-plan", roadmap_slice_result_gate_next_safe_command(item_id)
             if any("target_artifacts" in blocker for blocker in blockers):
                 return "blocked-before-plan", roadmap_plan_scope_next_safe_command(item_id)
             return "blocked-before-plan", "mylittleharness --root <root> check"
@@ -3348,8 +4462,89 @@ def _relationship_backup_path(plan: RelationshipUpdatePlan | None) -> Path | Non
     return plan.target_path.with_name(f".{plan.target_path.name}.roadmap-relationship.backup")
 
 
+def _batch_relationship_plans(batch_plan: RoadmapBatchPlan) -> tuple[RelationshipUpdatePlan, ...]:
+    plans: list[RelationshipUpdatePlan] = []
+    for plan in batch_plan.plans:
+        if plan.relationship_plan is None:
+            continue
+        plans.append(plan.relationship_plan)
+    return tuple(plans)
+
+
+def _batch_relationship_target_errors(plans: tuple[RoadmapPlan, ...]) -> list[Finding]:
+    seen: set[str] = set()
+    errors: list[Finding] = []
+    for plan in plans:
+        relationship_plan = plan.relationship_plan
+        if relationship_plan is None:
+            continue
+        if relationship_plan.target_rel in seen:
+            errors.append(
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    f"batch would write relationship target more than once: {relationship_plan.target_rel}",
+                    relationship_plan.target_rel,
+                )
+            )
+        seen.add(relationship_plan.target_rel)
+    return errors
+
+
+def _batch_plan_has_changes(batch_plan: RoadmapBatchPlan) -> bool:
+    if not batch_plan.target_existed or batch_plan.current_text != batch_plan.updated_text:
+        return True
+    return any(plan.current_text != plan.updated_text for plan in _batch_relationship_plans(batch_plan))
+
+
+def _batch_plan_atomic_operations(
+    inventory: Inventory,
+    batch_plan: RoadmapBatchPlan,
+) -> tuple[list[AtomicFileWrite], list[Finding]]:
+    operations: list[AtomicFileWrite] = []
+    roadmap_write_needed = (not batch_plan.target_existed) or batch_plan.current_text != batch_plan.updated_text
+    tmp_path = batch_plan.target_path.with_name(f".{batch_plan.target_path.name}.roadmap-batch.tmp") if roadmap_write_needed else None
+    backup_path = batch_plan.target_path.with_name(f".{batch_plan.target_path.name}.roadmap-batch.backup") if tmp_path else None
+    if tmp_path and backup_path:
+        operations.append(AtomicFileWrite(batch_plan.target_path, tmp_path, batch_plan.updated_text, backup_path))
+
+    for relationship_plan in _batch_relationship_plans(batch_plan):
+        relationship_tmp = _relationship_tmp_path(relationship_plan)
+        relationship_backup = _relationship_backup_path(relationship_plan) if relationship_tmp else None
+        if relationship_tmp and relationship_backup:
+            operations.append(AtomicFileWrite(relationship_plan.target_path, relationship_tmp, relationship_plan.updated_text, relationship_backup))
+
+    for operation, label in (
+        (operation, _batch_operation_label(operation.target_path, batch_plan.target_path))
+        for operation in operations
+    ):
+        if operation.tmp_path.exists():
+            return [], [
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    f"temporary {label} write path already exists: {operation.tmp_path.relative_to(inventory.root).as_posix()}",
+                    batch_plan.target_rel,
+                )
+            ]
+        if operation.backup_path.exists():
+            return [], [
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    f"temporary {label} backup path already exists: {operation.backup_path.relative_to(inventory.root).as_posix()}",
+                    batch_plan.target_rel,
+                )
+            ]
+    return operations, []
+
+
+def _batch_operation_label(target_path: Path, roadmap_path: Path) -> str:
+    return "roadmap batch" if target_path == roadmap_path else "relationship"
+
+
 def _plan_has_changes(plan: RoadmapPlan) -> bool:
-    return plan.current_text != plan.updated_text or (
+    return not plan.target_existed or plan.current_text != plan.updated_text or (
         plan.relationship_plan is not None and plan.relationship_plan.current_text != plan.relationship_plan.updated_text
     )
 
@@ -3593,6 +4788,8 @@ def _explicit_deliverable_class(fields: dict[str, object]) -> str:
             return "proposal"
         if value in {"audit-only", "audit-proposal", "audit-and-proposal"}:
             return "audit"
+        if value in {"route-cleanup", "route-hygiene-cleanup", "lifecycle-hygiene", "lifecycle-route-hygiene"}:
+            return "route-hygiene"
     return ""
 
 
@@ -3601,6 +4798,8 @@ def _text_signals_deliverable_class(value: str, *, source: str) -> str:
     if not text:
         return ""
     if source == "stage":
+        if "route-hygiene" in text or "route hygiene" in text or "lifecycle-hygiene" in text or "lifecycle hygiene" in text:
+            return "route-hygiene"
         if "diagnostic" in text or "diagnostics" in text:
             return "diagnostic"
         if "research" in text:
@@ -3618,6 +4817,8 @@ def _text_signals_deliverable_class(value: str, *, source: str) -> str:
         return ""
     if re.search(r"\bdiagnostic[- ]only\b|\bdiagnostic\s+only\b|\bdiagnostic\s+matrix\b|\bdiagnostic\s+report\b", text):
         return "diagnostic"
+    if re.search(r"\broute[- ]hygiene\b|\blifecycle[- ]hygiene\b|\broute[- ]cleanup\b", text):
+        return "route-hygiene"
     if re.search(r"\bresearch[- ]only\b|\bresearch\s+only\b|\bresearch\s+synthesis\b|\bresearch\s+report\b", text):
         return "research"
     if re.search(r"\bcleanup[- ]only\b|\bcleanup\s+only\b|\bcleanup\s+review\b", text):

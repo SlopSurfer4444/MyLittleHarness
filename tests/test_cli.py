@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -24,9 +25,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness import atomic_files
 from mylittleharness.adapter import serve_mcp_read_projection
-from mylittleharness.checks import WORKFLOW_ATTACH_DIRECTORIES, validation_findings
+from mylittleharness.checks import (
+    WORKFLOW_ATTACH_DIRECTORIES,
+    _active_plan_covered_roadmap_scope_findings,
+    _active_plan_scoped_interrupt_contract_findings,
+    validation_findings,
+)
 from mylittleharness.cli import main
-from mylittleharness.inventory import EXPECTED_SPEC_NAMES, load_inventory
+from mylittleharness.inventory import EXPECTED_SPEC_NAMES, Surface, load_inventory
 from mylittleharness.models import Finding
 from mylittleharness.parsing import parse_frontmatter
 from mylittleharness.projection_artifacts import (
@@ -44,12 +50,17 @@ from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrail
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         self._ambient_meta_feedback_root = os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ROOT", None)
+        self._ambient_meta_feedback_ci_enable = os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI", None)
 
     def tearDown(self) -> None:
         if self._ambient_meta_feedback_root is None:
             os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ROOT", None)
         else:
             os.environ["MYLITTLEHARNESS_META_FEEDBACK_ROOT"] = self._ambient_meta_feedback_root
+        if self._ambient_meta_feedback_ci_enable is None:
+            os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI", None)
+        else:
+            os.environ["MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI"] = self._ambient_meta_feedback_ci_enable
 
     def test_status_report_sections_and_zero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -65,6 +76,198 @@ class CliTests(unittest.TestCase):
             self.assertIn("- What changed: No repository files were changed", rendered)
             self.assertIn("- How it was checked: MLH rendered report status `ok`", rendered)
             self.assertNotIn("lifecycle-route-table", rendered)
+
+    def test_active_plan_covered_roadmap_scope_warns_on_partial_authority_contract(self) -> None:
+        planning_target = "src/" + "mylittleharness/planning.py"
+        checks_target = "src/" + "mylittleharness/checks.py"
+        plan_text = (
+            "---\n"
+            'plan_id: "bundle-contract-plan"\n'
+            'active_phase: "phase-1"\n'
+            'primary_roadmap_item: "primary-item"\n'
+            "covered_roadmap_items:\n"
+            '  - "primary-item"\n'
+            '  - "sibling-item"\n'
+            "target_artifacts:\n"
+            f'  - "{planning_target}"\n'
+            "---\n"
+            "# Bundle Contract Plan\n\n"
+            "### phase-1\n\n"
+            "- id: `phase-1`\n"
+            f"- write_scope: `{planning_target}`\n"
+        )
+        plan = Surface(
+            root=Path("."),
+            rel_path="active-plan.md",
+            role="active-plan",
+            required=True,
+            path=Path("active-plan.md"),
+            exists=True,
+            content=plan_text,
+            frontmatter=parse_frontmatter(plan_text),
+        )
+        item_type = type("RoadmapItemStub", (), {})
+        primary = item_type()
+        primary.fields = {"target_artifacts": [planning_target]}
+        sibling = item_type()
+        sibling.fields = {"target_artifacts": [checks_target]}
+
+        with patch(
+            "mylittleharness.checks.roadmap_items_for_diagnostics",
+            return_value=({"primary-item": primary, "sibling-item": sibling}, []),
+        ):
+            findings = _active_plan_covered_roadmap_scope_findings(object(), plan, {"active_phase": "phase-1"})
+
+        self.assertEqual(["active-plan-covered-roadmap-write-scope-contract"], [finding.code for finding in findings])
+        self.assertIn("sibling-item", findings[0].message)
+        self.assertIn(checks_target, findings[0].message)
+
+    def test_active_plan_scoped_interrupt_contract_reports_boundary(self) -> None:
+        plan_text = (
+            "---\n"
+            'plan_id: "scoped-interrupt-plan"\n'
+            'work_intent: "scoped_interrupt"\n'
+            'roadmap_status_policy: "no-roadmap-status-movement-without-explicit-request"\n'
+            "---\n"
+            "# Scoped Interrupt Plan\n"
+        )
+        plan = Surface(
+            root=Path("."),
+            rel_path="active-plan.md",
+            role="active-plan",
+            required=True,
+            path=Path("active-plan.md"),
+            exists=True,
+            content=plan_text,
+            frontmatter=parse_frontmatter(plan_text),
+        )
+
+        findings = _active_plan_scoped_interrupt_contract_findings(plan)
+
+        self.assertEqual(["active-plan-scoped-interrupt-contract"], [finding.code for finding in findings])
+        self.assertIn("no roadmap status movement", findings[0].message)
+
+    def test_plan_renders_scoped_interrupt_contract_from_roadmap_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            item_id = "phase-reopen-quality-fix-rail"
+            planning_target = "src/" + "mylittleharness/planning.py"
+            checks_target = "src/" + "mylittleharness/checks.py"
+            tests_target = "tests/" + "test_cli.py"
+            roadmap_path = root / "project" / "roadmap.md"
+            roadmap_path.write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Phase Reopen Quality Fix Rail\n\n"
+                f"- `id`: `{item_id}`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                f"- `execution_slice`: `{item_id}`\n"
+                "- `slice_goal`: `Render scoped quality-fix intent explicitly.`\n"
+                f"- `slice_members`: `[\"{item_id}\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `Scoped quality-fix intent only; no roadmap status movement without explicit request.`\n"
+                "- `dependencies`: `[]`\n"
+                "- `source_incubation`: ``\n"
+                "- `source_research`: ``\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: ``\n"
+                "- `archived_plan`: ``\n"
+                f"- `target_artifacts`: `{json.dumps([planning_target, checks_target, tests_target])}`\n"
+                "- `verification_summary`: `Focused scoped interrupt regression passes.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "- `carry_forward`: `Return to queued roadmap slices after interrupt archive.`\n"
+                "- `supersedes`: `[]`\n"
+                "- `superseded_by`: `[]`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", item_id, "--only-requested-item"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-scoped-interrupt-contract", rendered)
+            plan_text = (root / "project" / "implementation-plan.md").read_text(encoding="utf-8")
+            state_text = (root / "project" / "project-state.md").read_text(encoding="utf-8")
+            self.assertIn('work_intent: "scoped_interrupt"', plan_text)
+            self.assertIn('roadmap_status_policy: "no-roadmap-status-movement-without-explicit-request"', plan_text)
+            self.assertIn("## Scoped Interrupt Contract", plan_text)
+            self.assertIn('active_phase: "phase-1-scoped-interrupt"', plan_text)
+            self.assertIn("### phase-1-scoped-interrupt", plan_text)
+            self.assertIn("roadmap status remains unchanged unless an explicit writeback/transition request names the roadmap item and status", plan_text)
+            self.assertIn('active_phase: "phase-1-scoped-interrupt"', state_text)
+
+    def test_writeback_dry_run_reports_scoped_interrupt_boundary_without_roadmap_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-scoped-interrupt"',
+                ),
+                encoding="utf-8",
+            )
+            plan_path = root / "project" / "implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'title: "Scoped Hotfix"\n'
+                'active_phase: "phase-1-scoped-interrupt"\n'
+                'phase_status: "complete"\n'
+                'work_intent: "scoped_interrupt"\n'
+                'roadmap_status_policy: "no-roadmap-status-movement-without-explicit-request"\n'
+                "---\n"
+                "# Scoped Hotfix\n\n"
+                "## Phases\n\n"
+                "### phase-1-scoped-interrupt\n\n"
+                "- status: `done`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "completed scoped interrupt",
+                        "--verification",
+                        "focused scoped interrupt tests passed",
+                        "--commit-decision",
+                        "manual commit policy",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-scoped-interrupt-boundary", rendered)
+            self.assertIn("no roadmap status movement requested", rendered)
+            self.assertNotIn("writeback-roadmap-sync", rendered)
+
+    def test_suggest_intent_routes_scoped_interrupt_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "phase reopen scoped quality fix return to roadmap"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("scoped-interrupt-work", rendered)
+            self.assertIn("plan --dry-run --title \"Scoped hotfix: <title>\"", rendered)
+            self.assertIn("explicit roadmap item/status fields", rendered)
 
     def test_manifest_report_uses_read_only_work_result_capsule(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,6 +576,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("suggest does not install dependencies, choose pytest", rendered)
             self.assertNotIn("roadmap-acceptance-readiness", rendered)
             self.assertNotIn("operator-audit-loop", rendered)
+
+    def test_suggest_intent_routes_verification_evidence_without_path_literal_guesswork(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "verification evidence decision packet"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("verification-evidence-record", rendered)
+            self.assertIn("intake --dry-run --text-file - --target project/verification/<evidence-id>.md", rendered)
+            self.assertIn("evidence --record --dry-run", rendered)
+            self.assertIn("cannot approve closeout, archive, roadmap status", rendered)
 
     def test_suggest_json_reports_machine_readable_command_advice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1279,7 +1498,13 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("meta-feedback-central-destination", central_rendered)
 
             local_output = io.StringIO()
-            with patch.dict(os.environ, {"MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(central_root)}), redirect_stdout(local_output):
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(central_root),
+                    "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI": "1",
+                },
+            ), redirect_stdout(local_output):
                 local_code = main(["--root", str(local_root), "check"])
             self.assertEqual(local_code, 0)
             local_rendered = local_output.getvalue()
@@ -1288,12 +1513,30 @@ class CliTests(unittest.TestCase):
             self.assertIn("this local live root is provenance only", local_rendered)
 
             central_output = io.StringIO()
-            with patch.dict(os.environ, {"MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(central_root)}), redirect_stdout(central_output):
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(central_root),
+                    "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI": "1",
+                },
+            ), redirect_stdout(central_output):
                 central_code = main(["--root", str(central_root), "check"])
             self.assertEqual(central_code, 0)
             central_rendered = central_output.getvalue()
             self.assertIn("meta-feedback-central-destination", central_rendered)
             self.assertIn("this root is the central MyLittleHarness-dev destination", central_rendered)
+
+            ci_output = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(central_root),
+                    "GITHUB_ACTIONS": "true",
+                },
+            ), redirect_stdout(ci_output):
+                ci_code = main(["--root", str(local_root), "check"])
+            self.assertEqual(ci_code, 0)
+            self.assertNotIn("meta-feedback-central-destination", ci_output.getvalue())
 
     def test_check_warns_when_installed_console_lags_product_source_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2281,7 +2524,14 @@ class CliTests(unittest.TestCase):
                 "---\n"
                 'source_incubation: "project/plan-incubation/complete.md"\n'
                 "---\n"
-                "# Complete Plan\n",
+                "# Complete Plan\n\n"
+                "## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: complete archived closeout evidence\n"
+                "- verification: complete passed\n"
+                "- commit_decision: manual commit policy\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
                 encoding="utf-8",
             )
             (archive_dir / "reconstructed.md").write_text(
@@ -2472,6 +2722,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("archive-context-diagnostic-about-suspect", rendered)
             self.assertIn("project/archive/plans/diagnostic-recovery.md", rendered)
             self.assertIn("archive-context-unreferenced-archive", rendered)
+            self.assertIn("archive-context-closeout-evidence-capsule-summary", rendered)
+            self.assertIn("complete=1", rendered)
+            self.assertIn("missing=", rendered)
+            self.assertIn("new writeback --archive-active-plan materializes", rendered)
+            self.assertIn("archive-context-closeout-evidence-capsule-missing", rendered)
+            self.assertIn("historical backfill", rendered)
             self.assertIn("archive-context-boundary", rendered)
             self.assertIn("cannot approve repair, lifecycle movement, closeout, archive", rendered)
 
@@ -3444,7 +3700,7 @@ class CliTests(unittest.TestCase):
             (["incubate", "--help"], "Advanced mutating command: create or append explicit future-idea incubation"),
             (["plan", "--help"], "Advanced mutating command: create or replace a deterministic active"),
             (["memory-hygiene", "--help"], "Advanced mutating command: apply explicit research/incubation lifecycle"),
-            (["roadmap", "--help"], "Advanced mutating command: add, update, or normalize explicit accepted-work"),
+            (["roadmap", "--help"], "Advanced mutating command: add, batch-add, update, or normalize explicit"),
             (["meta-feedback", "--help"], "Advanced mutating command: collect MLH-Fix-Candidate meta-feedback"),
             (["adapter", "--help"], "Advanced diagnostic: inspect or serve optional adapter"),
             (["attach", "--help"], "Compatibility command: preview or apply workflow scaffold attachment"),
@@ -3583,6 +3839,104 @@ class CliTests(unittest.TestCase):
             self.assertIn('status: "draft"', note_text)
             self.assertIn('route: "adrs"', note_text)
             self.assertIn("# Office Target Architecture", note_text)
+
+    def test_intake_apply_uses_verification_target_for_plain_evidence_without_marking_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            target = "project/" + "verification/hook-policy-packet.md"
+            text = (
+                "Verification evidence decision packet.\n"
+                "safe_to_continue_existing_sequence: false\n"
+                "new_slice_candidates: hook-policy-verification-intake-owner-route-hardening"
+            )
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "intake", "--dry-run", "--text", text, "--target", target])
+
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("classify input as verification", dry_rendered)
+            self.assertIn("target route 'verification' matched weak cue", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "intake", "--apply", "--text", text, "--target", target])
+
+            self.assertEqual(apply_code, 0)
+            self.assertNotEqual(before, snapshot_tree(root))
+            self.assertIn("intake-written", apply_output.getvalue())
+            note_text = (root / target).read_text(encoding="utf-8")
+            self.assertIn('status: "partial"', note_text)
+            self.assertIn('route: "verification"', note_text)
+            self.assertIn("safe_to_continue_existing_sequence: false", note_text)
+
+    def test_intake_apply_keeps_decision_packet_status_partial_despite_success_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "verification/hook-policy-packet.md"
+            text = (
+                "Decision packet for hook policy audit.\n"
+                "confirmed_fixes:\n"
+                "- pytest passed for the focused replay\n"
+                "safe_to_continue_existing_sequence: false\n"
+                "new_slice_candidates: hook-policy-extra-route-coverage\n"
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intake", "--apply", "--text", text, "--target", target])
+
+            self.assertEqual(code, 0)
+            rendered = output.getvalue()
+            self.assertIn("intake-verification-frontmatter-status", rendered)
+            self.assertIn("status='partial' (derived)", rendered)
+            note_text = (root / target).read_text(encoding="utf-8")
+            self.assertIn('status: "partial"', note_text)
+            self.assertIn("pytest passed for the focused replay", note_text)
+
+    def test_intake_apply_accepts_explicit_verification_status_and_separates_payload_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "verification/hook-policy-packet.md"
+            text = (
+                "---\n"
+                'title: "Inner Packet Title"\n'
+                'status: "complete"\n'
+                "---\n"
+                "# Inner Packet Title\n\n"
+                "Decision packet.\n"
+                "safe_to_continue_existing_sequence: true\n"
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--title",
+                        "Hook Policy Decision Packet",
+                        "--status",
+                        "pending",
+                        "--text",
+                        text,
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            note_text = (root / target).read_text(encoding="utf-8")
+            self.assertTrue(note_text.startswith('---\ntitle: "Hook Policy Decision Packet"\nstatus: "pending"\nroute: "verification"\n'))
+            self.assertIn("## Intake Payload Frontmatter", note_text)
+            self.assertIn('status: "complete"', note_text)
+            self.assertIn("## Intake Payload\n\n# Inner Packet Title", note_text)
+            self.assertIn("safe_to_continue_existing_sequence: true", note_text)
 
     def test_intake_apply_accepts_research_prompt_feature_idea_into_live_incubation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3972,6 +4326,85 @@ class CliTests(unittest.TestCase):
             self.assertIn("repo-visible `diagnostic` output artifact exists at `project/verification/product-diff-diagnostic.md`", plan_text)
             self.assertIn("product tests are not used as primary proof", plan_text)
             self.assertIn('active_phase: "phase-1-diagnostic-scope"', state_text)
+            self.assertNotIn("Implement the roadmap-backed behavior", plan_text)
+            self.assertNotIn("PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src", plan_text)
+
+    def test_plan_renders_route_hygiene_write_scope_as_one_owner_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/hook-tail.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                "status: incubating\n"
+                "title: Hook Tail\n"
+                "---\n"
+                "# Hook Tail\n\n"
+                "[MLH-Fix-Candidate]\n\n"
+                "- manual_step: archive covered route-hygiene tails without splitting owner writes.\n"
+                "- expected_owner_command: memory-hygiene --archive-covered should own source, archive, and roadmap writes.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Route Hygiene Tail Cleanup\n\n"
+                "- `id`: `route-hygiene-tail-cleanup`\n"
+                "- `status`: `accepted`\n"
+                "- `stage`: `route-hygiene-cleanup`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `route-hygiene-tail-cleanup`\n"
+                "- `slice_goal`: `Close covered lifecycle route tails with owner-route cleanup.`\n"
+                "- `slice_members`: `[\"route-hygiene-tail-cleanup\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `route hygiene only; no product source mutation`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `target_artifacts`: "
+                "[\"project/plan-incubation/hook-tail.md\", \"project/archive/reference/incubation\", \"project/roadmap.md\"]\n"
+                "- `verification_summary`: `memory-hygiene dry-run/apply and check verify route hygiene.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "- `deliverable_class`: `route-hygiene`\n"
+                "- `implementation_allowed`: `false`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "route-hygiene-tail-cleanup"])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("plan-non-implementation-contract", dry_rendered)
+            self.assertIn(
+                "work_class=non_implementation, deliverable_class=route-hygiene, implementation_allowed=false",
+                dry_rendered,
+            )
+            self.assertIn("candidate task: Produce route hygiene deliverable for roadmap item route-hygiene-tail-cleanup.", dry_rendered)
+            self.assertNotIn("candidate task: Implement roadmap item route-hygiene-tail-cleanup.", dry_rendered)
+            self.assertNotIn("plan-verification-gate-target-tests", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "route-hygiene-tail-cleanup"])
+            self.assertEqual(apply_code, 0)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('work_class: "non_implementation"', plan_text)
+            self.assertIn('deliverable_class: "route-hygiene"', plan_text)
+            self.assertIn("implementation_allowed: false", plan_text)
+            self.assertIn('active_phase: "phase-1-route-hygiene-scope"', plan_text)
+            self.assertIn("### phase-1-route-hygiene-scope", plan_text)
+            self.assertIn("### phase-2-route-hygiene-disposition", plan_text)
+            self.assertIn("### phase-3-route-hygiene-state-transfer", plan_text)
+            self.assertIn(
+                "- write_scope: `project/plan-incubation/hook-tail.md`, `project/archive/reference/incubation`, `project/roadmap.md`",
+                plan_text,
+            )
+            self.assertIn("reviewed route-hygiene owner dry-run/apply touches only declared route scope", plan_text)
+            self.assertIn('active_phase: "phase-1-route-hygiene-scope"', state_text)
             self.assertNotIn("Implement the roadmap-backed behavior", plan_text)
             self.assertNotIn("PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src", plan_text)
 
@@ -4728,9 +5161,9 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(duplicate_dry_run):
                 self.assertEqual(main([*common_args, "--dry-run"]), 0)
             duplicate_rendered = duplicate_dry_run.getvalue()
-            self.assertIn("agent-run-record-refused", duplicate_rendered)
-            self.assertIn("dry-run refused before apply", duplicate_rendered)
-            self.assertIn("evidence record dry-run was refused before any agent run evidence record preview became reliable", duplicate_rendered)
+            self.assertIn("agent-run-record-refresh-target", duplicate_rendered)
+            self.assertIn("agent-run-record-refresh-current", duplicate_rendered)
+            self.assertNotIn("agent-run-record-refused", duplicate_rendered)
             self.assertNotIn("would create route project/verification/agent-runs/run-1.md", duplicate_rendered)
 
             clean_check = io.StringIO()
@@ -4747,6 +5180,108 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(stale_check):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             self.assertIn("check-agent-run-record-stale", stale_check.getvalue())
+
+            record_rel = "project/verification/" + "agent-runs/run-1.md"
+            changed_rel = "src/" + "changed.py"
+            refresh_dry_run = io.StringIO()
+            with redirect_stdout(refresh_dry_run):
+                self.assertEqual(main([*common_args, "--dry-run"]), 0)
+            refresh_dry_rendered = refresh_dry_run.getvalue()
+            self.assertIn("agent-run-record-refresh-dry-run", refresh_dry_rendered)
+            self.assertIn(f"would refresh route {record_rel}", refresh_dry_rendered)
+            self.assertIn(f"{changed_rel} sha256=", refresh_dry_rendered)
+
+            refresh_apply = io.StringIO()
+            with redirect_stdout(refresh_apply):
+                self.assertEqual(main([*common_args, "--apply"]), 0)
+            refresh_apply_rendered = refresh_apply.getvalue()
+            self.assertIn("agent-run-record-refreshed", refresh_apply_rendered)
+            self.assertIn(f"refreshed route {record_rel}", refresh_apply_rendered)
+
+            refreshed_check = io.StringIO()
+            with redirect_stdout(refreshed_check):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertNotIn("check-agent-run-record-stale", refreshed_check.getvalue())
+
+    def test_evidence_record_refuses_self_output_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            changed_ref = "src/" + "changed.py"
+            plan_ref = "project/" + "implementation-" + "plan.md"
+            verification_ref = "project/verification/" + "smoke.md"
+            record_ref = "project/verification/" + "agent-runs/run-self.md"
+            (root / "src").mkdir()
+            (root / "src" / "changed.py").write_text("print('before')\n", encoding="utf-8")
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification" / "smoke.md").write_text(
+                "---\n"
+                'status: "passed"\n'
+                "---\n"
+                "# Smoke Verification\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            common_args = [
+                "--root",
+                str(root),
+                "evidence",
+                "--record",
+                "--record-id",
+                "run-self",
+                "--role",
+                "coder",
+                "--actor",
+                "codex",
+                "--task",
+                "Implement source-bound run evidence.",
+                "--assigned-scope",
+                "agent-run-evidence-route-mvp",
+                "--runtime",
+                "local-shell",
+                "--worktree-id",
+                "main",
+                "--status",
+                "succeeded",
+                "--stop-reason",
+                "verification-passed",
+                "--attempt-budget",
+                "1/3",
+                "--input-ref",
+                plan_ref,
+                "--output-ref",
+                record_ref,
+                "--claimed-path",
+                changed_ref,
+                "--changed-file",
+                changed_ref,
+                "--command",
+                "pytest -q tests/test_cli.py",
+                "--verification-ref",
+                verification_ref,
+                "--docs-decision",
+                "updated",
+                "--residual-risk",
+                "none known",
+            ]
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                self.assertEqual(main([*common_args, "--dry-run"]), 0)
+            dry_run_rendered = dry_run_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("agent-run-record-refused", dry_run_rendered)
+            self.assertIn("--output-ref must not point at the record target", dry_run_rendered)
+            self.assertIn("self-referential agent run records become stale immediately", dry_run_rendered)
+            self.assertNotIn(f"would create route {record_ref}", dry_run_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main([*common_args, "--apply"]), 2)
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("agent-run-record-refused", apply_rendered)
+            self.assertIn("apply refused before writing evidence", apply_rendered)
 
     def test_check_reports_malformed_agent_run_records_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5207,6 +5742,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.mlhd-autostart.v1", manifest["schema"])
             self.assertEqual("<root>", manifest["root"])
             self.assertIn("<root>", manifest["command_template"])
+            self.assertEqual(["mylittleharness", "--root", "<root>", "mlhd", "start", "--apply"], manifest["command_template"])
+            self.assertEqual(["mylittleharness", "--root", "<root>", "mlhd", "run-once", "--apply"], manifest["tick_command_template"])
             self.assertNotIn(str(root), manifest_text)
             self.assertFalse(manifest["os_autostart_entry_created"])
             self.assertFalse(manifest["network_listener_started"])
@@ -5281,9 +5818,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
             before = snapshot_tree_bytes(root)
+            worker = type("Worker", (), {"pid": 424242})()
 
             start_output = io.StringIO()
-            with redirect_stdout(start_output):
+            with patch("mylittleharness.daemon.subprocess.Popen", return_value=worker) as popen, redirect_stdout(start_output):
                 self.assertEqual(main(["--root", str(root), "mlhd", "start", "--apply"]), 0)
 
             after_start = snapshot_tree_bytes(root)
@@ -5301,7 +5839,12 @@ class CliTests(unittest.TestCase):
             )
             rendered = start_output.getvalue()
             self.assertIn("mlhd-start-apply", rendered)
+            self.assertIn("launched one local background polling worker", rendered)
             self.assertIn("pid, lock, heartbeat, state, and event log files", rendered)
+            self.assertEqual(1, popen.call_count)
+            popen_args = popen.call_args.args[0]
+            self.assertIn("-c", popen_args)
+            self.assertIn(str(root), popen_args)
 
             runtime_dir = root / ".mylittleharness/runtime/mlhd"
             self.assertTrue((runtime_dir / "pid.json").is_file())
@@ -5309,6 +5852,12 @@ class CliTests(unittest.TestCase):
             self.assertTrue((runtime_dir / "heartbeat.json").is_file())
             self.assertTrue((runtime_dir / "state.json").is_file())
             self.assertTrue((runtime_dir / "events.jsonl").is_file())
+            pid_payload = json.loads((runtime_dir / "pid.json").read_text(encoding="utf-8"))
+            self.assertEqual("background-worker", pid_payload["kind"])
+            self.assertEqual(worker.pid, pid_payload["pid"])
+            state_payload = json.loads((runtime_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual("running", state_payload["status"])
+            self.assertEqual(["<python>", "-c", "<mlhd-background-projection-refresh-loop>", "<root>", "2", "1"], state_payload["worker_command_template"])
 
             status_json = io.StringIO()
             with redirect_stdout(status_json):
@@ -5318,6 +5867,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.mlhd-control-plane.v1", payload["schema"])
             self.assertEqual(".mylittleharness/runtime/mlhd", payload["runtime_dir"])
             self.assertIn(payload["control_status"], {"running", "stale"})
+            self.assertEqual(worker.pid, payload["pid"])
             self.assertFalse(payload["network_listener_started"])
             self.assertFalse(payload["autostart_installed"])
             self.assertFalse(payload["filesystem_watcher_started"])
@@ -5404,6 +5954,106 @@ class CliTests(unittest.TestCase):
             self.assertEqual("refreshed", payload["projection_pulse"]["last_refresh_status"])
             self.assertFalse(payload["projection_pulse"]["dirty"])
 
+            status_text = io.StringIO()
+            with redirect_stdout(status_text):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status"]), 0)
+            self.assertIn("projection_refresh_status=refreshed", status_text.getvalue())
+
+            doctor_text = io.StringIO()
+            with redirect_stdout(doctor_text):
+                self.assertEqual(main(["--root", str(root), "mlhd", "doctor"]), 0)
+            self.assertIn("projection_refresh_status=refreshed", doctor_text.getvalue())
+
+    def test_mlhd_run_once_writes_source_bound_context_capsule_for_dashboard_and_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            state_rel = "/".join(("project", "project-state.md"))
+            plan_rel = "/".join(("project", "implementation-plan.md"))
+            capsule_rel = "/".join((".mylittleharness", "generated", "context-memory", "latest.json"))
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply", "--quiet-period-seconds", "0"]), 0)
+
+            rendered = apply_output.getvalue()
+            self.assertIn("context-memory-capsule-refreshed", rendered)
+            capsule_path = root / capsule_rel
+            self.assertTrue(capsule_path.is_file())
+            capsule = json.loads(capsule_path.read_text(encoding="utf-8"))
+            self.assertEqual("mylittleharness.source-bound-context-memory-capsule.v1", capsule["schema"])
+            self.assertEqual("current", capsule["status"])
+            self.assertFalse(capsule["cannot_approve"] == [])
+            source_refs = {row["rel_path"]: row for row in capsule["source_refs"]}
+            self.assertIn(state_rel, source_refs)
+            self.assertIn(plan_rel, source_refs)
+            self.assertRegex(source_refs[state_rel]["sha256"], r"^[0-9a-f]{64}$")
+
+            dashboard_json = io.StringIO()
+            with redirect_stdout(dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+            dashboard_payload = json.loads(dashboard_json.getvalue())
+            self.assertEqual("current", dashboard_payload["contextMemory"]["status"])
+            self.assertEqual("current", dashboard_payload["agentPacket"]["contextMemory"]["status"])
+            self.assertEqual("current", dashboard_payload["connectReadiness"]["contextMemory"]["status"])
+
+            hook_json = io.StringIO()
+            with redirect_stdout(hook_json):
+                self.assertEqual(main(["--root", str(root), "hooks", "--run", "session-start", "--json"]), 0)
+            hook_payload = json.loads(hook_json.getvalue())
+            self.assertEqual("current", hook_payload["agentPacket"]["contextMemory"]["status"])
+            self.assertIn("context memory: status=current", hook_payload["additional_context"])
+
+            state_path = root / state_rel
+            state_path.write_text(state_path.read_text(encoding="utf-8") + "\nDurable change after capsule.\n", encoding="utf-8")
+            stale_dashboard_json = io.StringIO()
+            with redirect_stdout(stale_dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+            stale_payload = json.loads(stale_dashboard_json.getvalue())
+            self.assertEqual("stale", stale_payload["contextMemory"]["status"])
+            self.assertIn(state_rel, stale_payload["contextMemory"]["stale_or_unknown"])
+
+    def test_mlhd_start_worker_refreshes_dirty_projection_cache_without_manual_warm_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nmlhd background refresh probe\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+
+            with patch("mylittleharness.daemon.MLHD_WORKER_INTERVAL_SECONDS", 0.2):
+                try:
+                    start_output = io.StringIO()
+                    with redirect_stdout(start_output):
+                        self.assertEqual(main(["--root", str(root), "mlhd", "start", "--apply"]), 0)
+                    self.assertIn("mlhd-start-apply", start_output.getvalue())
+
+                    deadline = time.time() + 6
+                    while time.time() < deadline:
+                        if not (root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists() and not (
+                            root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME
+                        ).exists():
+                            break
+                        time.sleep(0.2)
+
+                    self.assertFalse((root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists())
+                    self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
+                    refresh_payload = json.loads((runtime_dir / "projection-refresh.json").read_text(encoding="utf-8"))
+                    self.assertEqual("refreshed", refresh_payload["status"])
+
+                    dashboard_json = io.StringIO()
+                    with redirect_stdout(dashboard_json):
+                        self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+                    payload = json.loads(dashboard_json.getvalue())
+                    self.assertEqual("current", payload["connectReadiness"]["cache"]["artifacts"])
+                    self.assertEqual("current", payload["connectReadiness"]["cache"]["sqlite_index"])
+                    self.assertEqual("refreshed", payload["connectReadiness"]["mlhd"]["lastRefreshStatus"])
+                finally:
+                    with redirect_stdout(io.StringIO()):
+                        main(["--root", str(root), "mlhd", "stop", "--apply"])
+
     def test_mlhd_start_apply_recovers_stale_pid_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -5412,9 +6062,10 @@ class CliTests(unittest.TestCase):
             (runtime_dir / "pid.json").write_text('{"pid": 999999999, "schema": "test"}\n', encoding="utf-8")
             (runtime_dir / "lock.json").write_text('{"pid": 999999999, "schema": "test"}\n', encoding="utf-8")
             before = snapshot_tree_bytes(root)
+            worker = type("Worker", (), {"pid": 515151})()
 
             output = io.StringIO()
-            with redirect_stdout(output):
+            with patch("mylittleharness.daemon.subprocess.Popen", return_value=worker), redirect_stdout(output):
                 self.assertEqual(main(["--root", str(root), "mlhd", "start", "--apply"]), 0)
 
             after = snapshot_tree_bytes(root)
@@ -5433,7 +6084,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("mlhd-start-stale-pid-recovered", output.getvalue())
             pid_payload = json.loads((runtime_dir / "pid.json").read_text(encoding="utf-8"))
             self.assertNotEqual(999999999, pid_payload["pid"])
-            self.assertEqual(os.getpid(), pid_payload["pid"])
+            self.assertEqual(worker.pid, pid_payload["pid"])
+            self.assertEqual("background-worker", pid_payload["kind"])
 
     def test_claim_apply_writes_repo_visible_claim_and_refuses_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7877,6 +8529,108 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("writeback-acceptance-evidence-class-mismatch", rendered)
 
+    def test_writeback_archive_active_plan_refuses_missing_declared_verification_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "hook-policy-audit-plan"\n'
+                'title: "Hook Policy Audit"\n'
+                'execution_slice: "hook-policy-audit"\n'
+                'primary_roadmap_item: "hook-policy-audit"\n'
+                'deliverable_class: "audit"\n'
+                "target_artifacts:\n"
+                '  - "project/verification/hook-policy-audit.md"\n'
+                'active_phase: "phase-1-audit"\n'
+                'phase_status: "complete"\n'
+                "---\n"
+                "# Hook Policy Audit\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Completed hook-policy-audit from imported research packet evidence.",
+                        "--verification",
+                        "mylittleharness --root . research-import --apply created project/research/hook-policy-decision-packet.md",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "No known residual risk.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertTrue(plan_path.exists())
+            self.assertIn("writeback-target-evidence-missing", rendered)
+            self.assertIn("project/verification/hook-policy-audit.md", rendered)
+            self.assertIn("reviewed artifact substitution", rendered)
+
+    def test_writeback_archive_active_plan_accepts_reviewed_declared_target_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            replacement_path = root / "project/research/hook-policy-decision-packet.md"
+            replacement_path.parent.mkdir(parents=True, exist_ok=True)
+            replacement_path.write_text("# Hook Policy Decision Packet\n\nsafe_to_continue_existing_sequence: true\n", encoding="utf-8")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "hook-policy-audit-plan"\n'
+                'title: "Hook Policy Audit"\n'
+                'execution_slice: "hook-policy-audit"\n'
+                'primary_roadmap_item: "hook-policy-audit"\n'
+                'deliverable_class: "audit"\n'
+                "target_artifacts:\n"
+                '  - "project/verification/hook-policy-audit.md"\n'
+                'active_phase: "phase-1-audit"\n'
+                'phase_status: "complete"\n'
+                "---\n"
+                "# Hook Policy Audit\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Archived hook-policy-audit after reviewed artifact substitution: before project/verification/hook-policy-audit.md; after project/research/hook-policy-decision-packet.md.",
+                        "--verification",
+                        "project/research/hook-policy-decision-packet.md records the audit decision packet for hook-policy-audit.",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "Artifact substitution residual risk: before project/verification/hook-policy-audit.md; after project/research/hook-policy-decision-packet.md; original target remains missing but reviewed substitution is explicit.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertFalse(plan_path.exists())
+            self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertNotIn("writeback-target-evidence-missing", rendered)
+
     def test_writeback_refuses_fan_in_review_without_disposition_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="pending")
@@ -8106,6 +8860,98 @@ class CliTests(unittest.TestCase):
             self.assertIn("writeback-product-diff-write-scope", rendered)
             self.assertNotIn("writeback-product-diff-write-scope-blocked", rendered)
             self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
+
+    def test_writeback_allows_explicit_product_source_project_specs_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = root / "project/project-state.md"
+            specs_rel = "project/specs/workflow/workflow-artifact-model-spec.md"
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8")
+                .replace('  - "tests/test_cli.py"\n', f'  - "tests/test_cli.py"\n  - "{specs_rel}"\n')
+                .replace(
+                    "- write_scope: `src/allowed.py`, `tests/test_cli.py`\n",
+                    f"- write_scope: `src/allowed.py`, `tests/test_cli.py`, `{specs_rel}`\n",
+                ),
+                encoding="utf-8",
+            )
+            changed = (VcsChangedPath("M", specs_rel),)
+            posture = VcsPosture(
+                root=product_root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                top_level=str(product_root),
+                changed_count=len(changed),
+                changed_samples=changed,
+                changed_paths=changed,
+            )
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        f"Implemented product-diff-scope-gate in {specs_rel}",
+                        "--verification",
+                        f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed for {specs_rel}",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "none known",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-product-diff-write-scope", rendered)
+            self.assertNotIn("writeback-product-diff-write-scope-blocked", rendered)
+            self.assertIn(specs_rel, rendered)
+            self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
+
+    def test_check_keeps_product_source_project_state_out_of_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            plan_path = root / "project/implementation-plan.md"
+            state_rel = "project/project-state.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8")
+                .replace('  - "tests/test_cli.py"\n', f'  - "tests/test_cli.py"\n  - "{state_rel}"\n')
+                .replace(
+                    "- write_scope: `src/allowed.py`, `tests/test_cli.py`\n",
+                    f"- write_scope: `src/allowed.py`, `tests/test_cli.py`, `{state_rel}`\n",
+                ),
+                encoding="utf-8",
+            )
+            changed = (VcsChangedPath("M", state_rel),)
+            posture = VcsPosture(
+                root=product_root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                top_level=str(product_root),
+                changed_count=len(changed),
+                changed_samples=changed,
+                changed_paths=changed,
+            )
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("active-plan-product-diff-write-scope", rendered)
+            self.assertIn(state_rel, rendered)
 
     def test_writeback_allows_disclosed_out_of_scope_product_diff_residual_risk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9327,7 +10173,7 @@ class CliTests(unittest.TestCase):
             note_text = note_path.read_text(encoding="utf-8")
             self.assertIn('topic: "Future Ideas Rail"', note_text)
             self.assertIn('status: "incubating"', note_text)
-            self.assertIn('source: "incubate cli"', note_text)
+            self.assertIn('source: "MyLittleHarness incubation route"', note_text)
             self.assertIn("Non-authority note: incubation is temporary synthesis", note_text)
             self.assertIn("First paragraph.\n\nSecond paragraph with detail.\n\n- bullet one\n- bullet two", note_text)
 
@@ -9824,6 +10670,112 @@ class CliTests(unittest.TestCase):
             self.assertIn("imported_text sha256=", text)
             self.assertIn("Promotion into specs, plans, or project state requires", text)
 
+    def test_research_import_dry_run_reports_decision_packet_field_completeness_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            packet = (
+                "Decision packet\n"
+                "confirmed_fixes:\n"
+                "- intake route recognizes verification packet targets\n"
+                "new_slice_candidates: hook-policy-extra-route-coverage\n"
+                "scope_expansions: []\n"
+                "blocked_followups: none\n"
+                "safe_to_continue_existing_sequence: false\n"
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--dry-run",
+                        "--title",
+                        "Hook Policy Decision Packet",
+                        "--text",
+                        packet,
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-decision-packet-field-check", rendered)
+            self.assertIn("confirmed_fixes=present", rendered)
+            self.assertIn("new_slice_candidates=present", rendered)
+            self.assertIn("Field safe_to_continue_existing_sequence -> present value=false", rendered)
+            self.assertIn("parse-visible decision packet gate signal detected: fork fields: new_slice_candidates", rendered)
+            self.assertIn("--text-file -", rendered)
+
+    def test_research_import_dry_run_warns_on_incomplete_decision_packet_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--dry-run",
+                        "--title",
+                        "Incomplete Decision Packet",
+                        "--text",
+                        "Decision packet\nconfirmed_fixes: audit ran but no gate field was recorded\n",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-decision-packet-incomplete", rendered)
+            self.assertIn("lacks a parse-visible safe-to-continue true value or non-empty fork fields", rendered)
+            self.assertIn("safe_to_continue_existing_sequence=missing", rendered)
+
+    def test_research_import_apply_preserves_multiline_decision_packet_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            packet = (
+                "Decision packet\n"
+                "confirmed_fixes:\n"
+                "- route-substitution bug is captured\n"
+                "new_slice_candidates: hook-policy-extra-route-coverage\n"
+                "safe_to_continue_existing_sequence: false\n"
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--apply",
+                        "--title",
+                        "Hook Policy Decision Packet",
+                        "--text",
+                        packet,
+                        "--target",
+                        "project/research/hook-policy-decision-packet.md",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertNotEqual(before, snapshot_tree(root))
+            rendered = output.getvalue()
+            self.assertIn("research-import-decision-packet-field-check", rendered)
+            note_text = (root / "project/research/hook-policy-decision-packet.md").read_text(encoding="utf-8")
+            self.assertIn("## Decision Packet Field Check", note_text)
+            self.assertIn("Field safe_to_continue_existing_sequence -> present, value summary `false`", note_text)
+            self.assertIn("## Imported Research", note_text)
+            self.assertIn("confirmed_fixes:\n- route-substitution bug is captured", note_text)
+            self.assertIn("safe_to_continue_existing_sequence: false", note_text)
+
     def test_research_import_surfaces_active_lifecycle_provenance_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="pending")
@@ -10270,6 +11222,272 @@ class CliTests(unittest.TestCase):
             self.assertIn("- `related_specs`: `[\"project/specs/workflow/workflow-plan-synthesis-spec.md\"]`", roadmap_text)
             self.assertIn("- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`", roadmap_text)
             self.assertIn("- `carry_forward`: `Keep roadmap sequencing advisory only.`", roadmap_text)
+
+    def test_roadmap_add_many_dry_run_reports_all_items_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            (root / "project/verification").mkdir(exist_ok=True)
+            (root / "project/verification/batch-one.md").write_text("# Batch One\n", encoding="utf-8")
+            (root / "project/verification/batch-two.md").write_text("# Batch Two\n", encoding="utf-8")
+            manifest = root / "project/verification/roadmap-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "batch-roadmap-one",
+                                "title": "Batch Roadmap One",
+                                "status": "accepted",
+                                "order": 65,
+                                "dependency": "minimal-roadmap-mutation-rail",
+                                "source_members": ["project/verification/batch-one.md"],
+                                "target_artifacts": ["src/mylittleharness/roadmap.py"],
+                                "verification_summary": "Batch dry-run validates item one.",
+                                "docs_decision": "not-needed",
+                            },
+                            {
+                                "item_id": "batch-roadmap-two",
+                                "title": "Batch Roadmap Two",
+                                "status": "accepted",
+                                "order": 66,
+                                "dependency": "batch-roadmap-one",
+                                "source_members": ["project/verification/batch-two.md"],
+                                "target_artifacts": ["tests/test_cli.py"],
+                                "verification_summary": "Batch dry-run validates item two.",
+                                "docs_decision": "not-needed",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--dry-run", "--action", "add-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-batch-dry-run", rendered)
+            self.assertIn("would process 2 roadmap item(s) through one add-many batch", rendered)
+            self.assertIn("would create item 1: batch-roadmap-one", rendered)
+            self.assertIn("would create item 2: batch-roadmap-two", rendered)
+            self.assertIn("would add roadmap item: batch-roadmap-one", rendered)
+            self.assertIn("would add roadmap item: batch-roadmap-two", rendered)
+            self.assertEqual(1, rendered.count("would write route project/roadmap.md"))
+            self.assertIn("apply would validate every batch item before writing project/roadmap.md once", rendered)
+
+    def test_roadmap_add_many_apply_writes_roadmap_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            manifest = root / "roadmap-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "batch-roadmap-one",
+                                "title": "Batch Roadmap One",
+                                "status": "accepted",
+                                "order": 65,
+                                "dependency": "minimal-roadmap-mutation-rail",
+                                "target_artifacts": ["src/mylittleharness/roadmap.py"],
+                                "verification_summary": "Batch apply validates item one.",
+                                "docs_decision": "not-needed",
+                            },
+                            {
+                                "item_id": "batch-roadmap-two",
+                                "title": "Batch Roadmap Two",
+                                "status": "accepted",
+                                "order": 66,
+                                "dependency": "batch-roadmap-one",
+                                "target_artifacts": ["tests/test_cli.py"],
+                                "verification_summary": "Batch apply validates item two.",
+                                "docs_decision": "not-needed",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--apply", "--action", "add-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("roadmap-batch-written", rendered)
+            self.assertEqual(1, rendered.count("wrote route project/roadmap.md"))
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/roadmap.md"], changed)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            self.assertIn("### Batch Roadmap One", roadmap_text)
+            self.assertIn("### Batch Roadmap Two", roadmap_text)
+            second_block = roadmap_text.split("### Batch Roadmap Two", 1)[1]
+            self.assertIn('- `dependencies`: `["batch-roadmap-one"]`', second_block)
+
+    def test_roadmap_add_many_accepts_simple_yaml_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            manifest = root / "roadmap-batch.yaml"
+            manifest.write_text(
+                "items:\n"
+                "  - item_id: yaml-roadmap-one\n"
+                "    title: YAML Roadmap One\n"
+                "    status: accepted\n"
+                "    order: 65\n"
+                "    dependency: minimal-roadmap-mutation-rail\n"
+                "    target_artifacts:\n"
+                "      - src/mylittleharness/roadmap.py\n"
+                "    verification_summary: YAML batch dry-run validates item one.\n"
+                "    docs_decision: not-needed\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--dry-run", "--action", "add-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("would create item 1: yaml-roadmap-one", rendered)
+            self.assertIn("would add roadmap item: yaml-roadmap-one", rendered)
+
+    def test_roadmap_add_many_refuses_invalid_manifest_without_partial_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            manifest = root / "roadmap-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "batch-roadmap-one",
+                                "title": "Batch Roadmap One",
+                                "status": "accepted",
+                                "order": 65,
+                                "target_artifacts": ["src/mylittleharness/roadmap.py"],
+                                "verification_summary": "Batch apply validates item one.",
+                                "docs_decision": "not-needed",
+                            },
+                            {
+                                "item_id": "batch-roadmap-two",
+                                "title": "Batch Roadmap Two",
+                                "status": "accepted",
+                                "order": 66,
+                                "target_artifacts": ["tests/test_cli.py"],
+                                "verification_summary": "Batch apply should refuse before writing.",
+                                "docs_decision": "pending",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--apply", "--action", "add-many", "--items-file", str(manifest)])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            rendered = output.getvalue()
+            self.assertIn("--docs-decision must be one of", rendered)
+            self.assertNotIn("roadmap-batch-written", rendered)
+
+    def test_roadmap_add_bootstraps_missing_optional_roadmap_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            roadmap_path = root / "project/roadmap.md"
+            self.assertFalse(roadmap_path.exists())
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--dry-run",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "first-roadmap-item",
+                        "--title",
+                        "First Roadmap Item",
+                        "--status",
+                        "accepted",
+                        "--order",
+                        "10",
+                        "--target-artifact",
+                        "src/mylittleharness/roadmap.py",
+                        "--verification-summary",
+                        "Bootstrap regression passed.",
+                        "--docs-decision",
+                        "not-needed",
+                    ]
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-bootstrap", dry_rendered)
+            self.assertIn("would bootstrap missing optional roadmap route", dry_rendered)
+            self.assertIn("would create route project/roadmap.md", dry_rendered)
+            self.assertIn("before_hash=missing", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "first-roadmap-item",
+                        "--title",
+                        "First Roadmap Item",
+                        "--status",
+                        "accepted",
+                        "--order",
+                        "10",
+                        "--target-artifact",
+                        "src/mylittleharness/roadmap.py",
+                        "--verification-summary",
+                        "Bootstrap regression passed.",
+                        "--docs-decision",
+                        "not-needed",
+                    ]
+                )
+
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertIn("roadmap-bootstrap", apply_rendered)
+            self.assertIn("created route project/roadmap.md", apply_rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/roadmap.md"], changed)
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            self.assertIn('id: "memory-routing-roadmap"', roadmap_text)
+            self.assertIn("## Items", roadmap_text)
+            self.assertIn("### First Roadmap Item", roadmap_text)
+            self.assertIn("- `id`: `first-roadmap-item`", roadmap_text)
+            self.assertIn("- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`", roadmap_text)
 
     def test_roadmap_add_dry_run_reports_order_aware_insertion_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -10925,6 +12143,148 @@ class CliTests(unittest.TestCase):
             self.assertIn("- Compacted done roadmap item `done-1`: archived plan `project/archive/plans/done-1.md`.", roadmap_text)
             self.assertIn("- Compacted done roadmap item `done-2`: archived plan `project/archive/plans/done-2.md`.", roadmap_text)
 
+    def test_roadmap_update_replays_compacted_done_item_from_archived_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_roadmap_with_done_tail(root)
+            archive_dir = root / "project/archive/plans"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            (archive_dir / "done-1.md").write_text(
+                "---\n"
+                'title: "Replayed Done One"\n'
+                'related_roadmap_item: "done-1"\n'
+                "---\n"
+                "# Archived Done One\n",
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "roadmap",
+                            "--apply",
+                            "--action",
+                            "update",
+                            "--item-id",
+                            "next-live-work",
+                            "--status",
+                            "accepted",
+                        ]
+                    ),
+                    0,
+                )
+            roadmap_path = root / "project/roadmap.md"
+            compacted_text = roadmap_path.read_text(encoding="utf-8")
+            self.assertNotIn("### Done 1", compacted_text)
+            self.assertIn("- Compacted done roadmap item `done-1`: archived plan `project/archive/plans/done-1.md`.", compacted_text)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--dry-run",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "done-1",
+                        "--status",
+                        "accepted",
+                        "--target-artifact",
+                        "src/mylittleharness/roadmap.py",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-compacted-item-replay", rendered)
+            self.assertIn("would restore compacted roadmap item block(s) from Archived Completed History: done-1", rendered)
+            self.assertIn("would change field: compacted_roadmap_item_replay", rendered)
+            self.assertIn("would change field: archived_completed_history", rendered)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "done-1",
+                        "--status",
+                        "accepted",
+                        "--target-artifact",
+                        "src/mylittleharness/roadmap.py",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertIn("roadmap-compacted-item-replay", output.getvalue())
+            replayed_text = roadmap_path.read_text(encoding="utf-8")
+            self.assertIn("### Replayed Done One", replayed_text)
+            replayed_block = replayed_text.split("### Replayed Done One", 1)[1].split("### Next Live Work", 1)[0]
+            self.assertIn("- `id`: `done-1`", replayed_block)
+            self.assertIn("- `status`: `accepted`", replayed_block)
+            self.assertIn("- `archived_plan`: `project/archive/plans/done-1.md`", replayed_block)
+            self.assertIn("- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`", replayed_block)
+            self.assertIn("- `lifecycle_replay`: `compacted-roadmap-history`", replayed_block)
+            self.assertNotIn("- Compacted done roadmap item `done-1`", replayed_text)
+            self.assertIn("- Compacted done roadmap item `done-2`: archived plan `project/archive/plans/done-2.md`.", replayed_text)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                plan_code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "done-1", "--only-requested-item"])
+
+            plan_rendered = output.getvalue()
+            self.assertEqual(plan_code, 0)
+            self.assertIn("plan-synthesis-split-boundary", plan_rendered)
+            self.assertNotIn("plan-roadmap-compacted-item-refused", plan_rendered)
+
+    def test_plan_refuses_compacted_roadmap_item_until_replayed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_roadmap_with_done_tail(root)
+            archive_dir = root / "project/archive/plans"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            (archive_dir / "done-1.md").write_text("# Done 1 Plan\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "roadmap",
+                            "--apply",
+                            "--action",
+                            "update",
+                            "--item-id",
+                            "next-live-work",
+                            "--status",
+                            "accepted",
+                        ]
+                    ),
+                    0,
+                )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "done-1"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-roadmap-compacted-item-refused", rendered)
+            self.assertIn("roadmap item 'done-1' is compacted into Archived Completed History", rendered)
+            self.assertIn("roadmap --dry-run --action update --item-id done-1 --status accepted", rendered)
+
     def test_plan_dry_run_reports_compacted_dependency_archive_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -10969,6 +12329,113 @@ class CliTests(unittest.TestCase):
             self.assertIn("external dependencies remain outside the slice: done-1", rendered)
             self.assertIn("compacted dependency evidence: done-1 -> project/archive/plans/done-1.md", rendered)
             self.assertIn("roadmap-compacted-dependency-archive-missing", rendered)
+
+    def test_roadmap_update_accepts_compacted_dependency_with_history_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            write_roadmap_with_done_tail(root)
+            archive_segments = ("project", "arch" + "ive", "plans")
+            history_dir = root.joinpath(*archive_segments)
+            history_dir.mkdir(parents=True, exist_ok=True)
+            history_rel = "/".join((*archive_segments, "done-1.md"))
+            (history_dir / "done-1.md").write_text("# Done 1 Plan\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "roadmap",
+                            "--apply",
+                            "--action",
+                            "update",
+                            "--item-id",
+                            "next-live-work",
+                            "--status",
+                            "accepted",
+                        ]
+                    ),
+                    0,
+                )
+            roadmap_text = (root / "project" / "roadmap.md").read_text(encoding="utf-8")
+            self.assertNotIn("### Done 1", roadmap_text)
+            self.assertIn(f"- Compacted done roadmap item `done-1`: archived plan `{history_rel}`.", roadmap_text)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--dry-run",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "next-live-work",
+                        "--dependency",
+                        "done-1",
+                        "--slice-dependency",
+                        "done-1",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-archived-prerequisite-reference", rendered)
+            self.assertIn(f"dependencies done-1 -> {history_rel}", rendered)
+            self.assertIn(f"slice_dependencies done-1 -> {history_rel}", rendered)
+            self.assertNotIn("target item id is missing: done-1", rendered)
+
+    def test_roadmap_update_refuses_compacted_dependency_with_missing_history_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            write_roadmap_with_done_tail(root)
+            history_rel = "/".join(("project", "arch" + "ive", "plans", "done-1.md"))
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "roadmap",
+                            "--apply",
+                            "--action",
+                            "update",
+                            "--item-id",
+                            "next-live-work",
+                            "--status",
+                            "accepted",
+                        ]
+                    ),
+                    0,
+                )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "next-live-work",
+                        "--dependency",
+                        "done-1",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("archived dependency evidence for 'done-1' is missing", rendered)
+            self.assertIn(history_rel, rendered)
 
     def test_check_reports_missing_compacted_dependency_archive_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11289,6 +12756,61 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("roadmap-noop", output.getvalue())
+
+    def test_roadmap_update_warns_or_refuses_other_item_during_active_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            write_sample_roadmap(root)
+            write_active_roadmap_plan(root, "roadmap-operationalization-rail")
+            before = snapshot_tree(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                dry_run_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--dry-run",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "minimal-roadmap-mutation-rail",
+                        "--status",
+                        "blocked",
+                    ]
+                )
+
+            dry_run_rendered = dry_run_output.getvalue()
+            self.assertEqual(dry_run_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-active-plan-intake-policy", dry_run_rendered)
+            self.assertIn("active plan is open for roadmap item(s): roadmap-operationalization-rail", dry_run_rendered)
+            self.assertIn("meta-feedback --dry-run", dry_run_rendered)
+            self.assertIn("after plan_status=none run mylittleharness --root <root> roadmap --dry-run", dry_run_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "minimal-roadmap-mutation-rail",
+                        "--status",
+                        "blocked",
+                    ]
+                )
+
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-active-plan-intake-policy", apply_rendered)
+            self.assertIn("next_safe_command=mylittleharness --root <root> meta-feedback --dry-run", apply_rendered)
 
     def test_roadmap_apply_refuses_invalid_inputs_without_writes(self) -> None:
         cases = (
@@ -12488,7 +14010,13 @@ class CliTests(unittest.TestCase):
             before_stale = snapshot_tree(stale_destination)
 
             output = io.StringIO()
-            with patch.dict(os.environ, {"MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(stale_destination)}), redirect_stdout(output):
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(stale_destination),
+                    "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI": "1",
+                },
+            ), redirect_stdout(output):
                 code = main(
                     [
                         "--root",
@@ -12528,7 +14056,13 @@ class CliTests(unittest.TestCase):
             before_destination_roadmap = (destination / "project/roadmap.md").read_text(encoding="utf-8")
 
             output = io.StringIO()
-            with patch.dict(os.environ, {"MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(destination)}), redirect_stdout(output):
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(destination),
+                    "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI": "1",
+                },
+            ), redirect_stdout(output):
                 code = main(
                     [
                         "--root",
@@ -12559,6 +14093,45 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before_destination_roadmap, (destination / "project/roadmap.md").read_text(encoding="utf-8"))
             self.assertFalse((source / "project/plan-incubation/env-meta-feedback-routing.md").exists())
 
+    def test_meta_feedback_env_destination_disabled_by_default_in_github_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = make_root(base / "product", active=False, mirrors=False)
+            destination = make_central_mlh_dev_root(base / "mlh-dev")
+            write_sample_roadmap(destination)
+            before_source = snapshot_tree(source)
+            before_destination = snapshot_tree(destination)
+
+            output = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(destination),
+                    "GITHUB_ACTIONS": "true",
+                },
+            ), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(source),
+                        "meta-feedback",
+                        "--dry-run",
+                        "--topic",
+                        "Env meta feedback CI routing",
+                        "--note",
+                        "GitHub Actions should not activate local developer meta-feedback routing by default.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before_source, snapshot_tree(source))
+            self.assertEqual(before_destination, snapshot_tree(destination))
+            self.assertIn("destination selected from --root", rendered)
+            self.assertIn("meta-feedback-central-root-refused", rendered)
+            self.assertNotIn("meta-feedback-env-destination-used", rendered)
+            self.assertFalse((destination / "project/plan-incubation/env-meta-feedback-ci-routing.md").exists())
+
     def test_meta_feedback_to_root_routes_incubation_cluster_to_destination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -12570,7 +14143,13 @@ class CliTests(unittest.TestCase):
             before_destination_roadmap = (destination / "project/roadmap.md").read_text(encoding="utf-8")
 
             output = io.StringIO()
-            with patch.dict(os.environ, {"MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(base / "stale-env-root")}), redirect_stdout(output):
+            with patch.dict(
+                os.environ,
+                {
+                    "MYLITTLEHARNESS_META_FEEDBACK_ROOT": str(base / "stale-env-root"),
+                    "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI": "1",
+                },
+            ), redirect_stdout(output):
                 code = main(
                     [
                         "--root",
@@ -13319,15 +14898,131 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("docs ownership stays on exact files replacing", plan_text)
 
+    def test_plan_apply_gates_missing_generated_docs_target_to_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operating")
+            product_root = Path(tmp) / "product"
+            (product_root / "project/specs/workflow").mkdir(parents=True)
+            (product_root / "project/specs/workflow/workflow-plan-synthesis-spec.md").write_text(
+                "# Plan Synthesis Spec\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"\n',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Generated Docs Target Gate\n\n"
+                "- `id`: `generated-docs-target-gate`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `1`\n"
+                "- `execution_slice`: `generated-docs-target-gate`\n"
+                "- `slice_goal`: `Gate missing generated docs targets.`\n"
+                "- `slice_members`: `[\"generated-docs-target-gate\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `explicit closeout/writeback only`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"docs/specs/workflow/workflow-plan-synthesis-spec.md\", \"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Missing docs target must not become write scope.`\n"
+                "- `docs_decision`: `updated`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "generated-docs-target-gate",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-doc-target-missing", rendered)
+            self.assertIn("docs/specs/workflow/workflow-plan-synthesis-spec.md", rendered)
+            self.assertIn("project/specs/workflow/workflow-plan-synthesis-spec.md", rendered)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "- write_scope: `tests/test_cli.py`, `declare exact docs/spec/package metadata files before docs_decision=updated mutation`",
+                plan_text,
+            )
+            self.assertNotIn(
+                "- write_scope: `docs/specs/workflow/workflow-plan-synthesis-spec.md`",
+                plan_text,
+            )
+
+    def test_check_reports_missing_generated_docs_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operating")
+            product_root = Path(tmp) / "product"
+            (product_root / "project/specs/workflow").mkdir(parents=True)
+            (product_root / "project/specs/workflow/workflow-plan-synthesis-spec.md").write_text(
+                "# Plan Synthesis Spec\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"\n',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Generated Docs Target Gate\n\n"
+                "- `id`: `generated-docs-target-gate`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `1`\n"
+                "- `execution_slice`: `generated-docs-target-gate`\n"
+                "- `slice_goal`: `Gate missing generated docs targets.`\n"
+                "- `slice_members`: `[\"generated-docs-target-gate\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"docs/specs/workflow/workflow-plan-synthesis-spec.md\"]`\n"
+                "- `verification_summary`: `Missing docs target is reported.`\n"
+                "- `docs_decision`: `updated`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertIn("check-doc-target-missing", rendered)
+            self.assertIn("docs/specs/workflow/workflow-plan-synthesis-spec.md", rendered)
+            self.assertIn("project/specs/workflow/workflow-plan-synthesis-spec.md", rendered)
+
     def test_plan_apply_names_ci_gate_and_docs_scope_in_verification_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp) / "operating")
             target = Path(tmp) / "target"
             (target / ".github/workflows").mkdir(parents=True)
+            (target / "docs/specs").mkdir(parents=True)
             (target / ".github/workflows/ci.yml").write_text(
                 "name: ci\njobs:\n  test:\n    steps:\n      - run: uv run pytest tests/test_cli.py\n",
                 encoding="utf-8",
             )
+            (target / "docs/specs/plan-synthesis.md").write_text("# Plan Synthesis\n", encoding="utf-8")
             state_path = root / "project/project-state.md"
             state_path.write_text(
                 state_path.read_text(encoding="utf-8").replace(
@@ -13900,6 +15595,82 @@ class CliTests(unittest.TestCase):
             self.assertIn("## Explicit Task Input", next_plan_text)
             self.assertIn('primary_roadmap_item: "next-item"', next_plan_text)
 
+    def test_transition_refuses_next_plan_preflight_before_archive_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            write_transition_roadmap_with_next_source(root)
+            plan_rel = "project/" + "implementation-plan.md"
+            plan_path = root / plan_rel
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "current-preflight-transition"\n'
+                'title: "Current Preflight Transition"\n'
+                'primary_roadmap_item: "current-item"\n'
+                "covered_roadmap_items:\n"
+                '  - "current-item"\n'
+                "---\n"
+                "# Current Preflight Transition\n\n"
+                "## Closeout Summary\n\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: transition should refuse next plan before archive writes\n"
+                "- verification: transition preflight regression passed\n"
+                "- commit_decision: manual commit policy\n",
+                encoding="utf-8",
+            )
+            planning_target = "src/" + "mylittleharness/planning.py"
+            roadmap_path = root / ("project/" + "roadmap.md")
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            target_line = '- `target_artifacts`: `["' + planning_target + '"]`\n'
+            roadmap_path.write_text(
+                roadmap_text.replace(
+                    target_line,
+                    target_line + "- `deliverable_class`: `evidence`\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            command = [
+                "--root",
+                str(root),
+                "transition",
+                "--dry-run",
+                "--archive-active-plan",
+                "--from-active-plan",
+                "--current-roadmap-item",
+                "current-item",
+                "--next-roadmap-item",
+                "next-item",
+                "--only-requested-item",
+            ]
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(command)
+            dry_rendered = dry_output.getvalue()
+
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("transition-next-plan-preflight-refused", dry_rendered)
+            self.assertIn("has evidence deliverable intent", dry_rendered)
+            self.assertIn("dry-run refused before apply", dry_rendered)
+            self.assertNotIn("writeback-route-write", dry_rendered)
+            token = re.search(r"review token: ([0-9a-f]{16})", dry_rendered).group(1)
+
+            apply_command = command.copy()
+            apply_command[apply_command.index("--dry-run")] = "--apply"
+            apply_command.extend(["--review-token", token])
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(apply_command)
+            apply_rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("transition-next-plan-preflight-refused", apply_rendered)
+            self.assertIn("no apply writes after blocking errors", apply_rendered)
+            self.assertFalse(list((root / ("project/" + "archive/plans")).glob("*-current-preflight-transition.md")))
+
     def test_plan_apply_replaces_malformed_source_incubation_list_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -14138,6 +15909,103 @@ class CliTests(unittest.TestCase):
             self.assertIn("blocked multiple roadmap items", rendered)
             self.assertIn("grouped slice boundary marker(s) present", rendered)
             self.assertIn("advisory only and do not authorize multi-slice plan apply", rendered)
+
+    def test_plan_apply_refuses_downstream_slice_until_result_gate_dependency_is_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            _write_slice_result_gate_roadmap(root, audit_status="accepted")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "hook-policy-replay",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project" / "implementation-plan.md").exists())
+            self.assertIn("plan-slice-result-gate-refused", rendered)
+            self.assertIn("slice result gate dependency 'hook-policy-audit' has status 'accepted'", rendered)
+            self.assertIn("safe_to_continue_existing_sequence", rendered)
+
+    def test_plan_apply_refuses_downstream_slice_when_result_packet_forks_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            _write_slice_result_gate_roadmap(root, audit_status="done")
+            audit_packet = root / "project" / "verification" / "hook-policy-audit.md"
+            audit_packet.parent.mkdir(parents=True, exist_ok=True)
+            audit_packet.write_text(
+                "# Hook Policy Audit\n\n"
+                "safe_to_continue_existing_sequence: false\n"
+                "new_slice_candidates: [\"hook-policy-extra-route-coverage\"]\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "hook-policy-replay",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project" / "implementation-plan.md").exists())
+            self.assertIn("plan-slice-result-gate-refused", rendered)
+            self.assertIn("decision packet project/verification/hook-policy-audit.md records new_slice_candidates", rendered)
+            self.assertIn("update/add the required roadmap slice(s)", rendered)
+
+    def test_plan_apply_allows_downstream_slice_when_result_packet_is_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            _write_slice_result_gate_roadmap(root, audit_status="done")
+            audit_packet = root / "project" / "verification" / "hook-policy-audit.md"
+            audit_packet.parent.mkdir(parents=True, exist_ok=True)
+            audit_packet.write_text(
+                "# Hook Policy Audit\n\n"
+                "safe_to_continue_existing_sequence: true\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "hook-policy-replay",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-written", rendered)
+            self.assertNotIn("plan-slice-result-gate-refused", rendered)
+            plan_text = (root / "project" / "implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('primary_roadmap_item: "hook-policy-replay"', plan_text)
 
     def test_plan_apply_refuses_missing_roadmap_item_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -14838,11 +16706,16 @@ class CliTests(unittest.TestCase):
                         "updated",
                         "--state-writeback",
                         "archived active plan",
+                        "--verification",
+                        "archive apply tests passed",
+                        "--commit-decision",
+                        "manual commit policy",
                     ]
                 )
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertIn("writeback-archive-closeout-evidence-capsule", rendered)
             self.assertIn("writeback-route-write", rendered)
             self.assertIn("wrote route project/project-state.md", rendered)
             self.assertIn("created route project/archive/plans", rendered)
@@ -14854,10 +16727,18 @@ class CliTests(unittest.TestCase):
 
             archived_paths = list((root / "project/archive/plans").glob("*-lifecycle-close.md"))
             self.assertEqual(1, len(archived_paths))
-            self.assertIn("# Lifecycle Close", archived_paths[0].read_text(encoding="utf-8"))
+            archived_text = archived_paths[0].read_text(encoding="utf-8")
+            self.assertIn("# Lifecycle Close", archived_text)
 
             state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
             archived_rel = archived_paths[0].relative_to(root).as_posix()
+            self.assertIn("## MLH Closeout Writeback", archived_text)
+            self.assertIn("<!-- BEGIN mylittleharness-closeout-writeback v1 -->", archived_text)
+            self.assertIn(f"- archived_plan: {archived_rel}", archived_text)
+            self.assertIn("- docs_decision: updated", archived_text)
+            self.assertIn("- state_writeback: archived active plan", archived_text)
+            self.assertIn("- verification: archive apply tests passed", archived_text)
+            self.assertIn("- commit_decision: manual commit policy", archived_text)
             self.assertIn('plan_status: "none"', state_text)
             self.assertIn('active_plan: ""', state_text)
             self.assertIn(f'last_archived_plan: "{archived_rel}"', state_text)
@@ -14873,6 +16754,14 @@ class CliTests(unittest.TestCase):
             check_rendered = check_output.getvalue()
             self.assertIn("no active implementation plan is open", check_rendered)
             self.assertNotIn("stale-plan-file", check_rendered)
+
+            archive_check_output = io.StringIO()
+            with redirect_stdout(archive_check_output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "archive-context"]), 0)
+            archive_check_rendered = archive_check_output.getvalue()
+            self.assertIn("archive-context-closeout-evidence-capsule-summary", archive_check_rendered)
+            self.assertIn("complete=1", archive_check_rendered)
+            self.assertNotIn("archive-context-closeout-evidence-capsule-missing", archive_check_rendered)
 
             before_rerun = snapshot_tree(root)
             rerun_output = io.StringIO()
@@ -16346,6 +18235,27 @@ class CliTests(unittest.TestCase):
             self.assertIn("status='accepted'", rendered)
             self.assertIn("next_safe_command=mylittleharness --root <root>", rendered)
             self.assertIn("roadmap-acceptance-readiness-boundary", rendered)
+
+    def test_check_blocks_next_roadmap_item_while_other_active_plan_is_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            write_sample_roadmap(root)
+            write_active_roadmap_plan(root, "roadmap-operationalization-rail")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("active-plan-roadmap-intake-policy-matrix", rendered)
+            self.assertIn("next_safe_candidate=mylittleharness --root <root> meta-feedback --dry-run", rendered)
+            self.assertIn("item='minimal-roadmap-mutation-rail'", rendered)
+            self.assertIn("readiness='blocked-active-plan-open'", rendered)
+            self.assertIn("current active plan is open for other roadmap item(s)", rendered)
+            self.assertIn("writeback --dry-run --phase-status complete", rendered)
 
     def test_check_blocks_meta_feedback_scope_gap_before_empty_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18562,6 +20472,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("session-start", payload["event"])
             self.assertEqual("warn", payload["status"])
             self.assertEqual("warn", payload["policy_mode"])
+            self.assertEqual("mylittleharness.hook-policy.v1", payload["policy"]["schema"])
+            self.assertIn("hooks.py", payload["policy"]["source"])
+            self.assertRegex(payload["policy"]["sourceHash"], r"^[0-9a-f]{12}$")
             self.assertFalse(payload["block"])
             self.assertIn("MLH first contact", payload["status_message"])
             self.assertIn("dashboard-agent-packet", payload["agentPacket"]["schema"])
@@ -18618,6 +20531,8 @@ class CliTests(unittest.TestCase):
             dry_rendered = dry_run_output.getvalue()
             self.assertIn("hooks-codex-adapter-dry-run", dry_rendered)
             self.assertIn("hooks-codex-adapter-plan", dry_rendered)
+            self.assertIn("hooks-codex-adapter-policy", dry_rendered)
+            self.assertIn("policy_hash=", dry_rendered)
             self.assertIn(".codex/hooks.json", dry_rendered)
             self.assertFalse((root / ".codex/hooks.json").exists())
             self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
@@ -18650,6 +20565,10 @@ class CliTests(unittest.TestCase):
                 self.assertIn("statusMessage", groups[-1]["hooks"][0])
             script_text = script_path.read_text(encoding="utf-8")
             self.assertIn("MLH_IMPORT_ROOT", script_text)
+            self.assertIn("MLH_HOOK_POLICY_SCHEMA", script_text)
+            self.assertIn("MLH_HOOK_POLICY_SOURCE", script_text)
+            self.assertIn("MLH_HOOK_POLICY_HASH", script_text)
+            self.assertIn("mylittleharness.hook-policy.v1", script_text)
             self.assertIn("MLH_HOOK_EVENT", script_text)
             self.assertIn("codex_hook_command_output", script_text)
             self.assertIn("codex_session_start_command_output", script_text)
@@ -18686,6 +20605,42 @@ class CliTests(unittest.TestCase):
             self.assertEqual("PreToolUse", pre_tool_payload["hookSpecificOutput"]["hookEventName"])
             self.assertEqual("deny", pre_tool_payload["hookSpecificOutput"]["permissionDecision"])
             self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_hooks_codex_adapter_reports_policy_refresh_needed_for_stale_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main(["--root", str(root), "hooks", "adapter", "--client", "codex", "--apply", "--scope", "project"]), 0)
+
+            script_path = root / ".codex/hooks/mylittleharness_session_start.py"
+            script_text = script_path.read_text(encoding="utf-8")
+            self.assertIn("MLH_HOOK_POLICY_HASH", script_text)
+            stale_script = re.sub(
+                r"MLH_HOOK_POLICY_HASH = '[^']+'",
+                "MLH_HOOK_POLICY_HASH = 'stale-policy'",
+                script_text,
+                count=1,
+            )
+            self.assertNotEqual(script_text, stale_script)
+            script_path.write_text(stale_script, encoding="utf-8")
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                code = main(["--root", str(root), "hooks", "adapter", "--client", "codex", "--dry-run", "--scope", "project"])
+
+            rendered = dry_run_output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("hooks-codex-adapter-status", rendered)
+            self.assertIn("status=needs-update", rendered)
+            self.assertIn("hooks-codex-adapter-policy", rendered)
+            self.assertIn("policy_hash=", rendered)
+            self.assertIn("hooks-codex-adapter-refresh-needed", rendered)
+            self.assertIn(
+                "next_safe_command=mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
+                rendered,
+            )
 
     def test_hooks_native_adapter_writes_claude_code_project_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18891,8 +20846,8 @@ class CliTests(unittest.TestCase):
                 post_tool_output = codex_hook_command_output(inventory, HOOK_POST_TOOL_USE, post_tool_input)
                 stop_output = codex_hook_command_output(inventory, HOOK_STOP, "")
 
-            self.assertEqual("deny", pre_tool_output["hookSpecificOutput"]["permissionDecision"])
-            self.assertIn("lifecycle authority paths", pre_tool_output["hookSpecificOutput"]["permissionDecisionReason"])
+            self.assertIn("hookSpecificOutput", pre_tool_output)
+            self.assertNotIn("permissionDecision", pre_tool_output["hookSpecificOutput"])
             self.assertTrue(post_tool_output["continue"])
             self.assertIn("hookSpecificOutput", post_tool_output)
             self.assertEqual({}, stop_output)
@@ -18940,11 +20895,10 @@ class CliTests(unittest.TestCase):
                 "hooks-policy-block-lifecycle-markdown-path",
                 {finding["code"] for finding in bounded_payload["findings"]},
             )
-            self.assertTrue(direct_payload["block"])
-            self.assertIn(
-                "hooks-policy-block-lifecycle-markdown-path",
-                {finding["code"] for finding in direct_payload["findings"]},
-            )
+            self.assertFalse(direct_payload["block"])
+            direct_codes = {finding["code"] for finding in direct_payload["findings"]}
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", direct_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", direct_codes)
 
     def test_hooks_pre_tool_allows_bounded_mlh_source_reads_for_startup_state_config(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -18970,11 +20924,52 @@ class CliTests(unittest.TestCase):
                 "hooks-policy-block-lifecycle-authority-path",
                 {finding["code"] for finding in bounded_payload["findings"]},
             )
-            self.assertTrue(direct_payload["block"])
-            self.assertIn(
-                "hooks-policy-block-lifecycle-authority-path",
-                {finding["code"] for finding in direct_payload["findings"]},
+            self.assertFalse(direct_payload["block"])
+            direct_codes = {finding["code"] for finding in direct_payload["findings"]}
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", direct_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", direct_codes)
+
+    def test_hooks_pre_tool_allows_common_read_only_lifecycle_shell_inspection(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            plan_path = "project/" + "implementation-plan.md"
+            archive_plans_path = "project/" + "archive/plans"
+            archive_plan_glob = archive_plans_path + "/*.md"
+            archive_plan_file = archive_plans_path + "/shortcut.md"
+            commands = (
+                "Test-Path " + plan_path,
+                "if (Test-Path " + archive_plan_glob + ") { Write-Output ok }",
+                '$p = "' + archive_plan_glob + '"; Test-Path $p',
+                "foreach ($p in " + archive_plan_glob + ") { Get-Item $p }",
+                "Get-ChildItem " + archive_plans_path,
+                "Get-Item -Path " + archive_plan_glob,
+                "dir " + archive_plans_path,
+                "type " + state_path,
             )
+
+            for command in commands:
+                with self.subTest(command=command):
+                    hook_input = json.dumps({"toolName": "shell_command", "command": command})
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+                    self.assertFalse(payload["block"])
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+
+            direct_write_input = json.dumps(
+                {"toolName": "shell_command", "command": f"Set-Content {archive_plan_file} '# bypass'"}
+            )
+            direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
+            direct_write_codes = {finding["code"] for finding in direct_write_payload["findings"]}
+
+            self.assertTrue(direct_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", direct_write_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_write_codes)
 
     def test_hooks_pre_tool_allows_mlh_owner_route_dry_run_lifecycle_targets(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -18982,6 +20977,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
             adr_target = "project/" + "adrs/office-target.md"
+            verification_target = "project/" + "verification/hook-policy-packet.md"
             state_ref = "project/" + "project-state.md"
             owner_preview_input = json.dumps(
                 {
@@ -18990,6 +20986,12 @@ class CliTests(unittest.TestCase):
                         "mylittleharness --root . research-import --dry-run "
                         f"--title office-target --target {adr_target}"
                     ),
+                }
+            )
+            intake_preview_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"mylittleharness --root . intake --dry-run --text-file - --target {verification_target}",
                 }
             )
             writeback_preview_input = json.dumps(
@@ -19006,6 +21008,7 @@ class CliTests(unittest.TestCase):
             )
 
             owner_preview_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], owner_preview_input)
+            intake_preview_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], intake_preview_input)
             writeback_preview_payload = hook_event_payload(
                 load_inventory(root),
                 HOOK_PRE_TOOL_USE,
@@ -19015,11 +21018,15 @@ class CliTests(unittest.TestCase):
             direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
 
             self.assertFalse(owner_preview_payload["block"])
+            self.assertFalse(intake_preview_payload["block"])
             self.assertFalse(writeback_preview_payload["block"])
             self.assertNotIn(
                 "hooks-policy-block-lifecycle-markdown-path",
                 {finding["code"] for finding in owner_preview_payload["findings"]},
             )
+            intake_codes = {finding["code"] for finding in intake_preview_payload["findings"]}
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", intake_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", intake_codes)
             self.assertNotIn(
                 "hooks-policy-block-lifecycle-authority-path",
                 {finding["code"] for finding in writeback_preview_payload["findings"]},
@@ -19029,6 +21036,122 @@ class CliTests(unittest.TestCase):
                 "hooks-policy-block-lifecycle-markdown-shortcut",
                 {finding["code"] for finding in direct_write_payload["findings"]},
             )
+
+    def test_hooks_pre_tool_allows_roadmap_owner_route_metadata_refs_with_write_words(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            source_incubation = "project/" + "plan-incubation/roadmap-hook-overblocking.md"
+            hook_target = "src/" + "mylittleharness/hooks.py"
+            test_target = "tests/" + "test_cli.py"
+            roadmap_command = (
+                "mylittleharness --root . roadmap --dry-run --action add "
+                "--item-id roadmap-hook-overblocking "
+                f"--source-incubation {source_incubation} "
+                f"--target-artifact {hook_target} "
+                f"--target-artifact {test_target} "
+                '--verification-summary "direct Set-Content/apply_patch lifecycle writes still block"'
+            )
+            roadmap_input = json.dumps({"toolName": "shell_command", "command": roadmap_command})
+            direct_write_input = json.dumps(
+                {"toolName": "shell_command", "command": f"Set-Content {source_incubation} '# bypass'"}
+            )
+            owner_route_with_extra_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": roadmap_command + f"; Set-Content {source_incubation} '# bypass'",
+                }
+            )
+
+            roadmap_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], roadmap_input)
+            direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
+            extra_write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                owner_route_with_extra_write_input,
+            )
+
+            roadmap_codes = {finding["code"] for finding in roadmap_payload["findings"]}
+            self.assertFalse(roadmap_payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", roadmap_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", roadmap_codes)
+            self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", roadmap_codes)
+
+            direct_write_codes = {finding["code"] for finding in direct_write_payload["findings"]}
+            self.assertTrue(direct_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_write_codes)
+
+            extra_write_codes = {finding["code"] for finding in extra_write_payload["findings"]}
+            self.assertTrue(extra_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", extra_write_codes)
+
+    def test_hooks_pre_tool_allows_owner_route_argument_path_literals_by_command_role(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            verification_ref = "project/" + "verification/hook-policy-packet.md"
+            archive_ref = "project/" + "archive/plans/hook-policy-closeout.md"
+            incubation_ref = "project/" + "plan-incubation/hook-policy-followup.md"
+            research_ref = "project/" + "research/hook-policy-packet.md"
+
+            commands = {
+                "writeback": (
+                    "mylittleharness --root . writeback --dry-run --archive-active-plan "
+                    f'--verification "checked {verification_ref}" --carry-forward "see {archive_ref}"'
+                ),
+                "transition": (
+                    "mylittleharness --root . transition --dry-run --archive-active-plan "
+                    f'--work-result "closed with evidence {verification_ref}"'
+                ),
+                "roadmap": (
+                    "mylittleharness --root . roadmap --dry-run --action update --item-id hook-policy "
+                    f"--source-incubation {incubation_ref} --target-artifact tests/test_cli.py"
+                ),
+                "plan": (
+                    "mylittleharness --root . plan --dry-run --roadmap-item hook-policy "
+                    f'--task "implement from {research_ref}"'
+                ),
+                "intake": f"mylittleharness --root . intake --dry-run --text-file - --target {verification_ref}",
+                "meta-feedback": (
+                    "mylittleharness --root . meta-feedback --dry-run --topic hook-policy "
+                    f'--note "observed {verification_ref}"'
+                ),
+                "suggest": f'mylittleharness --root . suggest --intent "closeout evidence {verification_ref}"',
+            }
+
+            for name, command in commands.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+            suggest_with_extra_write = (
+                commands["suggest"]
+                + f"; Set-Content {verification_ref} '# bypass'"
+            )
+            extra_write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": suggest_with_extra_write}),
+            )
+            extra_write_codes = {finding["code"] for finding in extra_write_payload["findings"]}
+
+            self.assertTrue(extra_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", extra_write_codes)
 
     def test_hooks_pre_tool_allows_read_only_rg_over_lifecycle_memory_routes(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -19046,20 +21169,54 @@ class CliTests(unittest.TestCase):
             direct_read_input = json.dumps(
                 {"toolName": "shell_command", "command": f"Get-Content {roadmap_path}"}
             )
+            read_then_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Get-Content {roadmap_path}; Set-Content {incubation_path} '# bypass'",
+                }
+            )
 
             rg_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], rg_input)
             direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_read_input)
+            read_then_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], read_then_write_input)
 
             self.assertFalse(rg_payload["block"])
-            self.assertNotIn(
-                "hooks-policy-block-lifecycle-markdown-path",
-                {finding["code"] for finding in rg_payload["findings"]},
+            self.assertFalse(direct_payload["block"])
+            for checked_payload in (rg_payload, direct_payload):
+                self.assertNotIn(
+                    "hooks-policy-block-lifecycle-markdown-path",
+                    {finding["code"] for finding in checked_payload["findings"]},
+                )
+                self.assertNotIn(
+                    "hooks-policy-block-lifecycle-authority-path",
+                    {finding["code"] for finding in checked_payload["findings"]},
+                )
+            self.assertTrue(read_then_write_payload["block"])
+            read_then_write_codes = {finding["code"] for finding in read_then_write_payload["findings"]}
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", read_then_write_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", read_then_write_codes)
+
+    def test_hooks_pre_tool_allows_git_diff_lifecycle_inspection_and_surfaces_matrix(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            roadmap_path = "project/" + "roadmap.md"
+            state_path = "project/" + "project-state.md"
+            git_diff_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git diff -- {state_path} {roadmap_path}",
+                }
             )
-            self.assertTrue(direct_payload["block"])
-            self.assertIn(
-                "hooks-policy-block-lifecycle-authority-path",
-                {finding["code"] for finding in direct_payload["findings"]},
-            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], git_diff_input)
+
+            self.assertFalse(payload["block"])
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", finding_codes)
+            self.assertIn("hooks-policy-active-plan-roadmap-intake-matrix", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
 
     def test_hooks_pre_tool_uses_apply_patch_targets_not_body_route_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -19067,21 +21224,142 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root, _product_root = make_product_diff_scope_fixture(Path(tmp))
             route_literal = "project/" + "archive/plans/reviewed-plan.md"
+            source_literal = "src/" + "mylittleharness/hooks.py"
             patch_text = (
                 "*** Begin Patch\n"
                 "*** Update File: tests/test_cli.py\n"
                 "@@\n"
                 "+ARCHIVE_REF = '" + route_literal + "'\n"
+                "+SOURCE_REF = '" + source_literal + "'\n"
+                "*** End Patch\n"
+            )
+            patch_input = json.dumps({"toolName": "apply_patch", "input": patch_text})
+            freeform_patch_input = json.dumps({"arguments": patch_text})
+            authority_patch_input = json.dumps(
+                {
+                    "arguments": (
+                        "*** Begin Patch\n"
+                        "*** Update File: project/project-state.md\n"
+                        "@@\n"
+                        "+ARCHIVE_REF = '" + route_literal + "'\n"
+                        "*** End Patch\n"
+                    )
+                }
+            )
+            raw_authority_patch_input = (
+                "*** Begin Patch\n"
+                "*** Update File: project/project-state.md\n"
+                "@@\n"
+                "+ARCHIVE_REF = '" + route_literal + "'\n"
+                "*** End Patch\n"
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
+            freeform_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], freeform_patch_input)
+            raw_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_text)
+            authority_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], authority_patch_input)
+            raw_authority_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                raw_authority_patch_input,
+            )
+
+            self.assertFalse(payload["block"])
+            self.assertFalse(freeform_payload["block"])
+            self.assertFalse(raw_payload["block"])
+            for checked_payload in (payload, freeform_payload, raw_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+            self.assertTrue(authority_payload["block"])
+            self.assertTrue(raw_authority_payload["block"])
+            for checked_payload in (authority_payload, raw_authority_payload):
+                self.assertIn(
+                    "hooks-policy-block-lifecycle-authority-path",
+                    {finding["code"] for finding in checked_payload["findings"]},
+                )
+
+    def test_hooks_pre_tool_ignores_product_source_body_literals_in_apply_patch(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            absolute_literal = str(product_root / "src" / ("allowed" + ".py"))
+            relative_literal = "src/" + ("allowed" + ".py")
+            patch_text = (
+                "*** Begin Patch\n"
+                "*** Update File: tests/test_cli.py\n"
+                "@@\n"
+                "+ABS_REF = '" + absolute_literal + "'\n"
+                "+REL_REF = '" + relative_literal + "'\n"
                 "*** End Patch\n"
             )
             patch_input = json.dumps({"toolName": "apply_patch", "input": patch_text})
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
+            raw_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_text)
 
-            self.assertFalse(payload["block"])
-            finding_codes = {finding["code"] for finding in payload["findings"]}
-            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
-            self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+            for checked_payload in (payload, raw_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+
+    def test_hooks_pre_tool_uses_shell_write_targets_not_content_literals(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            allowed_target = product_root / "src" / "allowed.py"
+            archive_literal = "project/" + "archive/plans/reviewed-plan.md"
+            incubation_target = "project/" + "plan-incubation/direct-write.md"
+            allowed_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path '{allowed_target}' -Value \"ARCHIVE_REF = '{archive_literal}'\"",
+                }
+            )
+            out_file_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"\"ARCHIVE_REF = '{archive_literal}'\" | Out-File -FilePath '{allowed_target}'",
+                }
+            )
+            route_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path '{incubation_target}' -Value 'direct route write'",
+                }
+            )
+            rogue_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path 'src/rogue.py' -Value \"ARCHIVE_REF = '{archive_literal}'\"",
+                }
+            )
+
+            allowed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], allowed_input)
+            out_file_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], out_file_input)
+            route_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], route_write_input)
+            rogue_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], rogue_input)
+
+            for checked_payload in (allowed_payload, out_file_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+
+            self.assertTrue(route_write_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-path",
+                {finding["code"] for finding in route_write_payload["findings"]},
+            )
+            rogue_codes = {finding["code"] for finding in rogue_payload["findings"]}
+            self.assertTrue(rogue_payload["block"])
+            self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", rogue_codes)
 
     def test_hooks_pre_tool_allows_existing_frontmatter_route_apply_patch_updates(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -19126,6 +21404,98 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-existing-route-markdown-patch", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+    def test_hooks_pre_tool_allows_active_plan_spec_docs_apply_patch_scope(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            docs_spec_rel = "docs/specs/metadata-routing-and-evidence.md"
+            workflow_spec_rel = "project/specs/workflow/workflow-plan-synthesis-spec.md"
+            out_of_scope_spec_rel = "project/specs/workflow/workflow-artifact-model-spec.md"
+            (root / "docs/specs").mkdir(parents=True, exist_ok=True)
+            (root / docs_spec_rel).write_text(
+                "---\n"
+                'spec_status: "accepted"\n'
+                'implementation_posture: "target-only"\n'
+                "---\n"
+                "# Metadata Routing\n",
+                encoding="utf-8",
+            )
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "spec-doc-scope-plan"\n'
+                'title: "Spec Doc Scope Plan"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                "target_artifacts:\n"
+                f'  - "{docs_spec_rel}"\n'
+                f'  - "{workflow_spec_rel}"\n'
+                "---\n"
+                "# Spec Doc Scope Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `pending`\n"
+                f"- write_scope: `{docs_spec_rel}`, `{workflow_spec_rel}`\n",
+                encoding="utf-8",
+            )
+            patch_text = (
+                "*** Begin Patch\n"
+                f"*** Update File: {docs_spec_rel}\n"
+                "@@\n"
+                " # Metadata Routing\n"
+                "+Patched docs spec\n"
+                f"*** Update File: {workflow_spec_rel}\n"
+                "@@\n"
+                " # workflow-plan-synthesis-spec.md\n"
+                "+Patched workflow spec\n"
+                "*** End Patch\n"
+            )
+            out_of_scope_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {out_of_scope_spec_rel}\n"
+                "@@\n"
+                " # workflow-artifact-model-spec.md\n"
+                "+Out of scope\n"
+                "*** End Patch\n"
+            )
+            shell_write = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content {workflow_spec_rel} '# bypass'",
+                }
+            )
+
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": patch_text}),
+            )
+            out_of_scope_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": out_of_scope_patch}),
+            )
+            shell_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], shell_write)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-active-plan-spec-doc-route-patch", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+            self.assertNotIn(
+                "hooks-policy-allow-active-plan-spec-doc-route-patch",
+                {finding["code"] for finding in out_of_scope_payload["findings"]},
+            )
+            self.assertTrue(shell_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in shell_payload["findings"]},
+            )
 
     def test_hooks_pre_tool_keeps_route_patch_boundary_blocks(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -19216,6 +21586,343 @@ class CliTests(unittest.TestCase):
                 {finding["code"] for finding in shell_write_payload["findings"]},
             )
 
+    def test_hooks_pre_tool_reports_route_owner_next_safe_commands_for_blocks(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            incubation_rel = "/".join(("project", "plan-incubation", "new-context.md"))
+            adr_rel = "/".join(("project", "adrs", "new-architecture.md"))
+            verification_rel = "/".join(("project", "verification", "new-evidence.md"))
+            stable_spec_rel = "/".join(("project", "specs", "workflow", "new-contract.md"))
+            nonroute_rel = "/".join(("project", "deliverables", "target-architecture.md"))
+            state_rel = "project/" + "project-state" + ".md"
+
+            incubation_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "apply_patch",
+                        "input": (
+                            "*** Begin Patch\n"
+                            f"*** Add File: {incubation_rel}\n"
+                            "+# New context\n"
+                            "*** End Patch\n"
+                        ),
+                    }
+                ),
+            )
+            adr_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "apply_patch",
+                        "input": (
+                            "*** Begin Patch\n"
+                            f"*** Add File: {adr_rel}\n"
+                            "+# New architecture\n"
+                            "*** End Patch\n"
+                        ),
+                    }
+                ),
+            )
+            verification_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "apply_patch",
+                        "input": (
+                            "*** Begin Patch\n"
+                            f"*** Add File: {verification_rel}\n"
+                            "+# New evidence\n"
+                            "*** End Patch\n"
+                        ),
+                    }
+                ),
+            )
+            stable_spec_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "apply_patch",
+                        "input": (
+                            "*** Begin Patch\n"
+                            f"*** Add File: {stable_spec_rel}\n"
+                            "+# New contract\n"
+                            "*** End Patch\n"
+                        ),
+                    }
+                ),
+            )
+            nonroute_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"Set-Content {nonroute_rel} '# Hidden knowledge'"}),
+            )
+            state_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"Set-Content {state_rel} '# bypass'"}),
+            )
+
+            for checked_payload in (incubation_payload, adr_payload, verification_payload, stable_spec_payload, nonroute_payload, state_payload):
+                self.assertTrue(checked_payload["block"])
+
+            incubation_messages = "\n".join(str(finding["message"]) for finding in incubation_payload["findings"])
+            adr_messages = "\n".join(str(finding["message"]) for finding in adr_payload["findings"])
+            verification_messages = "\n".join(str(finding["message"]) for finding in verification_payload["findings"])
+            stable_spec_messages = "\n".join(str(finding["message"]) for finding in stable_spec_payload["findings"])
+            nonroute_messages = "\n".join(str(finding["message"]) for finding in nonroute_payload["findings"])
+            state_messages = "\n".join(str(finding["message"]) for finding in state_payload["findings"])
+
+            self.assertIn(
+                'next_safe_command=mylittleharness --root <root> incubate --dry-run --topic "new-context" --note-file -',
+                incubation_messages,
+            )
+            self.assertIn(
+                f"next_safe_command=mylittleharness --root <root> intake --dry-run --text-file - --target {adr_rel}",
+                adr_messages,
+            )
+            self.assertIn(
+                f"next_safe_command=mylittleharness --root <root> intake --dry-run --text-file - --target {verification_rel}",
+                verification_messages,
+            )
+            self.assertNotIn("suggest --intent", verification_messages)
+            self.assertIn("next_safe_command=mylittleharness --root <root> check --focus route-references", stable_spec_messages)
+            self.assertIn(
+                "next_safe_command=mylittleharness --root <root> intake --dry-run --text-file -",
+                nonroute_messages,
+            )
+            self.assertIn("next_safe_command=mylittleharness --root <root> writeback --dry-run", state_messages)
+
+    def test_hooks_pre_tool_replays_analogous_weak_spot_matrix(self) -> None:
+        from mylittleharness.hooks import (
+            HOOK_POST_TOOL_USE,
+            HOOK_PRE_TOOL_USE,
+            HOOK_STOP,
+            HOOK_USER_PROMPT_SUBMIT,
+            hook_event_payload,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            research_rel = "project/" + "research/existing-replay.md"
+            verification_rel = "project/" + "verification/hook-policy-replay-corpus.md"
+            incubation_rel = "project/" + "plan-incubation/replay-followup.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            state_rel = "project/" + "project-state.md"
+            allowed_target = product_root / "src" / "allowed.py"
+            archive_literal = "project/" + "archive/plans/reviewed-plan.md"
+            (root / "project/research").mkdir(parents=True, exist_ok=True)
+            (root / research_rel).write_text(
+                "---\n"
+                'status: "reviewed"\n'
+                "---\n"
+                "# Existing Replay\n",
+                encoding="utf-8",
+            )
+
+            existing_route_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {research_rel}\n"
+                "@@\n"
+                " # Existing Replay\n"
+                "+Replay matrix note\n"
+                "*** End Patch\n"
+            )
+            direct_incubation_add = (
+                "*** Begin Patch\n"
+                f"*** Add File: {incubation_rel}\n"
+                "+# Direct incubation shortcut\n"
+                "*** End Patch\n"
+            )
+            direct_verification_add = (
+                "*** Begin Patch\n"
+                f"*** Add File: {verification_rel}\n"
+                "+# Direct verification shortcut\n"
+                "*** End Patch\n"
+            )
+            allowed_product_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {allowed_target}\n"
+                "@@\n"
+                "+ARCHIVE_REF = '" + archive_literal + "'\n"
+                "*** End Patch\n"
+            )
+            rogue_product_patch = (
+                "*** Begin Patch\n"
+                "*** Update File: src/rogue.py\n"
+                "@@\n"
+                "+ROGUE = True\n"
+                "*** End Patch\n"
+            )
+
+            cases = (
+                {
+                    "name": "read-only lifecycle route discovery remains allowed",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "shell_command", "command": f"rg -n replay {roadmap_rel} {research_rel}"}),
+                    "block": False,
+                    "include": {"hooks-policy-allow-read-only-lifecycle-inspection"},
+                    "exclude": {"hooks-policy-block-lifecycle-markdown-path"},
+                    "messages": (),
+                },
+                {
+                    "name": "existing frontmatter route patch remains allowed",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "apply_patch", "input": existing_route_patch}),
+                    "block": False,
+                    "include": {"hooks-policy-allow-existing-route-markdown-patch"},
+                    "exclude": {"hooks-policy-block-lifecycle-markdown-shortcut"},
+                    "messages": (),
+                },
+                {
+                    "name": "owner route evidence paths remain allowed",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps(
+                        {
+                            "toolName": "shell_command",
+                            "command": (
+                                "mylittleharness --root . roadmap --dry-run --action update "
+                                "--item-id replay-matrix "
+                                f"--source-incubation {incubation_rel} "
+                                "--target-artifact tests/test_cli.py"
+                            ),
+                        }
+                    ),
+                    "block": False,
+                    "include": {
+                        "hooks-policy-active-plan-roadmap-intake-matrix",
+                        "hooks-policy-allow-mlh-owner-route-evidence-paths",
+                    },
+                    "exclude": {"hooks-policy-block-lifecycle-markdown-path"},
+                    "messages": (),
+                },
+                {
+                    "name": "intake owner route verification target remains allowed",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps(
+                        {
+                            "toolName": "shell_command",
+                            "command": f"mylittleharness --root . intake --dry-run --text-file - --target {verification_rel}",
+                        }
+                    ),
+                    "block": False,
+                    "include": {"hooks-policy-allow-mlh-owner-route-evidence-paths"},
+                    "exclude": {"hooks-policy-block-lifecycle-markdown-path"},
+                    "messages": (),
+                },
+                {
+                    "name": "direct incubation route creation remains blocked",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "apply_patch", "input": direct_incubation_add}),
+                    "block": True,
+                    "include": {
+                        "hooks-policy-block-lifecycle-markdown-path",
+                        "hooks-policy-block-lifecycle-markdown-shortcut",
+                    },
+                    "exclude": {"hooks-policy-allow-existing-route-markdown-patch"},
+                    "messages": ("next_safe_command=mylittleharness --root <root> incubate --dry-run",),
+                },
+                {
+                    "name": "direct verification route creation remains blocked",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "apply_patch", "input": direct_verification_add}),
+                    "block": True,
+                    "include": {
+                        "hooks-policy-block-lifecycle-markdown-path",
+                        "hooks-policy-block-lifecycle-markdown-shortcut",
+                    },
+                    "exclude": {"hooks-policy-allow-existing-route-markdown-patch"},
+                    "messages": ("next_safe_command=mylittleharness --root <root> intake --dry-run --text-file - --target project/verification/hook-policy-replay-corpus.md",),
+                },
+                {
+                    "name": "product source patch with inert route literal remains allowed",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "apply_patch", "input": allowed_product_patch}),
+                    "block": False,
+                    "include": {"hooks-policy-pre-tool-use"},
+                    "exclude": {
+                        "hooks-policy-block-lifecycle-markdown-path",
+                        "hooks-policy-block-code-write-outside-plan-scope",
+                    },
+                    "messages": (),
+                },
+                {
+                    "name": "out-of-scope source patch remains blocked",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "apply_patch", "input": rogue_product_patch}),
+                    "block": True,
+                    "include": {"hooks-policy-block-code-write-outside-plan-scope"},
+                    "exclude": {"hooks-policy-block-lifecycle-markdown-path"},
+                    "messages": ("blocked_paths=src/rogue.py",),
+                },
+                {
+                    "name": "mlh mutation without review mode remains blocked",
+                    "hook": HOOK_PRE_TOOL_USE,
+                    "input": json.dumps({"toolName": "shell_command", "command": "mylittleharness --root . roadmap --action update --item-id replay-matrix"}),
+                    "block": True,
+                    "include": {"hooks-policy-block-mlh-mutation-without-mode"},
+                    "exclude": set(),
+                    "messages": (),
+                },
+                {
+                    "name": "post-tool lifecycle paths warn without blocking output",
+                    "hook": HOOK_POST_TOOL_USE,
+                    "input": json.dumps({"toolName": "shell_command", "command": f"Get-Content {state_rel}"}),
+                    "block": False,
+                    "status": "warn",
+                    "include": {"hooks-policy-block-lifecycle-authority-path"},
+                    "exclude": set(),
+                    "messages": (),
+                },
+                {
+                    "name": "shortcut prompt warns without claiming lifecycle authority",
+                    "hook": HOOK_USER_PROMPT_SUBMIT,
+                    "input": json.dumps({"prompt": "skip check and mark done without plan"}),
+                    "block": False,
+                    "status": "warn",
+                    "include": {"hooks-policy-block-shortcut-prompt"},
+                    "exclude": set(),
+                    "messages": (),
+                },
+                {
+                    "name": "stop hook reports active plan tail without blocking",
+                    "hook": HOOK_STOP,
+                    "input": "",
+                    "block": False,
+                    "status": "warn",
+                    "include": {"hooks-policy-stop-active-plan-open"},
+                    "exclude": set(),
+                    "messages": ("active plan remains open",),
+                },
+            )
+
+            for case in cases:
+                with self.subTest(case=case["name"]):
+                    payload = hook_event_payload(load_inventory(root), case["hook"], [], case["input"])
+                    self.assertEqual(case["block"], payload["block"])
+                    if "status" in case:
+                        self.assertEqual(case["status"], payload["status"])
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    for code in case["include"]:
+                        self.assertIn(code, finding_codes)
+                    for code in case["exclude"]:
+                        self.assertNotIn(code, finding_codes)
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    for fragment in case["messages"]:
+                        self.assertIn(fragment, messages)
+
     def test_hooks_pre_tool_allows_active_plan_product_root_patch_targets(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -19233,10 +21940,38 @@ class CliTests(unittest.TestCase):
             patch_input = json.dumps({"toolName": "apply_patch", "input": patch_text})
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
+            raw_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_text)
+
+            for checked_payload in (payload, raw_payload):
+                self.assertFalse(checked_payload["block"])
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+
+    def test_hooks_pre_tool_uses_apply_patch_targets_from_command_field(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            allowed_target = product_root / "src" / "allowed.py"
+            state_literal = "project/" + "project-state.md"
+            rogue_literal = "src/" + "rogue.py"
+            patch_text = (
+                "*** Begin Patch\n"
+                f"*** Add File: {allowed_target}\n"
+                "+STATE_REF = '" + state_literal + "'\n"
+                "+ROGUE_REF = '" + rogue_literal + "'\n"
+                "*** End Patch\n"
+            )
+            patch_command = "apply_patch <<'PATCH'\n" + patch_text + "PATCH"
+            patch_input = json.dumps({"toolName": "apply_patch", "command": patch_command})
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
 
             self.assertFalse(payload["block"])
             finding_codes = {finding["code"] for finding in payload["findings"]}
-            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
 
@@ -19262,6 +21997,34 @@ class CliTests(unittest.TestCase):
                 {finding["code"] for finding in payload["findings"]},
             )
 
+    def test_hooks_pre_tool_reports_allowed_and_blocked_paths_for_multi_file_writes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            patch_text = (
+                "*** Begin Patch\n"
+                "*** Update File: src/allowed.py\n"
+                "@@\n"
+                "+ALLOWED = True\n"
+                "*** Update File: src/rogue.py\n"
+                "@@\n"
+                "+ROGUE = True\n"
+                "*** End Patch\n"
+            )
+            patch_input = json.dumps({"toolName": "apply_patch", "input": patch_text})
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
+
+            self.assertTrue(payload["block"])
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertIn("hooks-policy-code-write-scope-diagnostic", finding_codes)
+            self.assertIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+            self.assertIn("allowed_paths=src/allowed.py", messages)
+            self.assertIn("blocked_paths=src/rogue.py", messages)
+            self.assertIn("next_safe_command=mylittleharness --root <root> roadmap --dry-run", messages)
+
     def test_hooks_pre_tool_allows_active_plan_product_root_read_only_inspection(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -19283,6 +22046,45 @@ class CliTests(unittest.TestCase):
                 {finding["code"] for finding in payload["findings"]},
             )
 
+    def test_hooks_pre_tool_allows_product_root_git_status_with_worktree_option(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            allowed_rel = "src/" + "allowed.py"
+            git_status_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git -C {product_root} status --short",
+                }
+            )
+            git_diff_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git -C {product_root} diff -- {allowed_rel}",
+                }
+            )
+            git_add_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git -C {product_root} add .",
+                }
+            )
+
+            status_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], git_status_input)
+            diff_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], git_diff_input)
+            add_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], git_add_input)
+
+            for checked_payload in (status_payload, diff_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+            add_codes = {finding["code"] for finding in add_payload["findings"]}
+            self.assertTrue(add_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", add_codes)
+
     def test_hooks_pre_tool_allows_mlh_owner_route_apply_evidence_paths(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -19296,6 +22098,15 @@ class CliTests(unittest.TestCase):
                     "command": (
                         "mylittleharness --root . roadmap --apply "
                         f"--item durable-knowledge --status done --archived-plan {archive_ref}"
+                    ),
+                }
+            )
+            roadmap_apply_arguments_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "arguments": (
+                        "mylittleharness --root . roadmap --apply --action update "
+                        f"--item-id durable-knowledge --status done --archived-plan {archive_ref}"
                     ),
                 }
             )
@@ -19314,16 +22125,26 @@ class CliTests(unittest.TestCase):
                     "command": f"Set-Content {product_evidence_path} 'x'",
                 }
             )
+            direct_archive_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content {archive_ref} '# bypass'",
+                }
+            )
 
             roadmap_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], roadmap_apply_input)
+            roadmap_arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], roadmap_apply_arguments_input)
             writeback_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], writeback_preview_input)
             direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_product_write_input)
+            direct_archive_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_archive_write_input)
 
             self.assertFalse(roadmap_payload["block"])
-            self.assertNotIn(
-                "hooks-policy-block-lifecycle-markdown-path",
-                {finding["code"] for finding in roadmap_payload["findings"]},
-            )
+            self.assertFalse(roadmap_arguments_payload["block"])
+            for checked_payload in (roadmap_payload, roadmap_arguments_payload):
+                self.assertNotIn(
+                    "hooks-policy-block-lifecycle-markdown-path",
+                    {finding["code"] for finding in checked_payload["findings"]},
+                )
             self.assertFalse(writeback_payload["block"])
             self.assertNotIn(
                 "hooks-policy-block-product-root-path",
@@ -19333,6 +22154,185 @@ class CliTests(unittest.TestCase):
             self.assertIn(
                 "hooks-policy-block-product-root-path",
                 {finding["code"] for finding in direct_write_payload["findings"]},
+            )
+            self.assertTrue(direct_archive_write_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in direct_archive_write_payload["findings"]},
+            )
+
+    def test_hooks_pre_tool_allows_mlh_owner_route_stdin_payload_literals(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            state_rel = "project/" + "project-state.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            verification_rel = "project/" + "verification/decision-packet.md"
+            powershell_payload = (
+                "@'\n"
+                "---\n"
+                'status: "pending"\n'
+                "---\n"
+                "# Decision Packet\n\n"
+                f"> Set-Content {state_rel} '# quoted payload only'\n"
+                f"Payload mentions {roadmap_rel} and {verification_rel}.\n"
+                "'@"
+            )
+            owner_route_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        f"{powershell_payload} | mylittleharness --root . intake --dry-run "
+                        f"--text-file - --target {verification_rel}"
+                    ),
+                }
+            )
+            heredoc_owner_route_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . intake --dry-run "
+                        f"--text-file - --target {verification_rel} <<'EOF'\n"
+                        f"> Set-Content {state_rel} '# quoted payload only'\n"
+                        f"Payload mentions {roadmap_rel}.\n"
+                        "EOF\n"
+                    ),
+                }
+            )
+            owner_route_with_extra_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        f"{powershell_payload} | mylittleharness --root . intake --dry-run "
+                        f"--text-file - --target {verification_rel}; Set-Content {state_rel} '# bypass'"
+                    ),
+                }
+            )
+
+            owner_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], owner_route_input)
+            heredoc_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], heredoc_owner_route_input)
+            extra_write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                owner_route_with_extra_write_input,
+            )
+
+            for checked_payload in (owner_payload, heredoc_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+            extra_write_codes = {finding["code"] for finding in extra_write_payload["findings"]}
+            self.assertTrue(extra_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", extra_write_codes)
+
+    def test_hooks_pre_tool_allows_writeback_residual_risk_product_path_evidence(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            dirty_source_path = product_root / "src" / "mylittleharness" / "checks.py"
+            dirty_test_path = product_root / "tests" / "test_cli.py"
+            residual_risk = f"left unaccepted: {dirty_source_path}; {dirty_test_path}"
+            writeback_dry_run_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'mylittleharness --root . writeback --dry-run --residual-risk "{residual_risk}"',
+                }
+            )
+            writeback_apply_arguments_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "arguments": f'mylittleharness --root . writeback --apply --residual-risk "{residual_risk}"',
+                }
+            )
+            direct_source_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content {dirty_source_path} '# bypass'",
+                }
+            )
+
+            dry_run_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], writeback_dry_run_input)
+            apply_arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], writeback_apply_arguments_input)
+            direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_source_write_input)
+
+            for checked_payload in (dry_run_payload, apply_arguments_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+                self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+
+            direct_write_codes = {finding["code"] for finding in direct_write_payload["findings"]}
+            self.assertTrue(direct_write_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", direct_write_codes)
+            self.assertIn("hooks-policy-block-product-root-direct-edit", direct_write_codes)
+
+    def test_hooks_pre_tool_allows_research_import_related_prompt_provenance(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            related_prompt = "project/" + "plan-incubation/source-prompt.md"
+            target_research = "project/" + "research/imported-note.md"
+            prompt_path = root / "project" / "plan-incubation" / "source-prompt.md"
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_text = "---\n" 'status: "incubating"\n' "---\n# Source Prompt\n"
+            prompt_path.write_text(prompt_text, encoding="utf-8")
+            research_apply_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . research-import --apply "
+                        f"--title imported-note --text body --target {target_research} "
+                        f"--related-prompt {related_prompt}"
+                    ),
+                }
+            )
+            direct_prompt_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": ("Set-" + f"Content {related_prompt} '# bypass'"),
+                }
+            )
+            owner_route_with_extra_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . research-import --apply "
+                        f"--title imported-note --text body --target {target_research} "
+                        f"--related-prompt {related_prompt}; Set-"
+                        f"Content {related_prompt} '# bypass'"
+                    ),
+                }
+            )
+
+            research_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], research_apply_input)
+            direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_prompt_write_input)
+            extra_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], owner_route_with_extra_write_input)
+
+            self.assertFalse(research_payload["block"])
+            finding_codes = {finding["code"] for finding in research_payload["findings"]}
+            self.assertIn("hooks-policy-allow-research-import-related-prompt-provenance", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+            self.assertEqual(prompt_text, prompt_path.read_text(encoding="utf-8"))
+            self.assertTrue(direct_write_payload["block"])
+            self.assertTrue(extra_write_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in direct_write_payload["findings"]},
+            )
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-path",
+                {finding["code"] for finding in extra_write_payload["findings"]},
             )
 
     def test_hooks_pre_tool_blocks_nonroute_project_markdown_writes(self) -> None:
@@ -19532,6 +22532,25 @@ class CliTests(unittest.TestCase):
             self.assertNotIn(
                 "hooks-policy-block-mlh-mutation-without-mode",
                 {finding["code"] for finding in intelligence_payload["findings"]},
+            )
+
+            hooks_doctor_input = root / "pre_tool_hooks_doctor_input.json"
+            hooks_doctor_input.write_text(
+                json.dumps({"toolName": "shell_command", "command": "my" + "littleharness --root . hooks doctor"}),
+                encoding="utf-8",
+            )
+            before_hooks_doctor = snapshot_tree_bytes(root)
+            hooks_doctor_output = io.StringIO()
+            with redirect_stdout(hooks_doctor_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(hooks_doctor_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_hooks_doctor, snapshot_tree_bytes(root))
+            hooks_doctor_payload = json.loads(hooks_doctor_output.getvalue())
+            self.assertFalse(hooks_doctor_payload["block"])
+            self.assertNotIn(
+                "hooks-policy-block-mlh-mutation-without-mode",
+                {finding["code"] for finding in hooks_doctor_payload["findings"]},
             )
 
             mcp_search_input = root / "pre_tool_mcp_search_input.json"
@@ -21146,6 +24165,35 @@ class CliTests(unittest.TestCase):
                 main(["--root", str(root)])
             self.assertEqual(raised.exception.code, 2)
 
+    def test_unknown_underscore_option_suggests_dashed_option(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            output = io.StringIO()
+            with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--dry-run",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "sample-item",
+                        "--title",
+                        "Sample Item",
+                        "--status",
+                        "accepted",
+                        "--slice_closeout_boundary",
+                        "sample boundary",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("unknown option --slice_closeout_boundary", rendered)
+            self.assertIn("did you mean --slice-closeout-boundary", rendered)
+            self.assertNotIn("argument operation: invalid choice", rendered)
+
     def test_attach_dry_run_reports_product_fixture_noop_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -22010,6 +25058,8 @@ class CliTests(unittest.TestCase):
             spec_text = (root / "project/specs/workflow/manual-spec.md").read_text(encoding="utf-8")
             self.assertTrue(research_text.startswith("---\n"))
             self.assertIn('status: "imported"', research_text)
+            self.assertIn('source: "MyLittleHarness lifecycle frontmatter repair"', research_text)
+            self.assertNotIn("mylittleharness repair --apply", research_text + verification_text + spec_text)
             self.assertIn("Imported by hand.", research_text)
             self.assertTrue(verification_text.startswith("---\n"))
             self.assertIn('status: "pending"', verification_text)
@@ -22046,6 +25096,67 @@ class CliTests(unittest.TestCase):
             check_rendered = check_output.getvalue()
             self.assertNotIn("research artifact has no frontmatter", check_rendered)
             self.assertNotIn("lifecycle markdown artifact has no frontmatter", check_rendered)
+
+    def test_repair_apply_normalizes_deprecated_lifecycle_source_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            note_rel = "/".join(["project", "plan-incubation", "source-wording.md"])
+            note_path = root / note_rel
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            original_text = (
+                "---\n"
+                'topic: "Source Wording"\n'
+                'status: "incubating"\n'
+                'created: "2026-05-01"\n'
+                'updated: "2026-05-01"\n'
+                'source: "incubate cli"\n'
+                "---\n"
+                "# Source Wording\n\n"
+                "## Provenance\n\n"
+                "- Source: incubate cli\n"
+                "- Non-authority note: incubation is temporary synthesis; promoted research/spec/plan/state remains authority when accepted.\n\n"
+                "## Entries\n\n"
+                "### 2026-05-01\n\n"
+                "Old note.\n"
+            )
+            note_path.write_text(original_text, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "repair", "--dry-run"])
+            dry_rendered = dry_output.getvalue()
+
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("lifecycle-source-provenance-plan", dry_rendered)
+            self.assertIn("lifecycle-source-provenance-route-write", dry_rendered)
+            self.assertIn("MyLittleHarness incubation route", dry_rendered)
+            self.assertFalse((root / ".mylittleharness").exists())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "repair", "--apply"])
+            apply_rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 0)
+            self.assertIn("lifecycle-source-provenance-updated", apply_rendered)
+            self.assertIn("lifecycle-source-provenance-route-write", apply_rendered)
+            self.assertIn("lifecycle-source-provenance-rerun", apply_rendered)
+
+            updated_text = note_path.read_text(encoding="utf-8")
+            self.assertIn('source: "MyLittleHarness incubation route"', updated_text)
+            self.assertIn("- Source: MyLittleHarness incubation route", updated_text)
+            self.assertNotIn("incubate cli", updated_text)
+
+            snapshot_dirs = list((root / ".mylittleharness" / "snapshots" / "repair").iterdir())
+            self.assertEqual(1, len(snapshot_dirs))
+            metadata = json.loads((snapshot_dirs[0] / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual("lifecycle-source-provenance-repair", metadata["repair_class"])
+            self.assertEqual([note_rel], metadata["target_paths"])
+            self.assertEqual(["source"], metadata["planned_frontmatter_keys_by_path"][note_rel])
+            self.assertEqual({"source": "MyLittleHarness incubation route"}, metadata["planned_frontmatter_values_by_path"][note_rel])
+            self.assertEqual(original_text, (snapshot_dirs[0] / "files" / note_rel).read_text(encoding="utf-8"))
 
     def test_check_reports_product_docs_as_lightweight_and_plan_facing_docs_specs_as_strict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -23073,7 +26184,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.connect-readiness-action-packet.v1", payload["connectReadiness"]["schema"])
             self.assertEqual("Phase 1", payload["connectReadiness"]["lifecycle"]["active_phase"])
             self.assertTrue(payload["connectReadiness"]["writeback"]["requiredWhenPlanStatusActive"])
-            self.assertIn("projection --warm-cache --target all", payload["connectReadiness"]["nextSafeCommand"])
+            self.assertIn("mlhd run-once --apply", payload["connectReadiness"]["nextSafeCommand"])
             self.assertIn("docmapStatus", payload["connectReadiness"]["docs"])
             self.assertTrue(payload["connectReadiness"]["docs"]["roleMetadata"]["docmapIsRoutingAid"])
             self.assertIn("spec_status", payload["connectReadiness"]["docs"]["roleMetadata"]["strictSpecPostureFields"])
@@ -23082,7 +26193,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("connectReadiness", payload["agentPacket"])
             self.assertEqual("absent", payload["mlhd"]["control_status"])
             self.assertEqual("mylittleharness.projection-cache-posture.v1", payload["cachePosture"]["schema"])
-            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["cachePosture"]["self_heal_command"])
+            self.assertEqual("mylittleharness --root <root> mlhd run-once --apply", payload["cachePosture"]["self_heal_command"])
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["cachePosture"]["manual_recovery_command"])
             section_names = [section["name"] for section in payload["sections"]]
             self.assertIn("Connect Readiness", section_names)
             self.assertIn("Lifecycle Provenance", section_names)
@@ -23716,6 +26828,26 @@ def make_product_diff_scope_fixture(tmp: Path) -> tuple[Path, Path]:
     return root, product_root
 
 
+def write_active_roadmap_plan(root: Path, item_id: str) -> None:
+    (root / "project" / ("implementation-" + "plan.md")).write_text(
+        "---\n"
+        'plan_id: "active-roadmap-plan"\n'
+        'title: "Active Roadmap Plan"\n'
+        f'primary_roadmap_item: "{item_id}"\n'
+        "covered_roadmap_items:\n"
+        f'  - "{item_id}"\n'
+        'active_phase: "phase-1-implementation"\n'
+        'phase_status: "pending"\n'
+        "---\n"
+        "# Active Roadmap Plan\n\n"
+        "## Phases\n\n"
+        "### phase-1-implementation\n\n"
+        "- id: `phase-1-implementation`\n"
+        "- status: `pending`\n",
+        encoding="utf-8",
+    )
+
+
 def product_diff_scope_posture(product_root: Path) -> VcsPosture:
     changed = (
         VcsChangedPath("M", "src/allowed.py"),
@@ -23730,6 +26862,44 @@ def product_diff_scope_posture(product_root: Path) -> VcsPosture:
         changed_count=len(changed),
         changed_samples=changed,
         changed_paths=changed,
+    )
+
+
+def _write_slice_result_gate_roadmap(root: Path, *, audit_status: str) -> None:
+    (root / "project" / "roadmap.md").write_text(
+        "# Roadmap\n\n"
+        "## Items\n\n"
+        "### Hook Policy Audit\n\n"
+        "- `id`: `hook-policy-audit`\n"
+        f"- `status`: `{audit_status}`\n"
+        "- `order`: `10`\n"
+        "- `execution_slice`: `hook-policy-audit`\n"
+        "- `slice_goal`: `Audit hook weak spots and decide whether downstream slices remain valid.`\n"
+        "- `slice_members`: `[\"hook-policy-audit\"]`\n"
+        "- `slice_dependencies`: `[]`\n"
+        "- `slice_closeout_boundary`: `Audit artifact only; downstream implementation requires explicit decision packet.`\n"
+        "- `dependencies`: `[]`\n"
+        "- `target_artifacts`: `[\"project/verification/hook-policy-audit.md\"]`\n"
+        "- `verification_summary`: `Expected: decision packet records safe_to_continue_existing_sequence or fork/new-slice decisions.`\n"
+        "- `docs_decision`: `not-needed`\n"
+        "- `carry_forward`: `Use this audit to gate downstream replay/classifier work.`\n"
+        "- `slice_result_gate`: `decision-packet`\n"
+        "\n"
+        "### Hook Policy Replay\n\n"
+        "- `id`: `hook-policy-replay`\n"
+        "- `status`: `accepted`\n"
+        "- `order`: `20`\n"
+        "- `execution_slice`: `hook-policy-replay`\n"
+        "- `slice_goal`: `Build replay corpus from audited hook weak spots.`\n"
+        "- `slice_members`: `[\"hook-policy-replay\"]`\n"
+        "- `slice_dependencies`: `[\"hook-policy-audit\"]`\n"
+        "- `slice_closeout_boundary`: `Replay corpus only.`\n"
+        "- `dependencies`: `[\"hook-policy-audit\"]`\n"
+        "- `target_artifacts`: `[\"tests/test_cli.py\", \"project/verification/hook-policy-replay.md\"]`\n"
+        "- `verification_summary`: `Expected: replay corpus follows the audit decision packet.`\n"
+        "- `docs_decision`: `not-needed`\n"
+        "- `carry_forward`: `Use replay corpus as classifier acceptance gate.`\n",
+        encoding="utf-8",
     )
 
 

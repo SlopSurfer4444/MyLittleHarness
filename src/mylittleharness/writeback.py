@@ -67,6 +67,7 @@ LIFECYCLE_WRITEBACK_FIELDS = ("active_phase", "phase_status", "last_archived_pla
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 PHASE_STATUS_VALUES = {"pending", "active", "in_progress", "blocked", "complete", "skipped", "paused"}
 UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS = {"blocked": "blocked", "superseded": "skipped"}
+ARCHIVE_COLLISION_POLICY_VALUES = {"refuse", "preserve-existing"}
 PHASE_BODY_COMPLETE_STATUS = "done"
 PHASE_BODY_STATUS_VALUES = {*PHASE_STATUS_VALUES, PHASE_BODY_COMPLETE_STATUS}
 PHASE_HANDOFF_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
@@ -84,6 +85,23 @@ GENERIC_ACCEPTANCE_EVIDENCE_VALUES = {
     "verification passed",
 }
 NON_IMPLEMENTATION_DELIVERABLE_CLASSES = {"audit", "proposal", "diagnostic", "evidence", "fan-in-review", "review", "research"}
+DECLARED_EVIDENCE_TARGET_PREFIXES = (
+    "project/adrs/",
+    "project/decisions/",
+    "project/research/",
+    "project/specs/",
+    "project/verification/",
+)
+DECLARED_TARGET_SUBSTITUTION_MARKERS = (
+    "artifact substitution",
+    "evidence substitution",
+    "substitute artifact",
+    "substitute evidence",
+    "substituted artifact",
+    "target substitution",
+)
+SCOPED_INTERRUPT_WORK_INTENT = "scoped_interrupt"
+SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY = "no-roadmap-status-movement-without-explicit-request"
 FAN_IN_REVIEW_REQUIRED_EVIDENCE_MARKERS = (
     ("source snapshot", ("source snapshot", "source hash", "source ref", "source reference")),
     ("cluster disposition", ("cluster disposition", "disposition matrix", "disposition rationale")),
@@ -203,6 +221,7 @@ class WritebackRequest:
     roadmap_status: str = ""
     archived_plan: str = ""
     archive_retarget_skip_rels: tuple[str, ...] = ()
+    archive_collision_policy: str = "refuse"
     input_errors: tuple[str, ...] = ()
 
 
@@ -264,6 +283,7 @@ def make_writeback_request(
     roadmap_status: str | None = None,
     archived_plan: str | None = None,
     archive_retarget_skip_rels: tuple[str, ...] | list[str] = (),
+    archive_collision_policy: str | None = None,
     **values: str | None,
 ) -> WritebackRequest:
     input_errors = tuple(_text_field_input_errors(values))
@@ -289,6 +309,7 @@ def make_writeback_request(
         roadmap_status=_normalized_status(roadmap_status),
         archived_plan=_normalize_rel(_normalized_value(archived_plan)),
         archive_retarget_skip_rels=tuple(_dedupe_nonempty(_normalize_rel(rel) for rel in archive_retarget_skip_rels)),
+        archive_collision_policy=_normalized_archive_collision_policy(archive_collision_policy),
         input_errors=input_errors,
     )
 
@@ -574,6 +595,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
     planned = closeout_plan.values
     findings.append(_planned_closeout_finding(planned))
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=False))
+    findings.extend(_scoped_interrupt_writeback_boundary_findings(inventory, request, apply=False))
     completion_reason = _writeback_acceptance_completion_reason(inventory, request, planned)
     findings.extend(
         acceptance_evidence_findings(
@@ -635,6 +657,15 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
         active_plan_lifecycle,
         completed_phase="" if archive_plan else _phase_advancement_completed_phase(inventory, active_plan_lifecycle),
     )
+    archive_capsule_findings: list[Finding] = []
+    if archive_plan and projected_active_plan_text is not None:
+        projected_active_plan_text, archive_capsule_findings = _archive_plan_text_with_closeout_evidence_capsule(
+            projected_active_plan_text,
+            planned,
+            closeout_plan.identity,
+            archive_plan.archive_rel_path,
+            apply=False,
+        )
     archived_refresh_plan = _archived_plan_refresh_plan(inventory, request, planned, closeout_plan.identity, apply=False)
     projected_state_text, projected_active_plan_text, roadmap_plan, route_retarget_plans = _with_incubation_archive_replacements(
         projected_state_text,
@@ -703,6 +734,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
         )
     )
     findings.extend(_active_plan_sync_plan_findings(inventory, planned, active_plan_lifecycle, apply=False))
+    findings.extend(archive_capsule_findings)
     if archived_refresh_plan:
         findings.extend(archived_refresh_plan.findings)
     if roadmap_plan:
@@ -847,6 +879,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         )
     )
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=True))
+    findings.extend(_scoped_interrupt_writeback_boundary_findings(inventory, request, apply=True))
     completion_reason = _writeback_acceptance_completion_reason(inventory, request, planned)
     findings.extend(
         acceptance_evidence_findings(
@@ -1608,12 +1641,20 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
         _requested_or_current_active_phase(inventory, active_plan_lifecycle),
         "",
     )
+    plan_text, capsule_findings = _archive_plan_text_with_closeout_evidence_capsule(
+        plan_text,
+        planned,
+        closeout_plan.identity,
+        archive_plan.archive_rel_path,
+        apply=True,
+    )
     findings: list[Finding] = [
         Finding("info", "writeback-apply", "closeout/state writeback apply started"),
         _planned_closeout_finding(planned),
     ]
     findings.extend(batch_gate_findings)
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=True))
+    findings.extend(_scoped_interrupt_writeback_boundary_findings(inventory, request, apply=True))
     findings.extend(_archive_plan_findings(inventory, archive_plan, apply=True))
     findings.append(
         Finding(
@@ -1628,8 +1669,9 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
 
     state_tmp = state.path.with_name(f".{state.path.name}.writeback.tmp")
     state_backup = state.path.with_name(f".{state.path.name}.writeback.backup")
-    archive_tmp = archive_plan.archive_path.with_name(f".{archive_plan.archive_path.name}.writeback.tmp")
-    archive_backup = archive_plan.archive_path.with_name(f".{archive_plan.archive_path.name}.writeback.backup")
+    archive_write_needed = archive_plan.existing_archive_text != plan_text
+    archive_tmp = archive_plan.archive_path.with_name(f".{archive_plan.archive_path.name}.writeback.tmp") if archive_write_needed else None
+    archive_backup = archive_plan.archive_path.with_name(f".{archive_plan.archive_path.name}.writeback.backup") if archive_write_needed else None
     plan_backup = archive_plan.plan.path.with_name(f".{archive_plan.plan.path.name}.writeback.backup")
     roadmap_tmp = _roadmap_writeback_tmp(roadmap_plan)
     incubation_tmp = _incubation_writeback_tmp(incubation_plan)
@@ -1698,10 +1740,12 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
     tmp_checks = [
         (state_tmp, "temporary state write path"),
         (state_backup, "temporary state backup path"),
-        (archive_tmp, "temporary archive write path"),
-        (archive_backup, "temporary archive backup path"),
         (plan_backup, "temporary active-plan backup path"),
     ]
+    if archive_tmp:
+        tmp_checks.append((archive_tmp, "temporary archive write path"))
+    if archive_backup:
+        tmp_checks.append((archive_backup, "temporary archive backup path"))
     if roadmap_tmp:
         tmp_checks.append((roadmap_tmp, "temporary roadmap write path"))
     if roadmap_backup:
@@ -1733,9 +1777,10 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
 
     operations: list[AtomicFileWrite | AtomicFileDelete] = [
         AtomicFileWrite(state.path, state_tmp, state_text, state_backup),
-        AtomicFileWrite(archive_plan.archive_path, archive_tmp, plan_text, archive_backup),
         AtomicFileDelete(archive_plan.plan.path, plan_backup),
     ]
+    if archive_tmp and archive_backup:
+        operations.insert(1, AtomicFileWrite(archive_plan.archive_path, archive_tmp, plan_text, archive_backup))
     if roadmap_tmp and roadmap_backup and roadmap_plan:
         operations.append(AtomicFileWrite(roadmap_plan.target_path, roadmap_tmp, roadmap_plan.updated_text, roadmap_backup))
     if incubation_tmp and incubation_write_backup and incubation_plan:
@@ -1771,6 +1816,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
             )
         )
     findings.extend(sync_findings)
+    findings.extend(capsule_findings)
     findings.extend(route_write_evidence)
     findings.extend(guard_findings)
     if roadmap_plan:
@@ -1954,6 +2000,17 @@ def acceptance_evidence_findings(
             )
         )
 
+    findings.extend(
+        _declared_target_evidence_findings(
+            inventory,
+            closeout_values,
+            contract,
+            completion_reason=completion_reason,
+            severity=severity,
+            code_prefix=code_prefix,
+        )
+    )
+
     fan_in_missing = _fan_in_review_disposition_missing_fields(inventory, contract, evidence_text)
     if fan_in_missing:
         findings.append(
@@ -1992,6 +2049,42 @@ def acceptance_evidence_findings(
                 f"deliverable_class={contract.deliverable_class}; item(s)={', '.join(contract.item_ids) or '<none>'}"
             ),
             contract.source,
+        )
+    ]
+
+
+def _scoped_interrupt_writeback_boundary_findings(
+    inventory: Inventory,
+    request: WritebackRequest,
+    *,
+    apply: bool,
+) -> list[Finding]:
+    plan = inventory.active_plan_surface
+    if plan is None or not plan.exists or not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return []
+    data = plan.frontmatter.data
+    work_intent = str(data.get("work_intent") or "").strip().casefold()
+    if work_intent != SCOPED_INTERRUPT_WORK_INTENT:
+        return []
+    policy = str(data.get("roadmap_status_policy") or "").strip() or "<empty>"
+    prefix = "" if apply else "would "
+    if request.roadmap_item or request.roadmap_status:
+        movement = (
+            f"explicit roadmap sync requested: item={request.roadmap_item or '<empty>'!r}, "
+            f"status={request.roadmap_status or '<empty>'!r}"
+        )
+    else:
+        movement = "no roadmap status movement requested"
+    severity = "info" if policy == SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY else "warn"
+    return [
+        Finding(
+            severity,
+            "writeback-scoped-interrupt-boundary",
+            (
+                f"{prefix}handle scoped_interrupt closeout/archive with roadmap_status_policy {policy!r}; "
+                f"{movement}; record verification, docs_decision, residual risk, and carry_forward/return-to-roadmap evidence"
+            ),
+            plan.rel_path,
         )
     ]
 
@@ -2263,6 +2356,98 @@ def _acceptance_deliverable_class_mismatch(contract: AcceptanceEvidenceContract,
         if has_command_or_path and not any(marker in normalized for marker in class_markers):
             return f"{deliverable_class} deliverable cites implementation/test evidence without the required artifact or report proof"
     return ""
+
+
+def _declared_target_evidence_findings(
+    inventory: Inventory,
+    closeout_values: dict[str, str],
+    contract: AcceptanceEvidenceContract,
+    *,
+    completion_reason: str,
+    severity: str,
+    code_prefix: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    evidence_text = _acceptance_evidence_text(closeout_values)
+    normalized = _normalized_evidence_text(evidence_text)
+    for target in contract.target_artifacts:
+        target_rel = _normalize_rel(target)
+        if not _is_declared_evidence_target(target_rel):
+            continue
+        if _declared_evidence_target_exists(inventory, target_rel):
+            if target_rel.casefold() not in normalized and Path(target_rel).name.casefold() not in normalized:
+                findings.append(
+                    Finding(
+                        severity,
+                        f"{code_prefix}-target-evidence-uncited",
+                        (
+                            f"{completion_reason} declares target_artifacts evidence target {target_rel}, but closeout "
+                            "evidence does not cite that artifact path or filename"
+                        ),
+                        contract.source,
+                    )
+                )
+            continue
+        if _declared_target_substitution_recorded(inventory, closeout_values, target_rel):
+            continue
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-target-evidence-missing",
+                (
+                    f"{completion_reason} declares target_artifacts evidence target {target_rel}, but that artifact is "
+                    "missing and closeout does not record a reviewed artifact substitution with before/after paths and "
+                    "a residual-risk marker"
+                ),
+                contract.source,
+            )
+        )
+    return findings
+
+
+def _is_declared_evidence_target(rel_path: str) -> bool:
+    normalized = _normalize_rel(rel_path).casefold()
+    if not normalized.endswith(".md"):
+        return False
+    return any(normalized.startswith(prefix) for prefix in DECLARED_EVIDENCE_TARGET_PREFIXES)
+
+
+def _declared_evidence_target_exists(inventory: Inventory, rel_path: str) -> bool:
+    target = inventory.root / rel_path
+    if _path_escapes_root(inventory.root, target):
+        return False
+    return target.is_file() and not target.is_symlink()
+
+
+def _declared_target_substitution_recorded(
+    inventory: Inventory,
+    closeout_values: dict[str, str],
+    target_rel: str,
+) -> bool:
+    evidence_text = _acceptance_evidence_text(closeout_values)
+    normalized = _normalized_evidence_text(evidence_text)
+    residual_risk = _normalized_evidence_text(closeout_values.get("residual_risk", ""))
+    target_norm = _normalize_rel(target_rel).casefold()
+    if target_norm not in normalized:
+        return False
+    if not any(marker in normalized for marker in DECLARED_TARGET_SUBSTITUTION_MARKERS):
+        return False
+    if not any(marker in residual_risk for marker in ("substitution", "substitute", "residual risk")):
+        return False
+    if "before" not in normalized or "after" not in normalized:
+        return False
+    for replacement in _route_markdown_paths(normalized):
+        if replacement == target_norm:
+            continue
+        replacement_path = inventory.root / replacement
+        if not _path_escapes_root(inventory.root, replacement_path) and replacement_path.is_file() and not replacement_path.is_symlink():
+            return True
+    return False
+
+
+def _route_markdown_paths(text: str) -> tuple[str, ...]:
+    paths = re.findall(r"project/[a-z0-9_./-]+\.md", text)
+    return tuple(_dedupe_nonempty(_normalize_rel(path).casefold() for path in paths))
 
 
 def _fan_in_review_disposition_missing_fields(
@@ -2926,7 +3111,7 @@ def _writeback_route_write_evidence(
     if inventory.state:
         writes.append(RouteWriteEvidence(inventory.state.rel_path, inventory.state.content, state_text))
     if archive_plan:
-        writes.append(RouteWriteEvidence(archive_plan.archive_rel_path, None, archive_plan_text))
+        writes.append(RouteWriteEvidence(archive_plan.archive_rel_path, archive_plan.existing_archive_text, archive_plan_text))
         writes.append(RouteWriteEvidence(archive_plan.plan.rel_path, archive_plan.plan.content, None))
     elif archived_refresh_plan:
         writes.append(
@@ -3041,7 +3226,9 @@ def _archive_route_write_context(
     if rel_path == DEFAULT_STATE_REL:
         return "archive-final-state", "project-state-lifecycle-closed"
     if rel_path == _normalize_rel(archive_plan.archive_rel_path):
-        return "archive-final-state", "archived-plan-route-created"
+        if write.before_text is None:
+            return "archive-final-state", "archived-plan-route-created"
+        return "archive-final-state", "archived-plan-route-reused"
     if rel_path == _normalize_rel(archive_plan.plan.rel_path) and write.after_text is None:
         return "archive-final-state", "active-plan-route-deleted"
     if incubation_plan and rel_path == _normalize_rel(incubation_plan.target_rel) and write.before_text is None:
@@ -3812,6 +3999,10 @@ class ArchivePlan:
     plan: Surface
     archive_rel_path: str
     archive_path: Path
+    canonical_archive_rel_path: str = ""
+    preserved_collision_rel_path: str = ""
+    existing_archive_text: str | None = None
+    existing_archive_match: str = ""
 
 
 @dataclass(frozen=True)
@@ -3841,8 +4032,34 @@ def _archive_plan(inventory: Inventory, request: WritebackRequest) -> ArchivePla
     plan = inventory.active_plan_surface
     if plan is None or not plan.exists:
         return None
-    rel_path = f"{DEFAULT_ARCHIVE_DIR_REL}/{date.today().isoformat()}-{_archive_slug(plan)}.md"
-    return ArchivePlan(plan=plan, archive_rel_path=rel_path, archive_path=inventory.root / rel_path)
+    canonical_rel_path = f"{DEFAULT_ARCHIVE_DIR_REL}/{date.today().isoformat()}-{_archive_slug(plan)}.md"
+    rel_path = canonical_rel_path
+    preserved_collision_rel_path = ""
+    canonical_path = inventory.root / canonical_rel_path
+    existing_archive_text: str | None = None
+    existing_archive_match = ""
+    if canonical_path.exists():
+        existing_archive_text = _read_route_text(canonical_path)
+        existing_archive_match = _archive_existing_match_kind(
+            inventory,
+            request,
+            plan,
+            canonical_rel_path,
+            existing_archive_text,
+        )
+        if not existing_archive_match and request.archive_collision_policy == "preserve-existing":
+            rel_path = _next_archive_collision_rel(inventory.root, canonical_rel_path)
+            preserved_collision_rel_path = canonical_rel_path
+            existing_archive_text = None
+    return ArchivePlan(
+        plan=plan,
+        archive_rel_path=rel_path,
+        archive_path=inventory.root / rel_path,
+        canonical_archive_rel_path=canonical_rel_path,
+        preserved_collision_rel_path=preserved_collision_rel_path,
+        existing_archive_text=existing_archive_text,
+        existing_archive_match=existing_archive_match,
+    )
 
 
 def _should_archive_active_plan(_inventory: Inventory, request: WritebackRequest) -> bool:
@@ -3851,7 +4068,7 @@ def _should_archive_active_plan(_inventory: Inventory, request: WritebackRequest
 
 def _archive_plan_findings(inventory: Inventory, archive_plan: ArchivePlan, apply: bool) -> list[Finding]:
     verb = "archived" if apply else "would archive"
-    return [
+    findings = [
         Finding("info", "writeback-archive-active-plan", f"active plan: {archive_plan.plan.rel_path}", archive_plan.plan.rel_path),
         Finding("info", "writeback-archive-target", f"{verb} active plan to {archive_plan.archive_rel_path}", archive_plan.archive_rel_path),
         Finding(
@@ -3861,6 +4078,36 @@ def _archive_plan_findings(inventory: Inventory, archive_plan: ArchivePlan, appl
             inventory.state.rel_path if inventory.state else None,
         ),
     ]
+    if archive_plan.existing_archive_match:
+        match_label = (
+            "planned archive content"
+            if archive_plan.existing_archive_match == "planned-archive"
+            else "current active-plan content"
+        )
+        findings.insert(
+            2,
+            Finding(
+                "info",
+                "writeback-archive-existing-target-reused",
+                (
+                    f"{verb} by reusing existing archive target {archive_plan.archive_rel_path} "
+                    f"because it matches {match_label}"
+                ),
+                archive_plan.archive_rel_path,
+            ),
+        )
+    if archive_plan.preserved_collision_rel_path:
+        preserve_verb = "preserved" if apply else "would preserve"
+        findings.insert(
+            2,
+            Finding(
+                "info",
+                "writeback-archive-collision-preserved",
+                f"{preserve_verb} existing archive target {archive_plan.preserved_collision_rel_path} and write incoming active plan to {archive_plan.archive_rel_path}",
+                archive_plan.preserved_collision_rel_path,
+            ),
+        )
+    return findings
 
 
 def _archive_preflight_errors(inventory: Inventory, request: WritebackRequest) -> list[Finding]:
@@ -3873,6 +4120,8 @@ def _archive_preflight_errors(inventory: Inventory, request: WritebackRequest) -
     manifest_plan = _manifest_memory_value(inventory, "plan_file", DEFAULT_PLAN_REL)
     archive_dir = _manifest_memory_value(inventory, "archive_dir", DEFAULT_ARCHIVE_DIR_REL)
 
+    if request.archive_collision_policy not in ARCHIVE_COLLISION_POLICY_VALUES:
+        errors.append(Finding("error", "writeback-refused", "--on-archive-collision must be one of: preserve-existing, refuse"))
     if plan_status != "active":
         errors.append(Finding("error", "writeback-refused", f"archive-active-plan requires plan_status active; current plan_status is {plan_status or '<empty>'!r}", state.rel_path if state else None))
     if phase_status != "complete" and request.roadmap_status not in UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS:
@@ -3909,11 +4158,11 @@ def _archive_preflight_errors(inventory: Inventory, request: WritebackRequest) -
         elif parent.exists() and not parent.is_dir():
             errors.append(Finding("error", "writeback-refused", f"archive directory contains a non-directory segment: {parent.relative_to(inventory.root).as_posix()}"))
 
-    archive_plan = _archive_plan(inventory, WritebackRequest(closeout={}, lifecycle={}, archive_active_plan=True))
+    archive_plan = _archive_plan(inventory, request)
     if archive_plan:
         if _path_escapes_root(inventory.root, archive_plan.archive_path):
             errors.append(Finding("error", "writeback-refused", "archive target escapes the target root", archive_plan.archive_rel_path))
-        elif archive_plan.archive_path.exists():
+        elif archive_plan.archive_path.exists() and not archive_plan.existing_archive_match:
             errors.append(Finding("error", "writeback-refused", f"archive target already exists: {archive_plan.archive_rel_path}", archive_plan.archive_rel_path))
     return errors
 
@@ -3949,6 +4198,61 @@ def _archive_slug(plan: Surface) -> str:
     raw = str(plan.frontmatter.data.get("title") or _first_heading(plan.content) or "implementation-plan")
     slug = re.sub(r"[^A-Za-z0-9]+", "-", raw.strip().lower()).strip("-")
     return slug or "implementation-plan"
+
+
+def _next_archive_collision_rel(root: Path, canonical_rel_path: str) -> str:
+    canonical = Path(canonical_rel_path)
+    parent = canonical.parent.as_posix()
+    stem = canonical.stem
+    suffix = canonical.suffix or ".md"
+    for index in range(2, 1000):
+        rel_path = f"{parent}/{stem}-collision-{index}{suffix}"
+        if not (root / rel_path).exists():
+            return rel_path
+    digest = hashlib.sha256(canonical_rel_path.encode("utf-8")).hexdigest()[:12]
+    return f"{parent}/{stem}-collision-{digest}{suffix}"
+
+
+def _archive_existing_match_kind(
+    inventory: Inventory,
+    request: WritebackRequest,
+    plan: Surface,
+    archive_rel_path: str,
+    existing_text: str | None,
+) -> str:
+    if existing_text is None:
+        return ""
+    if existing_text == _archive_expected_plan_text(inventory, request, plan, archive_rel_path):
+        return "planned-archive"
+    if existing_text == plan.content:
+        return "active-plan"
+    return ""
+
+
+def _archive_expected_plan_text(
+    inventory: Inventory,
+    request: WritebackRequest,
+    plan: Surface,
+    archive_rel_path: str,
+) -> str:
+    closeout_plan = _closeout_writeback_plan(inventory, request, archive_rel_path)
+    lifecycle_values = _planned_lifecycle_values(request, archive_rel_path, _archive_phase_status(inventory, request))
+    active_plan_lifecycle = _active_plan_lifecycle_values(inventory, request, lifecycle_values)
+    plan_text, _findings = _active_plan_text_with_synced_values(
+        plan,
+        closeout_plan.values,
+        active_plan_lifecycle,
+        _requested_or_current_active_phase(inventory, active_plan_lifecycle),
+        "",
+    )
+    plan_text, _capsule_findings = _archive_plan_text_with_closeout_evidence_capsule(
+        plan_text,
+        closeout_plan.values,
+        closeout_plan.identity,
+        archive_rel_path,
+        apply=False,
+    )
+    return plan_text
 
 
 def _first_heading(text: str) -> str | None:
@@ -4013,6 +4317,51 @@ def _active_plan_sync_plan_findings(
     return [
         Finding(finding.severity, finding.code.replace("updated", "plan"), finding.message.replace("updated", "would update"), finding.source, finding.line)
         for finding in findings
+    ]
+
+
+def _archive_plan_text_with_closeout_evidence_capsule(
+    text: str,
+    closeout_values: dict[str, str],
+    identity: CloseoutIdentity,
+    archive_rel_path: str,
+    *,
+    apply: bool,
+) -> tuple[str, list[Finding]]:
+    prefix = "" if apply else "would "
+    if not closeout_values:
+        return text, [
+            Finding(
+                "info",
+                "writeback-archive-closeout-evidence-capsule-skipped",
+                (
+                    f"{prefix}leave archived plan without an MLH closeout evidence capsule "
+                    "because no closeout facts were available for archive-active-plan"
+                ),
+                archive_rel_path,
+            )
+        ]
+
+    updated = _replace_or_append_writeback_block(text, closeout_values, identity)
+    if updated == text:
+        return text, [
+            Finding(
+                "info",
+                "writeback-archive-closeout-evidence-capsule-noop",
+                "archived plan already contains an MLH closeout evidence capsule matching planned facts",
+                archive_rel_path,
+            )
+        ]
+    return updated, [
+        Finding(
+            "info",
+            "writeback-archive-closeout-evidence-capsule",
+            (
+                f"{prefix}materialize archived-plan MLH closeout evidence capsule "
+                "before deleting the active plan route"
+            ),
+            archive_rel_path,
+        )
     ]
 
 
@@ -4640,6 +4989,10 @@ def _normalized_status(value: object) -> str:
 
 def _normalized_item_id(value: object) -> str:
     return str(value or "").strip().casefold().replace("_", "-")
+
+
+def _normalized_archive_collision_policy(value: object) -> str:
+    return str(value or "refuse").strip().casefold().replace("_", "-") or "refuse"
 
 
 def _is_phase_handoff_terminal_status(value: object) -> bool:

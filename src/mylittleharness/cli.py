@@ -109,6 +109,7 @@ from .meta_feedback import (
     META_FEEDBACK_ROOT_ENV_VAR,
     is_central_meta_feedback_inventory,
     make_meta_feedback_request,
+    meta_feedback_env_destination_root,
     meta_feedback_apply_findings,
     meta_feedback_dry_run_findings,
 )
@@ -160,11 +161,17 @@ from .review_tokens import make_review_token_request, review_token_findings
 from .routes import route_manifest
 from .roadmap import (
     make_roadmap_request,
+    roadmap_batch_apply_findings,
+    roadmap_batch_dry_run_findings,
     roadmap_apply_findings,
     roadmap_dry_run_findings,
     roadmap_item_fields,
     roadmap_normalize_apply_findings,
     roadmap_normalize_dry_run_findings,
+    roadmap_plan_deliverable_class_blockers,
+    roadmap_plan_deliverable_class_next_safe_command,
+    roadmap_plan_scope_blockers,
+    roadmap_plan_scope_next_safe_command,
 )
 from .semantic import semantic_evaluate_sections, semantic_inspect_sections
 from .tasks import tasks_sections
@@ -276,11 +283,39 @@ def _normalize_argv(argv: list[str] | None) -> list[str]:
     return normalized
 
 
+def _known_option_strings(parser: argparse.ArgumentParser) -> set[str]:
+    known: set[str] = set()
+    pending = [parser]
+    while pending:
+        current = pending.pop()
+        for action in current._actions:
+            known.update(action.option_strings)
+            if isinstance(action, argparse._SubParsersAction):
+                pending.extend(action.choices.values())
+    return known
+
+
+def _underscore_option_typo_hint(argv: list[str], parser: argparse.ArgumentParser) -> tuple[str, str] | None:
+    known_options = _known_option_strings(parser)
+    for token in argv:
+        option = token.split("=", 1)[0]
+        if not option.startswith("--") or "_" not in option:
+            continue
+        dashed = option.replace("_", "-")
+        if option not in known_options and dashed in known_options:
+            return option, dashed
+    return None
+
+
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = _normalize_argv(argv)
     parser = build_parser()
+    option_hint = _underscore_option_typo_hint(argv, parser)
+    if option_hint is not None:
+        unknown, suggested = option_hint
+        parser.error(f"unknown option {unknown}; did you mean {suggested}?")
     args = parser.parse_args(argv)
     if args.command == "adapter":
         if not args.serve and args.transport is not None:
@@ -665,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             intake_text = text_result[0]
             intake_source = f"--text-file {args.text_file}"
-        request = make_intake_request(intake_text, intake_source, args.title, args.target)
+        request = make_intake_request(intake_text, intake_source, args.title, args.target, args.status)
         report_name = "intake --apply" if args.apply else "intake --dry-run"
         findings = intake_apply_findings(inventory, request) if args.apply else intake_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
@@ -738,6 +773,7 @@ def main(argv: list[str] | None = None) -> int:
             roadmap_item=args.roadmap_item,
             roadmap_status=args.roadmap_status,
             archived_plan=args.archived_plan,
+            archive_collision_policy=args.archive_collision_policy,
             worktree_start_state=args.worktree_start_state,
             task_scope=args.task_scope,
             docs_decision=args.docs_decision,
@@ -825,7 +861,7 @@ def main(argv: list[str] | None = None) -> int:
         if normalize_requested:
             if args.operation == "normalize" and args.action not in (None, "normalize"):
                 parser.error("roadmap normalize cannot be combined with --action add or --action update")
-            if args.item_id or _roadmap_item_mutation_args_present(args):
+            if args.item_id or args.items_file or _roadmap_item_mutation_args_present(args):
                 parser.error("roadmap normalize does not accept item mutation fields")
             report_name = "roadmap normalize --apply" if args.apply else "roadmap normalize --dry-run"
             findings = roadmap_normalize_apply_findings(inventory) if args.apply else roadmap_normalize_dry_run_findings(inventory)
@@ -835,6 +871,27 @@ def main(argv: list[str] | None = None) -> int:
             return 2 if args.apply and result == "error" else 0
         if not args.action:
             parser.error("roadmap requires --action add/update or the normalize operation")
+        if args.action == "add-many":
+            if not args.items_file:
+                parser.error("roadmap --action add-many requires --items-file")
+            if args.item_id or _roadmap_item_mutation_args_present(args):
+                parser.error("roadmap --action add-many reads item fields from --items-file only")
+            manifest_result = _read_text_argument("--items-file", args.items_file)
+            if manifest_result[1]:
+                emit_text(f"mylittleharness: {manifest_result[1]}", stream=sys.stderr)
+                return 2
+            report_name = "roadmap add-many --apply" if args.apply else "roadmap add-many --dry-run"
+            findings = (
+                roadmap_batch_apply_findings(inventory, manifest_result[0] or "", args.items_file)
+                if args.apply
+                else roadmap_batch_dry_run_findings(inventory, manifest_result[0] or "", args.items_file)
+            )
+            findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+            result = _result_for(findings)
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            return 2 if args.apply and result == "error" else 0
+        if args.items_file:
+            parser.error("roadmap --items-file is valid only with --action add-many")
         if not args.item_id:
             parser.error("roadmap --action add/update requires --item-id")
         request = make_roadmap_request(
@@ -882,7 +939,7 @@ def main(argv: list[str] | None = None) -> int:
             note_text = note_result[0]
             note_source = f"--note-file {args.note_file}"
         destination_inventory = inventory
-        env_destination_root = os.environ.get(META_FEEDBACK_ROOT_ENV_VAR)
+        env_destination_root = meta_feedback_env_destination_root()
         destination_root = args.to_root or env_destination_root
         if destination_root:
             try:
@@ -1256,7 +1313,7 @@ def _transition_effective_write_set_findings(inventory, args, findings: list[Fin
             )
         )
     if args.archive_active_plan:
-        archive_rel = _transition_archive_target_rel(inventory) or "project/archive/plans/<date>-<plan>.md"
+        archive_rel = _transition_archive_target_rel(inventory, args) or "project/archive/plans/<date>-<plan>.md"
         summary_findings.append(
             Finding(
                 "info",
@@ -1364,8 +1421,34 @@ def _transition_input_errors(inventory, args, next_plan_request, apply: bool) ->
             errors.append(Finding("error", "transition-refused", "--next-title is required when it cannot be derived from --next-roadmap-item"))
         if not next_plan_request.objective:
             errors.append(Finding("error", "transition-refused", "--next-objective is required when it cannot be derived from --next-roadmap-item"))
+        errors.extend(_transition_next_plan_preflight_errors(inventory, args.next_roadmap_item))
         if _state_plan_status(inventory) == "active" and not args.archive_active_plan:
             errors.append(Finding("error", "transition-refused", "--next-roadmap-item with an active plan requires --archive-active-plan"))
+    return errors
+
+
+def _transition_next_plan_preflight_errors(inventory, next_roadmap_item: str) -> list[Finding]:
+    errors: list[Finding] = []
+    scope_next_safe_command = roadmap_plan_scope_next_safe_command(next_roadmap_item)
+    for blocker in roadmap_plan_scope_blockers(inventory, next_roadmap_item):
+        errors.append(
+            Finding(
+                "error",
+                "transition-next-plan-preflight-refused",
+                f"next plan would be refused before route writes: {blocker}; next_safe_command={scope_next_safe_command}",
+                "project/" + "roadmap.md",
+            )
+        )
+    deliverable_next_safe_command = roadmap_plan_deliverable_class_next_safe_command(next_roadmap_item)
+    for blocker in roadmap_plan_deliverable_class_blockers(inventory, next_roadmap_item):
+        errors.append(
+            Finding(
+                "error",
+                "transition-next-plan-preflight-refused",
+                f"next plan would be refused before route writes: {blocker}; next_safe_command={deliverable_next_safe_command}",
+                "project/" + "roadmap.md",
+            )
+        )
     return errors
 
 
@@ -1377,6 +1460,7 @@ def _transition_archive_request(inventory, args):
         roadmap_item=args.current_roadmap_item,
         roadmap_status=_transition_current_roadmap_status(args, default=""),
         archive_retarget_skip_rels=_transition_next_source_incubation_rels(inventory, args),
+        archive_collision_policy=args.archive_collision_policy,
         worktree_start_state=args.worktree_start_state,
         task_scope=args.task_scope,
         docs_decision=args.docs_decision,
@@ -1601,6 +1685,7 @@ def _transition_review_payload(inventory, args) -> dict[str, object]:
             "from_active_plan": bool(args.from_active_plan),
             "current_roadmap_item": args.current_roadmap_item or "",
             "current_roadmap_status": _transition_current_roadmap_status(args, default=""),
+            "archive_collision_policy": args.archive_collision_policy or "refuse",
             "next_roadmap_item": args.next_roadmap_item or "",
             "next_title": next_plan_request.title if args.next_roadmap_item else args.next_title or "",
             "next_objective": next_plan_request.objective if args.next_roadmap_item else args.next_objective or "",
@@ -1716,7 +1801,7 @@ def _transition_target_rels(inventory, args) -> list[str]:
         targets.append("project/project-state.md")
         targets.append("project/implementation-plan.md")
     if args.archive_active_plan:
-        archive_rel = _transition_archive_target_rel(inventory)
+        archive_rel = _transition_archive_target_rel(inventory, args)
         if archive_rel:
             targets.append(archive_rel)
     if args.current_roadmap_item or args.next_roadmap_item:
@@ -1724,7 +1809,7 @@ def _transition_target_rels(inventory, args) -> list[str]:
     return sorted(dict.fromkeys(targets))
 
 
-def _transition_archive_target_rel(inventory) -> str:
+def _transition_archive_target_rel(inventory, args) -> str:
     plan = inventory.active_plan_surface
     if not plan or not plan.exists:
         return ""
@@ -1736,7 +1821,23 @@ def _transition_archive_target_rel(inventory) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", title.strip().lower()).strip("-") or "implementation-plan"
     from datetime import date
 
-    return f"project/archive/plans/{date.today().isoformat()}-{slug}.md"
+    rel_path = f"project/archive/plans/{date.today().isoformat()}-{slug}.md"
+    if getattr(args, "archive_collision_policy", "refuse") == "preserve-existing" and (inventory.root / rel_path).exists():
+        return _transition_archive_collision_rel(inventory.root, rel_path)
+    return rel_path
+
+
+def _transition_archive_collision_rel(root: Path, canonical_rel_path: str) -> str:
+    canonical = Path(canonical_rel_path)
+    parent = canonical.parent.as_posix()
+    stem = canonical.stem
+    suffix = canonical.suffix or ".md"
+    for index in range(2, 1000):
+        rel_path = f"{parent}/{stem}-collision-{index}{suffix}"
+        if not (root / rel_path).exists():
+            return rel_path
+    digest = hashlib.sha256(canonical_rel_path.encode("utf-8")).hexdigest()[:12]
+    return f"{parent}/{stem}-collision-{digest}{suffix}"
 
 
 def _transition_first_heading(text: str) -> str | None:
@@ -2135,6 +2236,7 @@ def _repair_apply_exit_code(findings) -> int:
         "stable-spec-create-refused",
         "state-frontmatter-refused",
         "lifecycle-frontmatter-refused",
+        "lifecycle-source-provenance-refused",
         "spec-posture-frontmatter-refused",
     }
     if any(finding.severity == "error" and finding.code in invalid_codes for finding in findings):
@@ -2471,6 +2573,7 @@ def _suggestions(command: str, findings) -> list[str]:
             "stable-spec-create-refused",
             "state-frontmatter-refused",
             "lifecycle-frontmatter-refused",
+            "lifecycle-source-provenance-refused",
             "spec-posture-frontmatter-refused",
         }
         for finding in errors
@@ -2488,6 +2591,8 @@ def _suggestions(command: str, findings) -> list[str]:
         return ["repair apply created a repair snapshot, prepended project-state frontmatter, and stopped before other repair classes."]
     if any(finding.code == "lifecycle-frontmatter-updated" for finding in findings):
         return ["repair apply created a repair snapshot, prepended lifecycle markdown frontmatter, and stopped before other repair classes."]
+    if any(finding.code == "lifecycle-source-provenance-updated" for finding in findings):
+        return ["repair apply created a repair snapshot, normalized lifecycle source provenance, and stopped before other repair classes."]
     if any(finding.code == "spec-posture-frontmatter-updated" for finding in findings):
         return ["repair apply created a repair snapshot, added missing spec posture frontmatter, and stopped before other repair classes."]
     if any(finding.code == "agents-contract-create-created" for finding in findings):
@@ -2509,6 +2614,9 @@ def _suggestions(command: str, findings) -> list[str]:
             "lifecycle-frontmatter-plan",
             "lifecycle-frontmatter-plan-refused",
             "lifecycle-frontmatter-plan-skipped",
+            "lifecycle-source-provenance-plan",
+            "lifecycle-source-provenance-plan-refused",
+            "lifecycle-source-provenance-plan-skipped",
             "spec-posture-frontmatter-plan",
             "spec-posture-frontmatter-plan-refused",
             "spec-posture-frontmatter-plan-skipped",

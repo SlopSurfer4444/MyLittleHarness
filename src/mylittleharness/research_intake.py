@@ -20,6 +20,26 @@ NON_AUTHORITY_NOTE = (
     "imported research is durable provenance and synthesis input; it cannot approve lifecycle, specs, plans, archive, "
     "roadmap status, staging, commit, or next-plan opening."
 )
+DECISION_PACKET_FIELDS = (
+    "confirmed_fixes",
+    "new_slice_candidates",
+    "scope_expansions",
+    "blocked_followups",
+    "safe_to_continue_existing_sequence",
+)
+DECISION_PACKET_FORK_FIELDS = (
+    "new_slice_candidates",
+    "scope_expansions",
+    "blocked_followups",
+)
+DECISION_PACKET_SAFE_FIELD = "safe_to_continue_existing_sequence"
+DECISION_PACKET_CUES = (
+    "decision packet",
+    "safe_to_continue_existing_sequence",
+    "new_slice_candidates",
+    "scope_expansions",
+    "blocked_followups",
+)
 _RESERVED_SLUGS = {
     "aux",
     "con",
@@ -289,6 +309,7 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
         "",
     ]
     lines.extend(f"- `{entry}`" for entry in source_hashes)
+    lines.extend(_decision_packet_render_lines(target))
     lines.extend(
         [
             "",
@@ -307,6 +328,7 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
     findings = [
         Finding("info", "research-import-source-hash", f"imported text sha256={target.imported_text_hash[:12]}", target.rel_path),
         Finding("info", "research-import-non-authority", NON_AUTHORITY_NOTE, target.rel_path),
+        *_decision_packet_findings(target),
     ]
     return "\n".join(lines), findings
 
@@ -334,6 +356,137 @@ def _target_findings(target: ResearchImportTarget, apply: bool) -> list[Finding]
         Finding("info", "research-import-title", f"normalized title: {target.title}", target.rel_path),
         Finding("info", "research-import-target", f"{verb}: {target.rel_path}", target.rel_path),
     ]
+
+
+def _decision_packet_findings(target: ResearchImportTarget) -> list[Finding]:
+    if not _looks_like_decision_packet(target.text):
+        return []
+    fields = {field: _decision_packet_field_value(target.text, field) for field in DECISION_PACKET_FIELDS}
+    present = tuple(field for field, value in fields.items() if value is not None)
+    missing = tuple(field for field, value in fields.items() if value is None)
+    safe_value = fields[DECISION_PACKET_SAFE_FIELD] or ""
+    fork_fields = tuple(field for field in DECISION_PACKET_FORK_FIELDS if not _decision_packet_value_is_falsey(fields[field] or ""))
+    has_gate_signal = _decision_packet_value_is_true(safe_value) or bool(fork_fields)
+    line_count = len(target.text.splitlines()) or 1
+    field_summary = ", ".join(f"{field}={'present' if fields[field] is not None else 'missing'}" for field in DECISION_PACKET_FIELDS)
+    findings = [
+        Finding(
+            "info",
+            "research-import-decision-packet-field-check",
+            f"decision packet field check: lines={line_count}; {field_summary}",
+            target.rel_path,
+        )
+    ]
+    for field in DECISION_PACKET_FIELDS:
+        value = fields[field]
+        if value is None:
+            detail = "missing"
+        elif value:
+            detail = f"present value={_compact_field_value(value)}"
+        else:
+            detail = "present with empty inline value"
+        findings.append(Finding("info", "research-import-decision-packet-field", f"Field {field} -> {detail}", target.rel_path))
+    if target.text_source == "--text" and line_count > 1:
+        findings.append(
+            Finding(
+                "info",
+                "research-import-decision-packet-text-source",
+                "decision packet was supplied through --text; for shell-sensitive multiline packets prefer --text-file - or a reviewed file",
+                target.rel_path,
+            )
+        )
+    if has_gate_signal:
+        signal = f"{DECISION_PACKET_SAFE_FIELD}: true" if _decision_packet_value_is_true(safe_value) else f"fork fields: {', '.join(fork_fields)}"
+        findings.append(Finding("info", "research-import-decision-packet-gate-signal", f"parse-visible decision packet gate signal detected: {signal}", target.rel_path))
+    else:
+        detail = ", ".join(missing) if missing else "present fields have empty/falsey values"
+        findings.append(
+            Finding(
+                "warn",
+                "research-import-decision-packet-incomplete",
+                f"decision packet lacks a parse-visible safe-to-continue true value or non-empty fork fields; missing/empty detail: {detail}",
+                target.rel_path,
+            )
+        )
+    return findings
+
+
+def _decision_packet_render_lines(target: ResearchImportTarget) -> list[str]:
+    if not _looks_like_decision_packet(target.text):
+        return []
+    fields = {field: _decision_packet_field_value(target.text, field) for field in DECISION_PACKET_FIELDS}
+    safe_value = fields[DECISION_PACKET_SAFE_FIELD] or ""
+    fork_fields = tuple(field for field in DECISION_PACKET_FORK_FIELDS if not _decision_packet_value_is_falsey(fields[field] or ""))
+    if _decision_packet_value_is_true(safe_value):
+        signal = f"{DECISION_PACKET_SAFE_FIELD} true"
+    elif fork_fields:
+        signal = f"fork fields present: {', '.join(fork_fields)}"
+    else:
+        signal = "missing safe-to-continue true value or non-empty fork fields"
+    lines = [
+        "",
+        "## Decision Packet Field Check",
+        "",
+        f"- Imported payload line count: {len(target.text.splitlines()) or 1}",
+        f"- Parse-visible gate signal: {signal}",
+    ]
+    for field in DECISION_PACKET_FIELDS:
+        value = fields[field]
+        if value is None:
+            detail = "missing"
+        elif value:
+            detail = f"present, value summary `{_compact_field_value(value)}`"
+        else:
+            detail = "present with empty inline value"
+        lines.append(f"- Field {field} -> {detail}")
+    return lines
+
+
+def _looks_like_decision_packet(text: str) -> bool:
+    lowered = text.casefold()
+    return any(cue in lowered for cue in DECISION_PACKET_CUES) or any(_decision_packet_field_value(text, field) is not None for field in DECISION_PACKET_FIELDS)
+
+
+def _decision_packet_field_value(text: str, field: str) -> str | None:
+    field_names = "|".join(re.escape(name) for name in DECISION_PACKET_FIELDS)
+    field_line = re.compile(rf"^\s*(?:[-*]\s*)?`?{re.escape(field)}`?\s*[:=]\s*(.*?)\s*$", re.IGNORECASE)
+    any_field_line = re.compile(rf"^\s*(?:[-*]\s*)?`?(?:{field_names})`?\s*[:=]", re.IGNORECASE)
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = field_line.match(line)
+        if not match:
+            continue
+        inline_value = match.group(1).strip().strip("`\"'")
+        if inline_value:
+            return inline_value
+        block_lines: list[str] = []
+        for next_line in lines[index + 1 :]:
+            stripped = next_line.strip()
+            if not stripped:
+                if block_lines:
+                    break
+                continue
+            if any_field_line.match(next_line) or stripped.startswith("#"):
+                break
+            block_lines.append(stripped)
+        return "\n".join(block_lines)
+    return None
+
+
+def _decision_packet_value_is_true(value: str) -> bool:
+    return value.strip().casefold().replace("_", "-") in {"1", "true", "yes", "safe", "continue", "safe-to-continue"}
+
+
+def _decision_packet_value_is_falsey(value: str) -> bool:
+    normalized = value.strip().casefold().replace("_", "-")
+    return normalized in {"", "0", "false", "no", "none", "not-needed", "not needed", "[]"}
+
+
+def _compact_field_value(value: str) -> str:
+    compact = " ".join(value.split())
+    if len(compact) > 80:
+        return f"{compact[:77]}..."
+    return compact
 
 
 def _root_posture_finding(inventory: Inventory) -> Finding:

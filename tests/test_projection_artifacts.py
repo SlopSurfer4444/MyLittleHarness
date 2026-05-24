@@ -334,7 +334,9 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertTrue(pulse["dirty"])
             self.assertEqual("2026-05-12T01:02:03Z", pulse["dirty_since_utc"])
             self.assertEqual(2, pulse["dirty_marker_count"])
+            self.assertEqual("mylittleharness --root <root> mlhd run-once --apply", pulse["owner_command"])
             self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", pulse["warm_cache_command"])
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", pulse["manual_recovery_command"])
             self.assertIn("lifecycle routes remain authoritative", pulse["authority"])
 
             operation_payload = {

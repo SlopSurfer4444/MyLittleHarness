@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .inventory import Inventory
 from .models import Finding
+from .context_memory import (
+    CONTEXT_MEMORY_DIR_REL,
+    context_memory_capsule_findings,
+    context_memory_capsule_payload,
+    refresh_context_memory_capsule,
+)
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
     ARTIFACT_DIRTY_MARKER_NAME,
@@ -34,6 +42,31 @@ MLHD_PROJECTION_REFRESH_FILE_NAME = "projection-refresh.json"
 MLHD_AUTOSTART_SCHEMA = "mylittleharness.mlhd-autostart.v1"
 MLHD_AUTOSTART_FILE_NAME = "autostart.json"
 MLHD_PROJECTION_QUIET_PERIOD_SECONDS = 1.0
+MLHD_WORKER_INTERVAL_SECONDS = 2.0
+_MLHD_WORKER_LOOP_CODE = "\n".join(
+    [
+        "import json, os, subprocess, sys, time",
+        "from pathlib import Path",
+        "root = Path(sys.argv[1])",
+        "interval_seconds = float(sys.argv[2])",
+        "quiet_period_seconds = sys.argv[3]",
+        "runtime_dir = root / '.mylittleharness' / 'runtime' / 'mlhd'",
+        "pid_path = runtime_dir / 'pid.json'",
+        "lock_path = runtime_dir / 'lock.json'",
+        "for _ in range(50):",
+        "    if lock_path.exists() and pid_path.exists():",
+        "        break",
+        "    time.sleep(0.1)",
+        "else:",
+        "    sys.exit(0)",
+        "runner = [sys.executable, '-m', 'mylittleharness', '--root', str(root), 'mlhd', 'run-once', '--apply', '--quiet-period-seconds', quiet_period_seconds]",
+        "while True:",
+        "    if not lock_path.exists() or not pid_path.exists():",
+        "        break",
+        "    subprocess.run(runner, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)",
+        "    time.sleep(interval_seconds)",
+    ]
+)
 
 
 def mlhd_control_sections(
@@ -84,10 +117,13 @@ def mlhd_control_payload(
         "network_listener_started": False,
         "autostart_installed": state["autostart_installed"],
         "autostart_manifest": autostart_payload,
+        "background_worker_started": state["control_status"] == "running",
+        "worker_interval_seconds": MLHD_WORKER_INTERVAL_SECONDS,
         "filesystem_watcher_started": False,
-        "generated_projection_cache_may_refresh": action == "run-once",
+        "generated_projection_cache_may_refresh": action in {"start", "run-once"},
         "projection_quiet_period_seconds": quiet_period_seconds,
         "projection_pulse": projection_pulse_payload(inventory, quiet_period_seconds=quiet_period_seconds),
+        "context_memory": context_memory_capsule_payload(inventory),
         "approves_lifecycle": False,
         "stores_provider_credentials": False,
         "durable_mutations_delegate_to_cli": True,
@@ -127,7 +163,8 @@ def mlhd_control_boundary_findings() -> list[Finding]:
             "mlhd-control-runtime-boundary",
             (
                 "mlhd control-plane writes are limited to disposable runtime markers and optional generated projection "
-                "warm-cache output; repo-visible lifecycle, roadmap, source, archive, Git, provider, and release authority stay unchanged"
+                "warm-cache/source-bound context capsule output; repo-visible lifecycle, roadmap, source, archive, Git, "
+                "provider, and release authority stay unchanged"
             ),
             MLHD_RUNTIME_DIR_REL,
         ),
@@ -135,16 +172,22 @@ def mlhd_control_boundary_findings() -> list[Finding]:
             "info",
             "mlhd-control-no-hidden-runtime",
             (
-                "mlhd start/run-once/stop/install/uninstall open no listener; install writes only a root-local "
-                "autostart manifest and start creates no filesystem watcher"
+                "mlhd start opens no network listener and creates no filesystem watcher; it starts one local polling "
+                "worker for disposable projection cache ticks, while install writes only a root-local autostart manifest"
             ),
             MLHD_RUNTIME_DIR_REL,
         ),
         Finding(
             "info",
             "mlhd-projection-cache-boundary",
-            "mlhd run-once may refresh only the disposable generated projection cache after dirty markers are quiet",
+            "mlhd start/run-once may refresh only the disposable generated projection cache after dirty markers are quiet",
             ARTIFACT_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "mlhd-context-memory-boundary",
+            "mlhd run-once may refresh generated source-bound context capsules, but capsules stay non-authority and replayable from source refs",
+            CONTEXT_MEMORY_DIR_REL,
         ),
     ]
 
@@ -158,6 +201,7 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
     heartbeat_payload = _read_runtime_json(root, MLHD_HEARTBEAT_FILE_NAME)
     state_payload = _read_runtime_json(root, MLHD_STATE_FILE_NAME)
     autostart_payload = _read_runtime_json(root, MLHD_AUTOSTART_FILE_NAME)
+    refresh_payload = _read_runtime_json(root, MLHD_PROJECTION_REFRESH_FILE_NAME)
     pid = _payload_pid(pid_payload)
     pid_status = "absent"
     if pid:
@@ -188,6 +232,10 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
         "autostart_status": autostart_status,
         "last_action": str(state_payload.get("last_action") or heartbeat_payload.get("action") or ""),
         "heartbeat_at_utc": str(heartbeat_payload.get("heartbeat_at_utc") or ""),
+        "projection_refresh_status": str(refresh_payload.get("status") or ""),
+        "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
+        "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
+        "projection_stale_reason": str(refresh_payload.get("stale_reason") or ""),
     }
 
 
@@ -288,6 +336,7 @@ def mlhd_runtime_findings(inventory: Inventory, code_prefix: str = "dashboard-ml
             ),
         ]
     )
+    findings.extend(context_memory_capsule_findings(inventory, f"{code_prefix}-context-memory"))
     return findings
 
 
@@ -313,6 +362,7 @@ def mlhd_runtime_payload(inventory: Inventory) -> dict[str, object]:
         "stores_provider_credentials": False,
         "approves_lifecycle": False,
         "projection_pulse": projection_pulse_payload(inventory, quiet_period_seconds=MLHD_PROJECTION_QUIET_PERIOD_SECONDS),
+        "context_memory": context_memory_capsule_payload(inventory),
     }
 
 
@@ -358,7 +408,9 @@ def projection_pulse_payload(
         "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
         "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
         "stale_reason": str(refresh_payload.get("stale_reason") or ""),
+        "owner_command": "mylittleharness --root <root> mlhd run-once --apply",
         "warm_cache_command": "mylittleharness --root <root> projection --warm-cache --target all",
+        "manual_recovery_command": "mylittleharness --root <root> projection --warm-cache --target all",
         "next_safe_command": "mylittleharness --root <root> mlhd run-once --dry-run",
         "authority": "watch/pulse state is disposable; source files and lifecycle routes remain authoritative",
     }
@@ -392,7 +444,11 @@ def _mlhd_status_findings(inventory: Inventory) -> list[Finding]:
                 f"control_status={state['control_status']}; runtime_cache_status={state['runtime_cache_status']}; "
                 f"pid_status={state['pid_status']}; pid={state['pid'] or '<none>'}; "
                 f"autostart_status={state['autostart_status']}; "
-                f"heartbeat_at_utc={state['heartbeat_at_utc'] or '<none>'}"
+                f"heartbeat_at_utc={state['heartbeat_at_utc'] or '<none>'}; "
+                f"projection_refresh_status={state['projection_refresh_status'] or '<none>'}; "
+                f"last_success={state['last_successful_refresh_utc'] or '<none>'}; "
+                f"last_failure={state['last_failed_refresh_utc'] or '<none>'}; "
+                f"stale_reason={state['projection_stale_reason'] or '<none>'}"
             ),
             MLHD_RUNTIME_DIR_REL,
         )
@@ -419,6 +475,9 @@ def _mlhd_doctor_findings(inventory: Inventory) -> list[Finding]:
             (
                 f"runtime_cache_status={state['runtime_cache_status']}; control_status={state['control_status']}; "
                 f"autostart_status={state['autostart_status']}; pid_status={state['pid_status']}; "
+                f"projection_refresh_status={state['projection_refresh_status'] or '<none>'}; "
+                f"last_success={state['last_successful_refresh_utc'] or '<none>'}; "
+                f"last_failure={state['last_failed_refresh_utc'] or '<none>'}; "
                 "daemon fallback is clean when runtime cache is absent"
             ),
             MLHD_RUNTIME_DIR_REL,
@@ -501,6 +560,18 @@ def _mlhd_dry_run_findings(
                 f"{MLHD_RUNTIME_DIR_REL}/{MLHD_PID_FILE_NAME}",
             )
         )
+    if action == "start":
+        findings.append(
+            Finding(
+                "info",
+                "mlhd-start-worker-preview",
+                (
+                    "would launch one local background polling worker for mlhd run-once projection refresh ticks; "
+                    f"interval_seconds={MLHD_WORKER_INTERVAL_SECONDS:g}; no listener, watcher, OS autostart entry, or lifecycle authority"
+                ),
+                MLHD_RUNTIME_DIR_REL,
+            )
+        )
     return findings
 
 
@@ -514,7 +585,7 @@ def _mlhd_apply_findings(
     if _runtime_cache_status(runtime_dir) == "invalid":
         return [_invalid_runtime_finding(action)]
     if action == "start":
-        return _apply_mlhd_start(inventory)
+        return _apply_mlhd_start(inventory, quiet_period_seconds=quiet_period_seconds)
     if action == "stop":
         return _apply_mlhd_stop(inventory)
     if action == "run-once":
@@ -526,10 +597,71 @@ def _mlhd_apply_findings(
     return [Finding("error", "mlhd-control-action-unknown", f"unknown mlhd action: {action}", MLHD_RUNTIME_DIR_REL)]
 
 
-def _apply_mlhd_start(inventory: Inventory) -> list[Finding]:
+def _spawn_mlhd_worker(root: Path, *, quiet_period_seconds: float) -> subprocess.Popen:
+    env = dict(os.environ)
+    package_src = Path(__file__).resolve().parents[1]
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    pythonpath_parts = [str(package_src)]
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    kwargs: dict[str, object] = {
+        "cwd": str(root.parent),
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        if creationflags:
+            kwargs["creationflags"] = creationflags
+    return subprocess.Popen(_mlhd_worker_command(root, quiet_period_seconds=quiet_period_seconds), **kwargs)
+
+
+def _mlhd_worker_command(root: Path, *, quiet_period_seconds: float) -> list[str]:
+    return [
+        sys.executable,
+        "-c",
+        _MLHD_WORKER_LOOP_CODE,
+        str(root),
+        f"{MLHD_WORKER_INTERVAL_SECONDS:g}",
+        f"{quiet_period_seconds:g}",
+    ]
+
+
+def _mlhd_worker_command_template(*, quiet_period_seconds: float) -> list[str]:
+    return [
+        "<python>",
+        "-c",
+        "<mlhd-background-projection-refresh-loop>",
+        "<root>",
+        f"{MLHD_WORKER_INTERVAL_SECONDS:g}",
+        f"{quiet_period_seconds:g}",
+    ]
+
+
+def _apply_mlhd_start(
+    inventory: Inventory,
+    *,
+    quiet_period_seconds: float = MLHD_PROJECTION_QUIET_PERIOD_SECONDS,
+) -> list[Finding]:
     state = inspect_mlhd_control_state(inventory)
     runtime_dir = _ensure_runtime_dir(inventory.root)
     findings: list[Finding] = []
+    if state["control_status"] == "running" and state["pid_status"] == "alive":
+        return [
+            Finding(
+                "info",
+                "mlhd-start-already-running",
+                (
+                    f"mlhd background worker is already running; pid={state['pid']}; "
+                    "no new worker, listener, watcher, autostart entry, lifecycle mutation, or source mutation was created"
+                ),
+                MLHD_RUNTIME_DIR_REL,
+            )
+        ]
     if state["pid_status"] == "stale":
         _remove_runtime_file(inventory.root, MLHD_PID_FILE_NAME)
         _remove_runtime_file(inventory.root, MLHD_LOCK_FILE_NAME)
@@ -541,28 +673,60 @@ def _apply_mlhd_start(inventory: Inventory) -> list[Finding]:
                 f"{MLHD_RUNTIME_DIR_REL}/{MLHD_PID_FILE_NAME}",
             )
         )
+    try:
+        worker = _spawn_mlhd_worker(inventory.root, quiet_period_seconds=quiet_period_seconds)
+    except OSError as exc:
+        return [
+            *findings,
+            Finding(
+                "error",
+                "mlhd-start-worker-spawn-failed",
+                f"failed to launch local mlhd projection refresh worker; disposable runtime state remains authoritative only as evidence: {exc}",
+                MLHD_RUNTIME_DIR_REL,
+            ),
+        ]
     now = _utc_now()
-    pid = os.getpid()
+    pid = int(worker.pid)
+    worker_command_template = _mlhd_worker_command_template(quiet_period_seconds=quiet_period_seconds)
     _write_runtime_json(
         inventory.root,
         MLHD_PID_FILE_NAME,
-        {"schema": MLHD_CONTROL_SCHEMA, "pid": pid, "started_at_utc": now, "kind": "control-plane-marker"},
+        {
+            "schema": MLHD_CONTROL_SCHEMA,
+            "pid": pid,
+            "started_at_utc": now,
+            "kind": "background-worker",
+            "worker_interval_seconds": MLHD_WORKER_INTERVAL_SECONDS,
+            "projection_quiet_period_seconds": quiet_period_seconds,
+            "command_template": worker_command_template,
+        },
     )
     _write_runtime_json(
         inventory.root,
         MLHD_LOCK_FILE_NAME,
-        {"schema": MLHD_CONTROL_SCHEMA, "pid": pid, "locked_at_utc": now, "root": str(inventory.root)},
+        {
+            "schema": MLHD_CONTROL_SCHEMA,
+            "pid": pid,
+            "locked_at_utc": now,
+            "root": str(inventory.root),
+            "kind": "background-worker-lock",
+        },
     )
     _write_runtime_json(inventory.root, MLHD_HEARTBEAT_FILE_NAME, _heartbeat_payload("start", "running", pid, now))
-    _write_runtime_json(inventory.root, MLHD_STATE_FILE_NAME, _state_payload("running", "start", pid, now))
+    state_payload = _state_payload("running", "start", pid, now)
+    state_payload["worker_interval_seconds"] = MLHD_WORKER_INTERVAL_SECONDS
+    state_payload["projection_quiet_period_seconds"] = quiet_period_seconds
+    state_payload["worker_command_template"] = worker_command_template
+    _write_runtime_json(inventory.root, MLHD_STATE_FILE_NAME, state_payload)
     _append_event(runtime_dir, "start", "running", pid, now)
     findings.append(
         Finding(
             "info",
             "mlhd-start-apply",
             (
-                "wrote explicit root-local pid, lock, heartbeat, state, and event log files under "
-                ".mylittleharness/runtime/mlhd without starting a listener, watcher, autostart entry, or lifecycle mutation"
+                "launched one local background polling worker and wrote root-local pid, lock, heartbeat, state, and event log files under "
+                ".mylittleharness/runtime/mlhd; the worker runs mlhd run-once projection refresh ticks without starting a listener, "
+                "filesystem watcher, autostart entry, lifecycle mutation, or source mutation"
             ),
             MLHD_RUNTIME_DIR_REL,
         )
@@ -602,9 +766,12 @@ def _apply_mlhd_run_once(
     pid = os.getpid()
     projection_findings = _mlhd_projection_autorefresh_apply_findings(inventory, quiet_period_seconds)
     refresh_status = _projection_autorefresh_status(projection_findings)
+    context_memory_findings, context_memory_payload = refresh_context_memory_capsule(inventory, trigger="mlhd-run-once", now=now)
     _write_projection_refresh_state(inventory.root, refresh_status, projection_findings, now)
     run_once_payload = _state_payload("idle", "run-once", pid, now)
     run_once_payload["projection_refresh_status"] = refresh_status
+    run_once_payload["context_memory_status"] = str(context_memory_payload.get("status") or "current")
+    run_once_payload["context_memory_capsule_id"] = str(context_memory_payload.get("capsule_id") or "")
     run_once_payload["quiet_period_seconds"] = quiet_period_seconds
     _write_runtime_json(inventory.root, MLHD_LAST_RUN_ONCE_FILE_NAME, run_once_payload)
     _write_runtime_json(inventory.root, MLHD_HEARTBEAT_FILE_NAME, _heartbeat_payload("run-once", "idle", pid, now))
@@ -616,12 +783,13 @@ def _apply_mlhd_run_once(
             "mlhd-run-once-apply",
             (
                 "ran one foreground mlhd control-plane tick and wrote heartbeat/state/event evidence under the disposable "
-                "runtime directory; optional projection warm-cache stayed inside generated cache boundaries; no watcher, "
-                "listener, autostart entry, lifecycle mutation, or source mutation was created"
+                "runtime directory; optional projection warm-cache and source-bound context capsule stayed inside generated "
+                "cache/context boundaries; no watcher, listener, autostart entry, lifecycle mutation, or source mutation was created"
             ),
             MLHD_RUNTIME_DIR_REL,
         ),
         *projection_findings,
+        *context_memory_findings,
     ]
 
 
@@ -802,7 +970,7 @@ def _action_targets(action: str) -> tuple[str, ...]:
         names = ()
     targets = tuple(f"{MLHD_RUNTIME_DIR_REL}/{name}" for name in names)
     if action == "run-once":
-        return (*targets, f"optional {ARTIFACT_DIR_REL}")
+        return (*targets, f"optional {ARTIFACT_DIR_REL}", f"optional {CONTEXT_MEMORY_DIR_REL}")
     return targets
 
 
@@ -812,10 +980,12 @@ def _mlhd_autostart_manifest() -> dict[str, object]:
         "kind": "root-local-autostart-manifest",
         "root_strategy": "invocation-root-placeholder",
         "root": "<root>",
-        "command_template": ["mylittleharness", "--root", "<root>", "mlhd", "run-once", "--apply"],
+        "command_template": ["mylittleharness", "--root", "<root>", "mlhd", "start", "--apply"],
+        "tick_command_template": ["mylittleharness", "--root", "<root>", "mlhd", "run-once", "--apply"],
         "doctor_command_template": ["mylittleharness", "--root", "<root>", "mlhd", "doctor"],
         "uninstall_command_template": ["mylittleharness", "--root", "<root>", "mlhd", "uninstall", "--apply"],
         "runtime_dir": MLHD_RUNTIME_DIR_REL,
+        "worker_interval_seconds": MLHD_WORKER_INTERVAL_SECONDS,
         "os_autostart_entry_created": False,
         "network_listener_started": False,
         "filesystem_watcher_started": False,

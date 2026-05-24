@@ -28,6 +28,7 @@ from .roadmap import (
     RoadmapSliceContract,
     RoadmapSynthesisReport,
     make_roadmap_request,
+    roadmap_compacted_item_archived_plan,
     roadmap_item_fields,
     roadmap_item_deliverable_class,
     roadmap_item_title,
@@ -36,6 +37,8 @@ from .roadmap import (
     roadmap_plan_deliverable_class_blockers,
     roadmap_plan_deliverable_class_next_safe_command,
     roadmap_plan_scope_next_safe_command,
+    roadmap_slice_result_gate_blockers,
+    roadmap_slice_result_gate_next_safe_command,
     roadmap_plans_for_requests,
     roadmap_slice_contract_for_item,
     roadmap_compacted_dependency_archive_evidence_findings,
@@ -47,11 +50,13 @@ from .roadmap import (
 )
 from .reporting import RouteWriteEvidence, route_write_findings
 from .route_reference_guards import route_reference_transaction_guard_findings
+from .routes import doc_target_exists, existing_doc_target_candidates, is_exact_doc_target, normalize_route_path
 from .writeback import state_compaction_apply_findings, state_compaction_dry_run_findings
 
 
 DEFAULT_PLAN_REL = "project/implementation-plan.md"
 DEFAULT_ACTIVE_PHASE = "phase-1-implementation"
+DEFAULT_STATE_REL = "project/" + "project-state.md"
 DEFAULT_PHASE_STATUS = "pending"
 DEFAULT_DOCS_DECISION = "uncertain"
 DEFAULT_EXECUTION_POLICY = "current-phase-only"
@@ -67,6 +72,8 @@ DEFAULT_STOP_CONDITIONS = (
     "the last implementation phase is complete; the next state is explicit closeout preparation, not archive or next-slice opening",
 )
 DOCS_WRITE_SCOPE_PLACEHOLDER = "declare exact docs/spec/package metadata files before docs_decision=updated mutation"
+SCOPED_INTERRUPT_WORK_INTENT = "scoped_interrupt"
+SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY = "no-roadmap-status-movement-without-explicit-request"
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,14 @@ class VerificationGateProfile:
     command: str
     source: str
     reason: str
+
+
+@dataclass(frozen=True)
+class DocTargetExistenceGate:
+    report: RoadmapSynthesisReport
+    missing_targets: tuple[str, ...] = ()
+    candidate_summaries: tuple[str, ...] = ()
+    target_root: str = ""
 
 
 def make_plan_request(
@@ -191,14 +206,15 @@ def render_implementation_plan(
     title = request.title or "Implementation Plan"
     objective = request.objective or "Define and verify the requested implementation work."
     plan_id = f"{current_date}-{_safe_slug(title) or 'implementation-plan'}"
-    phases = _generated_phases(slice_contract, synthesis_report, verification_profile)
+    phases = _generated_phases(slice_contract, synthesis_report, verification_profile, request=request)
     active_phase = phases[0].phase_id if phases else DEFAULT_ACTIVE_PHASE
-    scaffold_noun = _plan_scaffold_noun(slice_contract)
+    scaffold_noun = _plan_scaffold_noun(request, slice_contract)
     relationship_frontmatter = _slice_frontmatter(request, slice_contract, source_incubation)
     task_section = ""
     if request.task:
         task_section = f"\n## Explicit Task Input\n\n{request.task.rstrip()}\n"
     slice_section = _slice_contract_section(slice_contract)
+    interrupt_section = _scoped_interrupt_contract_section(request, slice_contract)
     synthesis_section = _plan_synthesis_section(synthesis_report, slice_contract, verification_profile)
     roadmap_authority_input = "- `project/roadmap.md`\n" if request.roadmap_item else ""
 
@@ -220,6 +236,7 @@ def render_implementation_plan(
         f"{objective.rstrip()}\n"
         f"{task_section}"
         f"{slice_section}"
+        f"{interrupt_section}"
         f"{synthesis_section}"
         "\n## Authority Inputs\n\n"
         "- `AGENTS.md`\n"
@@ -279,7 +296,9 @@ def render_implementation_plan(
     )
 
 
-def _plan_scaffold_noun(slice_contract: RoadmapSliceContract | None) -> str:
+def _plan_scaffold_noun(request: PlanRequest, slice_contract: RoadmapSliceContract | None) -> str:
+    if _is_scoped_interrupt_context(request, slice_contract):
+        return "scoped-interrupt-plan"
     if _is_non_implementation_contract(slice_contract):
         return f"{_contract_deliverable_class_for_text(slice_contract)} active-work"
     return "implementation-plan"
@@ -290,7 +309,16 @@ def _contract_work_class(slice_contract: RoadmapSliceContract | None) -> str:
     if raw == "non_implementation":
         return "non_implementation"
     deliverable_class = _contract_deliverable_class(slice_contract)
-    if deliverable_class in {"audit", "cleanup", "diagnostic", "evidence", "fan-in-review", "proposal", "research"}:
+    if deliverable_class in {
+        "audit",
+        "cleanup",
+        "diagnostic",
+        "evidence",
+        "fan-in-review",
+        "proposal",
+        "research",
+        "route-hygiene",
+    }:
         return "non_implementation"
     return "implementation"
 
@@ -327,12 +355,36 @@ def _is_non_implementation_contract(slice_contract: RoadmapSliceContract | None)
     return _contract_work_class(slice_contract) == "non_implementation" and not _contract_implementation_allowed(slice_contract)
 
 
+def _is_scoped_interrupt_context(
+    request: PlanRequest | None,
+    slice_contract: RoadmapSliceContract | None,
+) -> bool:
+    fields = [
+        getattr(slice_contract, "primary_roadmap_item", ""),
+        getattr(slice_contract, "execution_slice", ""),
+        getattr(slice_contract, "domain_context", ""),
+        getattr(slice_contract, "closeout_boundary", ""),
+    ]
+    if request is not None:
+        fields.extend((request.title, request.objective, request.task))
+    text = " ".join(str(field or "") for field in fields).casefold()
+    if "scoped" in text and (
+        "interrupt" in text
+        or "hotfix" in text
+        or "quality-fix" in text
+        or "quality fix" in text
+    ):
+        return True
+    return "urgent bounded fix" in text
+
+
 def _slice_frontmatter(
     request: PlanRequest,
     slice_contract: RoadmapSliceContract | None,
     source_incubation: str,
 ) -> str:
     lines: list[str] = []
+    scoped_interrupt = _is_scoped_interrupt_context(request, slice_contract)
     if slice_contract:
         if slice_contract.execution_slice:
             lines.append(f'execution_slice: "{_yaml_double_quoted_value(slice_contract.execution_slice)}"\n')
@@ -344,6 +396,10 @@ def _slice_frontmatter(
         lines.append(f'deliverable_class: "{_yaml_double_quoted_value(_contract_deliverable_class_for_frontmatter(slice_contract))}"\n')
         lines.append(f"implementation_allowed: {str(_contract_implementation_allowed(slice_contract)).lower()}\n")
         lines.append(f"promotion_required: {str(_contract_promotion_required(slice_contract)).lower()}\n")
+        if scoped_interrupt:
+            lines.append(f'work_intent: "{SCOPED_INTERRUPT_WORK_INTENT}"\n')
+            lines.append(f'roadmap_status_policy: "{SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY}"\n')
+            lines.append("return_to_roadmap_required: true\n")
         lines.append(f'related_roadmap_item: "{_yaml_double_quoted_value(slice_contract.primary_roadmap_item)}"\n')
         if slice_contract.source_incubation:
             lines.append(f'source_incubation: "{_yaml_double_quoted_value(slice_contract.source_incubation)}"\n')
@@ -354,6 +410,14 @@ def _slice_frontmatter(
         if slice_contract.related_specs:
             lines.append(_yaml_frontmatter_list("related_specs", slice_contract.related_specs))
     else:
+        if scoped_interrupt:
+            lines.append('work_class: "implementation"\n')
+            lines.append('deliverable_class: "implementation"\n')
+            lines.append("implementation_allowed: true\n")
+            lines.append("promotion_required: false\n")
+            lines.append(f'work_intent: "{SCOPED_INTERRUPT_WORK_INTENT}"\n')
+            lines.append(f'roadmap_status_policy: "{SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY}"\n')
+            lines.append("return_to_roadmap_required: true\n")
         if request.roadmap_item:
             lines.append(f'related_roadmap_item: "{_yaml_double_quoted_value(request.roadmap_item)}"\n')
         if source_incubation:
@@ -394,6 +458,21 @@ def _slice_contract_section(slice_contract: RoadmapSliceContract | None) -> str:
         f"- promotion_required: `{str(_contract_promotion_required(slice_contract)).lower()}`\n"
         f"- execution_policy: `{slice_contract.execution_policy}`\n"
         f"- closeout_boundary: `{slice_contract.closeout_boundary}`\n"
+    )
+
+
+def _scoped_interrupt_contract_section(request: PlanRequest, slice_contract: RoadmapSliceContract | None) -> str:
+    if not _is_scoped_interrupt_context(request, slice_contract):
+        return ""
+    owner = slice_contract.primary_roadmap_item if slice_contract else "explicit task input"
+    return (
+        "\n## Scoped Interrupt Contract\n\n"
+        f"- work_intent: `{SCOPED_INTERRUPT_WORK_INTENT}`\n"
+        f"- scoped_owner: `{owner}`\n"
+        f"- roadmap_status_policy: `{SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY}`\n"
+        "- archive_closeout: archive/closeout stays on reviewed writeback or transition rails; roadmap status changes only when the same request names an explicit roadmap item and status.\n"
+        "- return_to_roadmap: record carry_forward or return-to-roadmap evidence before closeout so queued durable slices do not inherit interrupt evidence by implication.\n"
+        "- safe_boundary: no bypass of dry-run/apply, docs_decision, verification, archive review, roadmap promotion, staging, commit, push, or next-plan opening.\n"
     )
 
 
@@ -456,11 +535,17 @@ def _generated_phases(
     slice_contract: RoadmapSliceContract | None,
     report: RoadmapSynthesisReport | None,
     verification_profile: VerificationGateProfile | None = None,
+    *,
+    request: PlanRequest | None = None,
 ) -> tuple[GeneratedPlanPhase, ...]:
     if report is None:
+        if _is_scoped_interrupt_context(request, slice_contract):
+            return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile)
         return (_default_generated_phase(),)
     if _is_non_implementation_contract(slice_contract):
         return _non_implementation_generated_phases(slice_contract, report)
+    if _is_scoped_interrupt_context(request, slice_contract):
+        return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile)
 
     targets = tuple(report.target_artifacts)
     groups = _artifact_groups(targets)
@@ -551,6 +636,92 @@ def _generated_phases(
     return (phase_1, phase_2, phase_3)
 
 
+def _scoped_interrupt_generated_phases(
+    request: PlanRequest | None,
+    slice_contract: RoadmapSliceContract | None,
+    report: RoadmapSynthesisReport | None,
+    verification_profile: VerificationGateProfile | None = None,
+) -> tuple[GeneratedPlanPhase, ...]:
+    targets = tuple(report.target_artifacts) if report else ("declare exact interrupt source/test/docs files before mutation",)
+    groups = _artifact_groups(targets)
+    read_context = tuple(
+        _dedupe_nonempty(
+            (
+                "AGENTS.md",
+                ".codex/project-workflow.toml",
+                DEFAULT_STATE_REL,
+                ROADMAP_REL if slice_contract or (request and request.roadmap_item) else "",
+                *(report.related_specs if report else ()),
+                *(report.source_inputs if report else ()),
+            )
+        )
+    )
+    source_scope = groups["source"] or groups["other"] or groups["docs"] or targets
+    test_scope = groups["tests"]
+    docs_scope = _docs_impact_scope(report, groups) if report else ()
+    if report and getattr(report, "docs_update_count", 0) > 0 and docs_scope:
+        docs_scope_set = set(docs_scope)
+        source_scope = tuple(target for target in source_scope if target not in docs_scope_set)
+    all_scope = targets or (DEFAULT_PLAN_REL,)
+    phase_1_scope = tuple(_dedupe_nonempty((*source_scope, *test_scope))) if test_scope else source_scope
+    owner = (
+        report.primary_roadmap_item
+        if report
+        else (slice_contract.primary_roadmap_item if slice_contract else "explicit scoped interrupt request")
+    )
+
+    phase_1 = GeneratedPlanPhase(
+        phase_id="phase-1-scoped-interrupt",
+        status=DEFAULT_PHASE_STATUS,
+        objective="Implement the bounded scoped hotfix or interrupt inside the declared product/source contract.",
+        dependencies=(),
+        write_scope=phase_1_scope,
+        read_context=read_context,
+        invariants=(
+            "keep the interrupt bounded to declared write scope, preserve MLH dry-run/apply rails, "
+            "and do not mix interrupt evidence into unrelated roadmap slices"
+        ),
+        implementation_contract=(
+            f"deliver the scoped interrupt for `{owner}` without hidden runtime state; roadmap status remains unchanged "
+            "unless an explicit writeback/transition request names the roadmap item and status"
+        ),
+        verification_gates=_focused_verification_gate(test_scope, verification_profile),
+        docs_decision_rule="keep `docs_decision` as `uncertain` until docs/spec/package impact and return-to-roadmap evidence are proven.",
+        state_transfer=(
+            "record changed contracts, verification evidence, residual risk, carry_forward or return-to-roadmap target, "
+            "and why no unrelated roadmap status moved"
+        ),
+        refusal_or_escalation=(
+            "stop before widening beyond the scoped interrupt, marking roadmap items done by implication, "
+            "opening the next plan, staging, commit, or push"
+        ),
+    )
+    if report and _recommended_phase_count_for_report(report) <= 1:
+        return (phase_1,)
+
+    phase_2_scope = tuple(_dedupe_nonempty((*test_scope, *docs_scope))) or all_scope
+    phase_2 = GeneratedPlanPhase(
+        phase_id="phase-2-interrupt-verification-and-return",
+        status="pending",
+        objective="Prove the scoped interrupt and record explicit return-to-roadmap/closeout evidence without widening the slice.",
+        dependencies=("phase-1-scoped-interrupt",),
+        write_scope=phase_2_scope,
+        read_context=tuple(_dedupe_nonempty((*read_context, *all_scope))),
+        invariants="do not weaken interrupt scope, verification ownership, docs_decision evidence, or roadmap-status boundaries.",
+        implementation_contract=(
+            "verification and state transfer stay scoped to the interrupt; queued roadmap slices remain separate until a later explicit plan/transition"
+        ),
+        verification_gates=_focused_verification_gate(test_scope, verification_profile),
+        docs_decision_rule=_phase_2_docs_decision_rule(docs_scope),
+        state_transfer=(
+            "record deterministic verification, docs_decision, residual risk, carry_forward/return-to-roadmap target, "
+            "and explicit no-unrequested-roadmap-status-movement evidence"
+        ),
+        refusal_or_escalation="stop if closeout, archive, roadmap promotion/status movement, or docs/API impact is uncertain.",
+    )
+    return (phase_1, phase_2)
+
+
 def _non_implementation_generated_phases(
     slice_contract: RoadmapSliceContract | None,
     report: RoadmapSynthesisReport,
@@ -635,7 +806,11 @@ def _non_implementation_phase_ids(deliverable_class: str) -> tuple[str, str, str
             "phase-2-fan-in-review-disposition",
             "phase-3-fan-in-review-state-transfer",
         )
-    phase_key = deliverable_class if deliverable_class in {"audit", "cleanup", "diagnostic", "evidence", "proposal", "research"} else "review"
+    phase_key = (
+        deliverable_class
+        if deliverable_class in {"audit", "cleanup", "diagnostic", "evidence", "proposal", "research", "route-hygiene"}
+        else "review"
+    )
     phase_2_name = {
         "audit": "findings",
         "cleanup": "disposition",
@@ -643,6 +818,7 @@ def _non_implementation_phase_ids(deliverable_class: str) -> tuple[str, str, str
         "evidence": "validation",
         "proposal": "options",
         "research": "synthesis",
+        "route-hygiene": "disposition",
         "review": "disposition",
     }[phase_key]
     return (
@@ -655,6 +831,8 @@ def _non_implementation_phase_ids(deliverable_class: str) -> tuple[str, str, str
 def _default_output_artifact_for_deliverable(deliverable_class: str) -> str:
     if deliverable_class == "research":
         return "project/research/<research-artifact>.md"
+    if deliverable_class == "route-hygiene":
+        return "project/verification/<route-hygiene-evidence>.md"
     return "project/verification/<non-implementation-artifact>.md"
 
 
@@ -673,6 +851,8 @@ def _non_implementation_phase_1_objective(deliverable_class: str) -> str:
         return "Collect the proof source set and validation criteria before claiming completion."
     if deliverable_class == "cleanup":
         return "Scope cleanup candidates and risk boundaries before deleting, moving, accepting, or rewriting anything."
+    if deliverable_class == "route-hygiene":
+        return "Review route-hygiene source routes, archive target, roadmap metadata, and owner command before applying cleanup."
     return "Scope the non-implementation review deliverable and output artifact before any implementation work."
 
 
@@ -691,6 +871,8 @@ def _non_implementation_phase_2_objective(deliverable_class: str) -> str:
         return "Validate evidence against the required claim and record any gaps or residual risk."
     if deliverable_class == "cleanup":
         return "Produce cleanup disposition and safe follow-up commands without applying destructive changes."
+    if deliverable_class == "route-hygiene":
+        return "Run the route-hygiene owner dry-run/apply and verify exact route writes, links, and lifecycle posture."
     return "Produce the non-implementation review artifact with evidence, disposition, residual risk, and follow-up work."
 
 
@@ -699,6 +881,8 @@ def _non_implementation_phase_3_objective(deliverable_class: str) -> str:
         return "Record diagnostic evidence, docs_decision, residual risk, and explicit no-product-diff-acceptance state transfer."
     if deliverable_class == "fan-in-review":
         return "Record fan-in disposition evidence, follow-up slices, and explicit no-product-diff-acceptance state transfer."
+    if deliverable_class == "route-hygiene":
+        return "Record route-hygiene evidence, docs_decision, residual risk, and next safe command."
     return f"Record {_normalized_text(deliverable_class.replace('-', ' '))} evidence, docs_decision, residual risk, and next safe command."
 
 
@@ -709,6 +893,11 @@ def _non_implementation_verification_gate(deliverable_class: str, output_artifac
             f"repo-visible `fan_in_review` output artifact exists at {artifact_list}, names source snapshot, "
             "cluster disposition, missing evidence, forbidden shortcuts, owner route, follow-up slice, and explicit "
             "no-product-diff-acceptance fields; product tests are not used as primary proof"
+        )
+    if deliverable_class == "route-hygiene":
+        return (
+            f"reviewed route-hygiene owner dry-run/apply touches only declared route scope {artifact_list}, "
+            "records exact route writes, lifecycle posture, and residual risk; product tests are not used as primary proof"
         )
     return (
         f"repo-visible `{deliverable_class.replace('-', '_')}` output artifact exists at {artifact_list}, names its source set and evidence, "
@@ -1407,7 +1596,10 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
             findings.append(_plan_only_requested_item_finding(request, apply=False))
         synthesis_report = _plan_synthesis_report(inventory, request, slice_contract)
         if synthesis_report:
+            doc_target_gate = _doc_target_existence_gate(inventory, synthesis_report)
+            synthesis_report = doc_target_gate.report
             findings.extend(_plan_synthesis_findings(inventory, synthesis_report, apply=False))
+            findings.extend(_plan_doc_target_existence_findings(doc_target_gate, apply=False))
             verification_profile = _repo_verification_gate_profile(inventory, request, synthesis_report, slice_contract)
             findings.extend(_plan_verification_gate_findings(synthesis_report, verification_profile, apply=False, slice_contract=slice_contract))
     if source_plans:
@@ -1486,6 +1678,8 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     source_incubation = _roadmap_source_incubation(inventory, request.roadmap_item)
     slice_contract = _plan_slice_contract(inventory, request)
     synthesis_report = _plan_synthesis_report(inventory, request, slice_contract)
+    doc_target_gate = _doc_target_existence_gate(inventory, synthesis_report) if synthesis_report else None
+    synthesis_report = doc_target_gate.report if doc_target_gate else synthesis_report
     verification_profile = _repo_verification_gate_profile(inventory, request, synthesis_report, slice_contract)
     plan_text = render_implementation_plan(
         request,
@@ -1594,6 +1788,8 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         findings.append(_plan_only_requested_item_finding(request, apply=True))
     if synthesis_report:
         findings.extend(_plan_synthesis_findings(inventory, synthesis_report, apply=True))
+        if doc_target_gate:
+            findings.extend(_plan_doc_target_existence_findings(doc_target_gate, apply=True))
         findings.extend(_plan_verification_gate_findings(synthesis_report, verification_profile, apply=True, slice_contract=slice_contract))
     if request.roadmap_item:
         findings.append(
@@ -1750,6 +1946,8 @@ def _render_plan_text_for_request(inventory: Inventory, request: PlanRequest) ->
     source_incubation = _roadmap_source_incubation(inventory, request.roadmap_item)
     slice_contract = _plan_slice_contract(inventory, request)
     synthesis_report = _plan_synthesis_report(inventory, request, slice_contract)
+    if synthesis_report:
+        synthesis_report = _doc_target_existence_gate(inventory, synthesis_report).report
     verification_profile = _repo_verification_gate_profile(inventory, request, synthesis_report, slice_contract)
     return render_implementation_plan(
         request,
@@ -2137,6 +2335,22 @@ def _existing_plan_text(inventory: Inventory) -> str | None:
 
 def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[Finding]:
     errors: list[Finding] = []
+    if request.roadmap_item:
+        archived_plan = roadmap_compacted_item_archived_plan(inventory, request.roadmap_item)
+        if archived_plan:
+            errors.append(
+                Finding(
+                    "error",
+                    "plan-roadmap-compacted-item-refused",
+                    (
+                        f"roadmap item {request.roadmap_item!r} is compacted into Archived Completed History "
+                        f"with archived-plan evidence {archived_plan}; restore it through "
+                        "mylittleharness --root <root> roadmap --dry-run --action update "
+                        f"--item-id {request.roadmap_item} --status accepted before opening a plan"
+                    ),
+                    ROADMAP_REL,
+                )
+            )
     if not request.title:
         errors.append(Finding("error", "plan-refused", "--title is required when it cannot be derived from --roadmap-item"))
     if not request.objective:
@@ -2164,6 +2378,16 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
                     "error",
                     "plan-deliverable-class-refused",
                     f"{blocker}; next_safe_command={promotion_next_safe_command}",
+                    ROADMAP_REL,
+                )
+            )
+        result_gate_next_safe_command = roadmap_slice_result_gate_next_safe_command(request.roadmap_item)
+        for blocker in roadmap_slice_result_gate_blockers(inventory, request.roadmap_item):
+            errors.append(
+                Finding(
+                    "error",
+                    "plan-slice-result-gate-refused",
+                    f"{blocker}; next_safe_command={result_gate_next_safe_command}",
                     ROADMAP_REL,
                 )
             )
@@ -2601,6 +2825,42 @@ def _synthesis_report_with_contract_targets(
     )
 
 
+def _doc_target_existence_gate(inventory: Inventory, report: RoadmapSynthesisReport) -> DocTargetExistenceGate:
+    target_root = _verification_target_root(inventory)
+    effective_targets: list[str] = []
+    missing_targets: list[str] = []
+    candidate_summaries: list[str] = []
+    for target in report.target_artifacts:
+        normalized = normalize_route_path(target)
+        if is_exact_doc_target(normalized) and not doc_target_exists(target_root, normalized):
+            missing_targets.append(normalized)
+            candidates = existing_doc_target_candidates(target_root, normalized)
+            if candidates:
+                candidate_summaries.append(f"{normalized} -> {', '.join(candidates)}")
+            effective_targets.append(DOCS_WRITE_SCOPE_PLACEHOLDER)
+        else:
+            effective_targets.append(target)
+    if not missing_targets:
+        return DocTargetExistenceGate(report=report, target_root=str(target_root))
+
+    gated_targets = tuple(_dedupe_nonempty(effective_targets))
+    bundle_signals = tuple(
+        _dedupe_nonempty(
+            (
+                *report.bundle_signals,
+                "missing exact docs target gate replaced absent docs/spec write-scope targets with an explicit placeholder",
+            )
+        )
+    )
+    gated_report = replace(report, target_artifacts=gated_targets, bundle_signals=bundle_signals)
+    return DocTargetExistenceGate(
+        report=gated_report,
+        missing_targets=tuple(_dedupe_nonempty(missing_targets)),
+        candidate_summaries=tuple(_dedupe_nonempty(candidate_summaries)),
+        target_root=str(target_root),
+    )
+
+
 def _roadmap_source_incubation(inventory: Inventory, roadmap_item: str) -> str:
     if not roadmap_item:
         return ""
@@ -2672,7 +2932,16 @@ def _roadmap_candidate_task(inventory: Inventory, item_id: str, fields: dict[str
 
 def _roadmap_candidate_task_action(inventory: Inventory, fields: dict[str, object]) -> str:
     deliverable_class = roadmap_item_deliverable_class(inventory, fields)
-    if deliverable_class in {"audit", "cleanup", "diagnostic", "evidence", "fan-in-review", "proposal", "research"}:
+    if deliverable_class in {
+        "audit",
+        "cleanup",
+        "diagnostic",
+        "evidence",
+        "fan-in-review",
+        "proposal",
+        "research",
+        "route-hygiene",
+    }:
         return f"Produce {_display_deliverable_class(deliverable_class)} deliverable for"
     return "Implement"
 
@@ -3049,6 +3318,18 @@ def _plan_slice_contract_findings(contract: RoadmapSliceContract, apply: bool) -
                 DEFAULT_PLAN_REL,
             )
         )
+    if _is_scoped_interrupt_context(None, contract):
+        findings.append(
+            Finding(
+                "info",
+                "plan-scoped-interrupt-contract",
+                (
+                    f"{prefix}record scoped interrupt intent with roadmap_status_policy="
+                    f"{SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY!r}; closeout/archive remains explicit and no roadmap status moves by implication"
+                ),
+                DEFAULT_PLAN_REL,
+            )
+        )
     return findings
 
 
@@ -3104,6 +3385,25 @@ def _plan_synthesis_findings(inventory: Inventory, report: RoadmapSynthesisRepor
             )
         )
     return findings
+
+
+def _plan_doc_target_existence_findings(gate: DocTargetExistenceGate, apply: bool) -> list[Finding]:
+    if not gate.missing_targets:
+        return []
+    prefix = "" if apply else "would "
+    candidates = "; ".join(gate.candidate_summaries) if gate.candidate_summaries else "<none found>"
+    return [
+        Finding(
+            "warn",
+            "plan-doc-target-missing",
+            (
+                f"{prefix}gate missing exact docs target(s) in product/source root {gate.target_root}: "
+                f"{', '.join(gate.missing_targets)}; candidates: {candidates}; "
+                "retarget to an existing docs/spec/template file or keep docs_decision='uncertain' before docs mutation"
+            ),
+            DEFAULT_PLAN_REL,
+        )
+    ]
 
 
 def _target_artifact_ownership_findings(

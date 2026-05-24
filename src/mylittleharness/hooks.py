@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from .context_memory import context_memory_hook_context
 from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness_payload
 from .inventory import Inventory
 from .models import Finding
@@ -27,6 +29,7 @@ CLAUDE_CODE_CLIENT = "claude-code"
 GITHUB_COPILOT_CLIENT = "github-copilot"
 NATIVE_HOOK_CLIENTS = (CODEX_CLIENT, CLAUDE_CODE_CLIENT, GITHUB_COPILOT_CLIENT)
 CODEX_HOOK_ADAPTER_SCHEMA = "mylittleharness.codex-hook-adapter.v1"
+HOOK_POLICY_SCHEMA = "mylittleharness.hook-policy.v1"
 CODEX_HOOKS_REL_PATH = ".codex/hooks.json"
 CODEX_HOOK_SCRIPT_REL_PATH = ".codex/hooks/mylittleharness_session_start.py"
 CLAUDE_CODE_HOOKS_REL_PATH = ".claude/settings.json"
@@ -76,12 +79,52 @@ BOUNDED_MLH_READ_TOOL_SUFFIXES = (
     "mylittleharness_search",
 )
 READ_ONLY_SOURCE_DISCOVERY_COMMANDS = {
+    "cat",
+    "dir",
     "rg",
     "ripgrep",
     "select-string",
     "findstr",
+    "gc",
+    "get-childitem",
+    "get-content",
+    "get-item",
+    "ls",
+    "more",
+    "resolve-path",
+    "test-path",
+    "type",
+}
+READ_ONLY_SOURCE_DISCOVERY_PREFIX_TOKENS = {
+    "&",
+    "=",
+    "catch",
+    "do",
+    "else",
+    "elseif",
+    "finally",
+    "for",
+    "foreach",
+    "if",
+    "in",
+    "try",
+    "where",
+    "where-object",
+    "while",
+}
+READ_ONLY_GIT_INSPECTION_COMMANDS = {"diff", "show", "status", "log"}
+GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push"}
+GIT_OPTIONS_WITH_VALUES = {
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
 }
 MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
+    "intake",
     "incubate",
     "memory-hygiene",
     "meta-feedback",
@@ -90,6 +133,7 @@ MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
     "repair",
     "research-import",
     "roadmap",
+    "suggest",
     "transition",
     "writeback",
 }
@@ -109,6 +153,34 @@ WRITING_COMMAND_TOKENS = (
     "mv ",
     "cp ",
 )
+WRITING_COMMAND_NAMES = {
+    "add-content",
+    "copy-item",
+    "cp",
+    "del",
+    "erase",
+    "move-item",
+    "mv",
+    "new-item",
+    "out-file",
+    "remove-item",
+    "rm",
+    "set-content",
+}
+SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "{", "}", "then", "do", "else", "elseif"}
+SINGLE_TARGET_WRITING_COMMAND_NAMES = WRITING_COMMAND_NAMES - {"copy-item", "cp", "move-item", "mv"}
+PAIRED_TARGET_WRITING_COMMAND_NAMES = {"copy-item", "cp", "move-item", "mv"}
+WRITING_COMMAND_PATH_OPTIONS = {"-path", "-literalpath", "-filepath", "-destination"}
+WRITING_COMMAND_NON_TARGET_OPTIONS_WITH_VALUES = {
+    "-encoding",
+    "-filter",
+    "-include",
+    "-inputobject",
+    "-itemtype",
+    "-name",
+    "-type",
+    "-value",
+}
 MLH_MUTATION_COMMANDS = (
     "mylittleharness",
     "python -m mylittleharness",
@@ -138,6 +210,7 @@ EDITABLE_ROUTE_PATCH_IDS = (
     "stable-specs",
     "verification",
 )
+ACTIVE_PLAN_SPEC_DOC_PREFIXES = ("docs/specs/", "project/specs/")
 GENERATED_CACHE_PREFIXES = (".mylittleharness/generated/",)
 NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
     "project/cache/",
@@ -158,6 +231,8 @@ GIT_WRITE_COMMANDS = (
     "git commit ",
 )
 PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])((?:\.?[\\/])?(?:project|src|tests|docs|\.mylittleharness)[\\/][^\s\"'`]+)")
+POWERSHELL_HERE_STRING_RE = re.compile(r"@(['\"])\r?\n.*?\r?\n\1@", re.DOTALL)
+POSIX_HEREDOC_START_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 
 
 @dataclass(frozen=True)
@@ -171,6 +246,14 @@ class CodexHookAdapterRequest:
     client: str = CODEX_CLIENT
     scope: str = "project"
     config_path: str = ""
+
+
+@dataclass(frozen=True)
+class HookToolIntent:
+    command: str
+    paths: list[str]
+    write_command: str
+    write_target_paths: list[str]
 
 
 def make_hook_install_request(args) -> HookInstallRequest:
@@ -260,6 +343,7 @@ def hook_install_apply_findings(inventory: Inventory, request: HookInstallReques
 def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHookAdapterRequest) -> list[Finding]:
     prefix = _hook_adapter_code_prefix(request)
     label = _native_hook_client_label(request.client)
+    policy = _hook_policy_identity()
     findings = [
         Finding(
             "info",
@@ -284,7 +368,8 @@ def codex_hook_adapter_dry_run_findings(inventory: Inventory, request: CodexHook
                 f"{prefix}-plan",
                 (
                     f"would ensure {label} native hook adapter events={','.join(NATIVE_ADAPTER_HOOKS)}; status={status}; "
-                    f"config={_rel_path(inventory.root, config_path)}; script={_rel_path(inventory.root, script_path)}"
+                    f"config={_rel_path(inventory.root, config_path)}; script={_rel_path(inventory.root, script_path)}; "
+                    f"policy_hash={policy['sourceHash']}"
                 ),
                 _rel_path(inventory.root, config_path),
             )
@@ -306,6 +391,7 @@ def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHook
     request = request or CodexHookAdapterRequest()
     config_path = _native_hooks_config_path(inventory.root, request)
     script_path = _native_hook_script_path(inventory.root, request)
+    policy = _hook_policy_identity()
     return {
         "schema": CODEX_HOOK_ADAPTER_SCHEMA,
         "client": request.client,
@@ -314,8 +400,9 @@ def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHook
         "configPath": _rel_path(inventory.root, config_path),
         "scriptPath": _rel_path(inventory.root, script_path),
         "events": [_native_hook_event_name(request.client, hook_id) for hook_id in NATIVE_ADAPTER_HOOKS],
-        "dryRunCommand": "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
-        "applyCommand": "mylittleharness --root <root> hooks adapter --client codex --apply --scope project",
+        "policy": policy,
+        "dryRunCommand": _hook_adapter_review_command(request, "--dry-run"),
+        "applyCommand": _hook_adapter_review_command(request, "--apply"),
         "includedInCodexMcpInstall": True,
         "includedInAttachApply": True,
         "boundary": {
@@ -440,6 +527,7 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
     blocked = _hook_blocked(findings)
     status = "block" if blocked else _hook_status(findings)
     status_message = _hook_status_message(hook_id, lifecycle, cache_posture)
+    policy = _hook_policy_identity()
     additional_context = (
         _hook_additional_context(agent_packet, cache_posture, accelerator_adoption, connect_readiness, mlhd)
         if hook_id in FIRST_CONTACT_HOOKS
@@ -452,6 +540,7 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
         "event": hook_id,
         "status": status,
         "policy_mode": "block" if blocked else "warn",
+        "policy": policy,
         "status_message": status_message,
         "system_message": system_message,
         "additional_context": additional_context,
@@ -620,9 +709,13 @@ def render_native_hooks_json(root: Path, request: CodexHookAdapterRequest | None
 
 def render_codex_session_start_script() -> str:
     import_root_literal = repr(str(_module_import_root()))
+    policy = _hook_policy_identity()
     return "\n".join(
         [
             "# Generated by MyLittleHarness. Do not edit by hand unless replacing the hook adapter.",
+            f"# Hook policy schema: {policy['schema']}",
+            f"# Hook policy source: {policy['source']}",
+            f"# Hook policy hash: {policy['sourceHash']}",
             "from __future__ import annotations",
             "",
             "import os",
@@ -630,6 +723,9 @@ def render_codex_session_start_script() -> str:
             "from pathlib import Path",
             "",
             f"MLH_IMPORT_ROOT = {import_root_literal}",
+            f"MLH_HOOK_POLICY_SCHEMA = {policy['schema']!r}",
+            f"MLH_HOOK_POLICY_SOURCE = {policy['source']!r}",
+            f"MLH_HOOK_POLICY_HASH = {policy['sourceHash']!r}",
             "if MLH_IMPORT_ROOT and MLH_IMPORT_ROOT not in sys.path:",
             "    sys.path.insert(0, MLH_IMPORT_ROOT)",
             "",
@@ -676,9 +772,13 @@ def render_native_hook_script(client: str) -> str:
         return render_codex_session_start_script()
     import_root_literal = repr(str(_module_import_root()))
     client_literal = repr(client)
+    policy = _hook_policy_identity()
     return "\n".join(
         [
             "# Generated by MyLittleHarness. Do not edit by hand unless replacing the hook adapter.",
+            f"# Hook policy schema: {policy['schema']}",
+            f"# Hook policy source: {policy['source']}",
+            f"# Hook policy hash: {policy['sourceHash']}",
             "from __future__ import annotations",
             "",
             "import os",
@@ -686,6 +786,9 @@ def render_native_hook_script(client: str) -> str:
             "from pathlib import Path",
             "",
             f"MLH_IMPORT_ROOT = {import_root_literal}",
+            f"MLH_HOOK_POLICY_SCHEMA = {policy['schema']!r}",
+            f"MLH_HOOK_POLICY_SOURCE = {policy['source']!r}",
+            f"MLH_HOOK_POLICY_HASH = {policy['sourceHash']!r}",
             "if MLH_IMPORT_ROOT and MLH_IMPORT_ROOT not in sys.path:",
             "    sys.path.insert(0, MLH_IMPORT_ROOT)",
             "",
@@ -786,10 +889,21 @@ def _codex_hook_adapter_target_findings(inventory: Inventory, request: CodexHook
     prefix = _hook_adapter_code_prefix(request)
     label = _native_hook_client_label(request.client)
     event_names = _native_hook_event_names(request.client)
-    return [
+    policy = _hook_policy_identity()
+    findings = [
         Finding("info", f"{prefix}-target", f"client={request.client}; scope={request.scope}; config={_rel_path(inventory.root, config_path)}", _rel_path(inventory.root, config_path)),
         Finding("info", f"{prefix}-script", f"helper script target={_rel_path(inventory.root, script_path)}", _rel_path(inventory.root, script_path)),
         Finding("info", f"{prefix}-status", f"{label} hook adapter status={status}; project-local hooks require a trusted project and may need client hook review or a new session", _rel_path(inventory.root, config_path)),
+        Finding(
+            "info",
+            f"{prefix}-policy",
+            (
+                f"{label} hook policy source={policy['source']}; policy_hash={policy['sourceHash']}; "
+                f"refresh_dry_run={_hook_adapter_review_command(request, '--dry-run')}; "
+                f"refresh_apply={_hook_adapter_review_command(request, '--apply')}"
+            ),
+            _rel_path(inventory.root, script_path),
+        ),
         Finding(
             "info",
             f"{prefix}-event",
@@ -797,6 +911,20 @@ def _codex_hook_adapter_target_findings(inventory: Inventory, request: CodexHook
             _rel_path(inventory.root, config_path),
         ),
     ]
+    if status == "needs-update":
+        findings.append(
+            Finding(
+                "warn",
+                f"{prefix}-refresh-needed",
+                (
+                    f"{label} native hook adapter is not current for policy_hash={policy['sourceHash']}; "
+                    f"next_safe_command={_hook_adapter_review_command(request, '--dry-run')} then "
+                    f"{_hook_adapter_review_command(request, '--apply')}"
+                ),
+                _rel_path(inventory.root, script_path),
+            )
+        )
+    return findings
 
 
 def _hook_install_target_findings(inventory: Inventory, request: HookInstallRequest) -> list[Finding]:
@@ -1045,10 +1173,13 @@ def _hook_event_context(inventory: Inventory, hook_id: str) -> str:
     state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     plan_status = _payload_value(state, "plan_status")
     active_phase = _payload_value(state, "active_phase")
+    policy = _hook_policy_identity()
     return "\n".join(
         [
             f"MyLittleHarness hook context for {hook_id}:",
             f"- lifecycle: plan_status={plan_status}; active_phase={active_phase}",
+            f"- hook_policy: schema={policy['schema']}; source_hash={policy['sourceHash']}; import_root={policy['importRoot']}",
+            context_memory_hook_context(inventory),
             "- first-pass navigation: dashboard packet, MCP read/search/bundle when mounted, projection warm-cache if stale, then rg or bounded source reads for exact verification.",
             "- policy: deterministic unsafe shortcuts may be blocked; ambiguous cases are advisory warnings.",
             "- boundary: hook output cannot approve lifecycle, archive, roadmap, staging, commit, push, release, provider routing, daemon state, or cache truth.",
@@ -1115,9 +1246,10 @@ def _user_prompt_policy_findings(inventory: Inventory, hook_input_text: str) -> 
 def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
-    paths = _hook_input_paths(data, text)
-    command = _hook_input_command(data, text)
-    write_command = _hook_write_command(data, command)
+    intent = _hook_tool_intent(data, text)
+    paths = intent.paths
+    command = intent.command
+    write_command = intent.write_command
     lowered = command.casefold()
     findings = [
         Finding(
@@ -1126,15 +1258,39 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             "pre-tool-use inspects declared tool intent and blocks deterministic MLH shortcut attempts before tool execution",
         )
     ]
-    allow_read_only_source_paths = _is_read_only_source_discovery_command(command) or _is_bounded_mlh_read_tool_request(data)
-    allow_mlh_owner_route_paths = _is_mlh_owner_route_review_command(command)
+    allow_read_only_source_paths = (
+        _is_read_only_source_discovery_command(command)
+        or _is_read_only_git_inspection_command(command)
+        or _is_bounded_mlh_read_tool_request(data)
+    )
+    allow_read_only_roadmap_path = _is_read_only_roadmap_direct_read_command(command, paths)
+    allow_research_import_related_prompt = _is_research_import_related_prompt_provenance_command(command)
+    allow_mlh_owner_route_paths = _is_mlh_owner_route_review_command(command) or allow_research_import_related_prompt
     allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, data)
+    allow_active_plan_spec_doc_patch = _is_active_plan_spec_doc_patch_request(inventory, data)
+    if _active_plan_roadmap_policy_relevant(inventory, command, paths):
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-active-plan-roadmap-intake-matrix",
+                (
+                    "active plan is open: allow read-only lifecycle inspection and first-class MLH dry-run/apply "
+                    "route review; capture new candidates through meta-feedback/incubation now; defer accepted "
+                    "roadmap status/order/dependency/next-item promotion until plan_status=none or explicit "
+                    "active-plan coverage; next_safe_candidate=mylittleharness --root <root> meta-feedback "
+                    "--dry-run ...; next_safe_after_close=mylittleharness --root <root> roadmap --dry-run ..."
+                ),
+                "project/" + "implementation-plan.md",
+            )
+        )
     for finding in _path_policy_findings(
         inventory,
         paths,
         allow_read_only_source_paths=allow_read_only_source_paths,
+        allow_read_only_roadmap_path=allow_read_only_roadmap_path,
         allow_mlh_owner_route_paths=allow_mlh_owner_route_paths,
         allow_existing_route_patch=allow_existing_route_patch,
+        allow_active_plan_spec_doc_patch=allow_active_plan_spec_doc_patch,
     ):
         findings.append(finding)
     if _looks_like_generated_cache_write(paths, write_command):
@@ -1146,13 +1302,21 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 ".mylittleharness/generated",
             )
         )
-    if _looks_like_lifecycle_markdown_write(paths, write_command) and not allow_existing_route_patch:
+    if (
+        _looks_like_lifecycle_markdown_write(paths, write_command)
+        and not allow_existing_route_patch
+        and not allow_active_plan_spec_doc_patch
+    ):
+        route_path = paths[0] if paths else "project"
         findings.append(
             Finding(
                 "error",
                 "hooks-policy-block-lifecycle-markdown-shortcut",
-                "blocked direct lifecycle Markdown write without MLH route/frontmatter evidence; use the owning dry-run/apply rail or repair route",
-                paths[0] if paths else "project",
+                (
+                    "blocked direct lifecycle Markdown write without MLH route/frontmatter evidence; "
+                    f"next_safe_command={_hook_route_next_safe_command(inventory, route_path)}"
+                ),
+                route_path,
             )
         )
     if allow_existing_route_patch:
@@ -1161,6 +1325,48 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "info",
                 "hooks-policy-allow-existing-route-markdown-patch",
                 "allowed bounded apply_patch update of existing frontmatter-bearing route Markdown; authority paths, create/delete, and malformed route files remain blocked",
+                paths[0] if paths else None,
+            )
+        )
+    if allow_active_plan_spec_doc_patch:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-active-plan-spec-doc-route-patch",
+                (
+                    "allowed bounded apply_patch update of active-phase write_scope docs/spec route file(s); "
+                    "frontmatter-bearing existing files only, with lifecycle authority paths and create/delete still blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_mlh_owner_route_paths:
+        owner_route_evidence_path = _first_mlh_owner_route_evidence_path(inventory, paths)
+        if owner_route_evidence_path:
+            findings.append(
+                Finding(
+                    "info",
+                    "hooks-policy-allow-mlh-owner-route-evidence-paths",
+                    "allowed MLH owner-route dry-run/apply evidence paths; direct lifecycle or product-source writes remain blocked",
+                    owner_route_evidence_path,
+                )
+            )
+    if allow_research_import_related_prompt:
+        related_prompt = _research_import_related_prompt_path(command)
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-research-import-related-prompt-provenance",
+                "allowed research-import related-prompt as read-only provenance; the referenced lifecycle Markdown is not treated as a mutation target",
+                related_prompt or None,
+            )
+        )
+    if allow_read_only_source_paths and any(_is_lifecycle_route_path(path) for path in paths):
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-lifecycle-inspection",
+                "allowed read-only lifecycle inspection; route files remain authority and this hook output cannot approve mutation or lifecycle movement",
                 paths[0] if paths else None,
             )
         )
@@ -1173,20 +1379,43 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "blocked project Markdown write outside an MLH-visible route; use intake or an owned route such as "
                     "project/adrs, project/decisions, project/research, project/plan-incubation, or project/verification "
-                    "for durable knowledge"
+                    "for durable knowledge; next_safe_command=mylittleharness --root <root> intake --dry-run --text-file -"
                 ),
                 nonroute_markdown,
             )
         )
-    if _looks_like_code_write(paths, write_command):
-        out_of_scope = [path for path in paths if _is_code_path(path) and not _is_active_plan_target_artifact(inventory, path)]
+    code_write_paths = _hook_code_write_paths(inventory, paths, write_command)
+    if code_write_paths:
+        allowed_scope = [
+            _hook_plan_path_display(inventory, path)
+            for path in code_write_paths
+            if _is_active_plan_target_artifact(inventory, path)
+        ]
+        out_of_scope = [path for path in code_write_paths if not _is_active_plan_target_artifact(inventory, path)]
+        blocked_scope = [_hook_plan_path_display(inventory, path) for path in out_of_scope]
+        scope_message = _hook_scope_diagnostic_message(allowed_scope, blocked_scope)
+        if len(code_write_paths) > 1:
+            findings.append(
+                Finding(
+                    "info",
+                    "hooks-policy-code-write-scope-diagnostic",
+                    (
+                        "source/test write scope diagnostic: "
+                        f"{scope_message}; next_safe_command=mylittleharness --root <root> check"
+                    ),
+                    blocked_scope[0] if blocked_scope else (allowed_scope[0] if allowed_scope else None),
+                )
+            )
         if not _has_active_plan(inventory):
             findings.append(
                 Finding(
                     "error",
                     "hooks-policy-block-code-write-without-plan",
-                    "tool request appears to write source/test code while no active implementation plan is open; open or resume the active plan before editing source/test code",
-                    out_of_scope[0] if out_of_scope else (paths[0] if paths else None),
+                    (
+                        "tool request appears to write source/test code while no active implementation plan is open; "
+                        f"{scope_message}; next_safe_command=mylittleharness --root <root> plan --dry-run --roadmap-item <id>"
+                    ),
+                    blocked_scope[0] if blocked_scope else (allowed_scope[0] if allowed_scope else None),
                 )
             )
         elif out_of_scope:
@@ -1194,8 +1423,12 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 Finding(
                     "error",
                     "hooks-policy-block-code-write-outside-plan-scope",
-                    "blocked source/test write outside the active plan target_artifacts; update the roadmap/plan scope before editing this path",
-                    out_of_scope[0],
+                    (
+                        "blocked source/test write outside the active plan target_artifacts; "
+                        f"{scope_message}; next_safe_command=mylittleharness --root <root> roadmap --dry-run "
+                        "--action update --item-id <id> --target-artifact <rel-path>"
+                    ),
+                    blocked_scope[0] if blocked_scope else out_of_scope[0],
                 )
             )
     if _looks_like_unsafe_mlh_mutation(lowered) and not _has_explicit_mlh_review_mode(lowered):
@@ -1241,7 +1474,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
 def _post_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
-    paths = _hook_input_paths(data, text)
+    paths = _hook_tool_intent(data, text).paths
     findings = [
         Finding(
             "info",
@@ -1302,15 +1535,17 @@ def _hook_additional_context(
     if not authority_summary:
         authority_summary = _authority_cards_context(agent_packet.get("authorityCards") or readiness.get("authorityCards"))
     mlhd_payload = mlhd if isinstance(mlhd, dict) else {}
+    context_memory_payload = agent_packet.get("contextMemory") if isinstance(agent_packet.get("contextMemory"), dict) else {}
     return "\n".join(
         [
             "MyLittleHarness first-contact context:",
             f"- lifecycle: plan_status={_payload_value(lifecycle, 'plan_status')}; active_plan={_payload_value(lifecycle, 'active_plan')}; active_phase={_payload_value(lifecycle, 'active_phase')}; phase_status={_payload_value(lifecycle, 'phase_status')}",
             f"- cache: artifacts={_component_status(components, 'artifacts')}; sqlite_index={_component_status(components, 'sqlite_index')}",
             f"- mlhd: control_status={_payload_value(mlhd_payload, 'control_status')}; runtime_cache={_payload_value(mlhd_payload, 'runtime_cache_status')}; dirty_count={_payload_value(mlhd_payload, 'dirty_count')}; last_tick={_payload_value(mlhd_payload, 'last_tick_utc')}; last_failure={_payload_value(mlhd_payload, 'last_failed_refresh_utc')}",
+            f"- context memory: status={_payload_value(context_memory_payload, 'status')}; capsule={_payload_value(context_memory_payload, 'capsule_rel_path')}; source_refs={_payload_value(context_memory_payload, 'source_ref_count')}",
             f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe={_payload_value(readiness, 'nextSafeCommand')}",
             f"- authority cards: {authority_summary or 'unavailable'}; dashboard/check/hooks/cache/search output remains non-authority.",
-            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; warm_cache=mylittleharness --root <root> projection --warm-cache --target all; rg_verification=required",
+            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; mlhd_refresh=mylittleharness --root <root> mlhd run-once --apply; rg_verification=required",
             "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
             f"- recommended first-pass commands: {', '.join(str(command) for command in recommended[:4])}",
@@ -1381,6 +1616,7 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
         data.get("shell_command"),
         data.get("cmd"),
         data.get("args"),
+        data.get("arguments"),
         data.get("input"),
         data.get("tool_input"),
         data.get("parameters"),
@@ -1397,16 +1633,39 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
     return fallback_text
 
 
+def _hook_tool_intent(data: dict[str, object], text: str) -> HookToolIntent:
+    command = _hook_input_command(data, text)
+    write_target_paths = _hook_write_target_paths(data, command)
+    paths = _hook_input_paths(data, text, command=command, write_target_paths=write_target_paths)
+    return HookToolIntent(
+        command=command,
+        paths=paths,
+        write_command=_hook_write_command(data, command),
+        write_target_paths=write_target_paths,
+    )
+
+
 def _hook_write_command(data: dict[str, object], command: str) -> str:
     if _hook_apply_patch_target_paths(data):
-        return f"{command}\nset-content"
+        return f"{command}\n; set-content"
     return command
 
 
-def _hook_input_paths(data: dict[str, object], text: str) -> list[str]:
+def _hook_input_paths(
+    data: dict[str, object],
+    text: str,
+    *,
+    command: str | None = None,
+    write_target_paths: list[str] | None = None,
+) -> list[str]:
     apply_patch_targets = _hook_apply_patch_target_paths(data)
     if apply_patch_targets:
         return _dedupe_normalized_hook_paths(apply_patch_targets)
+    explicit_write_targets = (
+        write_target_paths if write_target_paths is not None else _hook_write_target_paths(data, command or _hook_input_command(data, text))
+    )
+    if explicit_write_targets:
+        return _dedupe_normalized_hook_paths(explicit_write_targets)
 
     paths: list[str] = []
 
@@ -1428,6 +1687,131 @@ def _hook_input_paths(data: dict[str, object], text: str) -> list[str]:
     return _dedupe_normalized_hook_paths(paths)
 
 
+def _hook_write_target_paths(data: dict[str, object], command: str) -> list[str]:
+    apply_patch_targets = _hook_apply_patch_target_paths(data)
+    if apply_patch_targets:
+        return _dedupe_normalized_hook_paths(apply_patch_targets)
+    return _dedupe_normalized_hook_paths(_shell_write_target_paths(command))
+
+
+def _shell_write_target_paths(command: str) -> list[str]:
+    tokens = _shell_tokens(command)
+    targets: list[str] = []
+    expect_command = True
+    index = 0
+    while index < len(tokens):
+        raw = str(tokens[index] or "").strip()
+        clean = _clean_token(raw)
+        inline_redirect_target = _inline_redirection_target(raw)
+        if inline_redirect_target:
+            targets.append(inline_redirect_target)
+            index += 1
+            continue
+        if _is_shell_redirection_token(raw, clean):
+            if index + 1 < len(tokens):
+                target = _path_argument_value(tokens[index + 1])
+                if target:
+                    targets.append(target)
+            index += 2
+            continue
+        if not clean:
+            if _is_shell_command_separator(raw, clean):
+                expect_command = True
+            index += 1
+            continue
+        if expect_command and clean in WRITING_COMMAND_NAMES:
+            command_targets, next_index = _write_command_target_paths(tokens, index)
+            targets.extend(command_targets)
+            index = next_index
+            expect_command = False
+            continue
+        if _is_shell_command_separator(raw, clean):
+            expect_command = True
+            index += 1
+            continue
+        expect_command = False
+        if raw.endswith(";"):
+            expect_command = True
+        index += 1
+    return targets
+
+
+def _write_command_target_paths(tokens: list[str], command_index: int) -> tuple[list[str], int]:
+    command = _clean_token(tokens[command_index])
+    max_positional = 2 if command in PAIRED_TARGET_WRITING_COMMAND_NAMES else 1
+    single_target = command in SINGLE_TARGET_WRITING_COMMAND_NAMES
+    targets: list[str] = []
+    positional_count = 0
+    index = command_index + 1
+    while index < len(tokens):
+        raw = str(tokens[index] or "").strip()
+        clean = _clean_token(raw)
+        if _is_shell_command_separator(raw, clean):
+            break
+        if _is_shell_redirection_token(raw, clean):
+            break
+        option_value = _write_path_option_value(raw, clean)
+        if option_value:
+            targets.append(option_value)
+            if single_target:
+                return targets, index + 1
+            index += 1
+            continue
+        if clean in WRITING_COMMAND_PATH_OPTIONS and index + 1 < len(tokens):
+            target = _path_argument_value(tokens[index + 1])
+            if target:
+                targets.append(target)
+            if single_target:
+                return targets, index + 2
+            index += 2
+            continue
+        if clean in WRITING_COMMAND_NON_TARGET_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if clean.startswith("-"):
+            index += 1
+            continue
+        target = _path_argument_value(raw)
+        if target:
+            targets.append(target)
+            positional_count += 1
+            if single_target or positional_count >= max_positional:
+                return targets, index + 1
+        index += 1
+    return targets, index
+
+
+def _write_path_option_value(raw: str, clean: str) -> str:
+    for option in WRITING_COMMAND_PATH_OPTIONS:
+        prefix = f"{option}="
+        if clean.startswith(prefix):
+            value = raw.split("=", 1)[1]
+            return _path_argument_value(value)
+    return ""
+
+
+def _inline_redirection_target(raw: str) -> str:
+    stripped = str(raw or "").strip(" \t\r\n\"'`")
+    if stripped.startswith(">>") and len(stripped) > 2:
+        return _path_argument_value(stripped[2:])
+    if stripped.startswith(">") and len(stripped) > 1:
+        return _path_argument_value(stripped[1:])
+    return ""
+
+
+def _path_argument_value(token: str) -> str:
+    value = str(token or "").strip(" \t\r\n\"'`")
+    if not value:
+        return ""
+    normalized = value.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:[\\/]", value) or normalized.startswith(
+        ("./", "project/", "src/", "tests/", "docs/", ".mylittleharness/")
+    ):
+        return value
+    extracted = _extract_paths(value)
+    return extracted[0] if extracted else ""
+
+
 def _dedupe_normalized_hook_paths(paths: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1440,14 +1824,6 @@ def _dedupe_normalized_hook_paths(paths: list[str]) -> list[str]:
 
 
 def _hook_apply_patch_target_paths(data: dict[str, object]) -> list[str]:
-    tool_names = (
-        data.get("toolName"),
-        data.get("tool_name"),
-        data.get("tool"),
-        data.get("recipient_name"),
-    )
-    if not any("apply_patch" in str(candidate or "").casefold() for candidate in tool_names):
-        return []
     patch_text = _hook_apply_patch_text(data)
     if not patch_text:
         return []
@@ -1471,15 +1847,17 @@ def _is_existing_route_markdown_patch_request(inventory: Inventory, data: dict[s
     return bool(paths) and all(_is_editable_route_patch_path(inventory, path) for path in paths)
 
 
+def _is_active_plan_spec_doc_patch_request(inventory: Inventory, data: dict[str, object]) -> bool:
+    operations = _hook_apply_patch_target_operations(data)
+    if not operations:
+        return False
+    if any(operation != "update" for operation, _path in operations):
+        return False
+    paths = [path for _operation, path in operations]
+    return bool(paths) and all(_is_active_plan_spec_doc_patch_path(inventory, path) for path in paths)
+
+
 def _hook_apply_patch_target_operations(data: dict[str, object]) -> list[tuple[str, str]]:
-    tool_names = (
-        data.get("toolName"),
-        data.get("tool_name"),
-        data.get("tool"),
-        data.get("recipient_name"),
-    )
-    if not any("apply_patch" in str(candidate or "").casefold() for candidate in tool_names):
-        return []
     patch_text = _hook_apply_patch_text(data)
     if not patch_text:
         return []
@@ -1504,6 +1882,27 @@ def _is_editable_route_patch_path(inventory: Inventory, path: str) -> bool:
     if not rel or _is_lifecycle_authority_path(rel):
         return False
     if classify_memory_route(rel).route_id not in EDITABLE_ROUTE_PATCH_IDS:
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return frontmatter.has_frontmatter and not frontmatter.errors
+
+
+def _is_active_plan_spec_doc_patch_path(inventory: Inventory, path: str) -> bool:
+    rel = _hook_route_rel_path(inventory, path)
+    if not rel or _is_lifecycle_authority_path(rel):
+        return False
+    normalized = _normalize_hook_path(rel).casefold()
+    if not any(normalized.startswith(prefix) for prefix in ACTIVE_PLAN_SPEC_DOC_PREFIXES):
+        return False
+    if not _active_phase_write_scope_allows_path(inventory, normalized):
         return False
     route_path = _hook_route_file_path(inventory, path)
     if route_path is None:
@@ -1547,6 +1946,10 @@ def _hook_apply_patch_text(data: dict[str, object]) -> str:
         data.get("tool_input"),
         data.get("parameters"),
         data.get("arguments"),
+        data.get("command"),
+        data.get("shell_command"),
+        data.get("cmd"),
+        data.get("raw"),
     )
     for candidate in candidates:
         if isinstance(candidate, str) and "*** Begin Patch" in candidate:
@@ -1555,6 +1958,14 @@ def _hook_apply_patch_text(data: dict[str, object]) -> str:
             nested = _hook_apply_patch_text(candidate)
             if nested:
                 return nested
+        if isinstance(candidate, list):
+            for item in candidate:
+                if isinstance(item, str) and "*** Begin Patch" in item:
+                    return item
+                if isinstance(item, dict):
+                    nested = _hook_apply_patch_text(item)
+                    if nested:
+                        return nested
     return ""
 
 
@@ -1580,8 +1991,10 @@ def _path_policy_findings(
     *,
     warn_only: bool = False,
     allow_read_only_source_paths: bool = False,
+    allow_read_only_roadmap_path: bool = False,
     allow_mlh_owner_route_paths: bool = False,
     allow_existing_route_patch: bool = False,
+    allow_active_plan_spec_doc_patch: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
     severity = "warn" if warn_only else "error"
@@ -1591,22 +2004,30 @@ def _path_policy_findings(
                 Finding(
                     severity,
                     "hooks-policy-block-generated-cache-path",
-                    "tool request touches generated projection/cache paths; cache remains disposable and should be refreshed through projection rails",
+                    (
+                        "tool request touches generated projection/cache paths; cache remains disposable and should be "
+                        "refreshed through projection rails; next_safe_command=mylittleharness --root <root> mlhd run-once --apply"
+                    ),
                     rel,
                 )
             )
-        if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and (
-            _is_lifecycle_authority_path(rel) or _is_lifecycle_markdown_path(rel)
-        ):
+        if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and _is_lifecycle_route_path(rel):
+            continue
+        if allow_read_only_roadmap_path and _is_roadmap_path(rel):
             continue
         if allow_existing_route_patch and _is_editable_route_patch_path(inventory, rel):
+            continue
+        if allow_active_plan_spec_doc_patch and _is_active_plan_spec_doc_patch_path(inventory, rel):
             continue
         if _is_lifecycle_authority_path(rel):
             findings.append(
                 Finding(
                     severity,
                     "hooks-policy-block-lifecycle-authority-path",
-                    "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes and record docs_decision/verification as required",
+                    (
+                        "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes "
+                        f"and record docs_decision/verification as required; next_safe_command={_hook_route_next_safe_command(inventory, rel)}"
+                    ),
                     rel,
                 )
             )
@@ -1615,7 +2036,10 @@ def _path_policy_findings(
                 Finding(
                     severity,
                     "hooks-policy-block-lifecycle-markdown-path",
-                    "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence must stay intact",
+                    (
+                        "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence "
+                        f"must stay intact; next_safe_command={_hook_route_next_safe_command(inventory, rel)}"
+                    ),
                     rel,
                 )
             )
@@ -1626,11 +2050,25 @@ def _path_policy_findings(
                 Finding(
                     severity,
                     "hooks-policy-block-product-root-path",
-                    "tool request names the configured product source root from an operating-root context; keep product edits deliberate and bounded",
+                    (
+                        "tool request names the configured product source root from an operating-root context; "
+                        "keep product edits deliberate and bounded; next_safe_command=mylittleharness --root <root> check"
+                    ),
                     rel,
                 )
             )
     return findings
+
+
+def _first_mlh_owner_route_evidence_path(inventory: Inventory, paths: list[str]) -> str:
+    for rel in paths:
+        if (
+            _is_lifecycle_route_path(rel)
+            or _is_under_configured_product_root(inventory, rel)
+            or _is_code_path(rel)
+        ):
+            return rel
+    return ""
 
 
 def _is_bounded_mlh_read_tool_request(data: dict[str, object]) -> bool:
@@ -1646,6 +2084,11 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
     lowered = command.casefold()
     padded = f" {lowered} "
     subcommand = _mlh_cli_subcommand(lowered)
+    if subcommand == "suggest":
+        return (
+            not _looks_like_write_command(command)
+            and (" --intent " in padded or " --intent=" in padded or " --help" in padded or " -h" in padded)
+        )
     return (
         subcommand in MLH_OWNER_ROUTE_REVIEW_COMMANDS
         and not _looks_like_write_command(command)
@@ -1653,16 +2096,131 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
     )
 
 
+def _is_research_import_related_prompt_provenance_command(command: str) -> bool:
+    related_prompt = _research_import_related_prompt_path(command)
+    if not related_prompt:
+        return False
+    lowered = command.casefold()
+    padded = f" {lowered} "
+    return (
+        _mlh_cli_subcommand(lowered) == "research-import"
+        and (" --dry-run" in padded or " --apply" in padded)
+        and not _looks_like_write_command(command)
+    )
+
+
+def _research_import_related_prompt_path(command: str) -> str:
+    if _mlh_cli_subcommand(command.casefold()) != "research-import":
+        return ""
+    tokens = _shell_tokens(command)
+    for index, token in enumerate(tokens):
+        clean = _clean_token(token)
+        if clean == "--related-prompt" and index + 1 < len(tokens):
+            return _clean_token(tokens[index + 1])
+        if clean.startswith("--related-prompt="):
+            return clean.partition("=")[2].strip()
+    return ""
+
+
 def _is_read_only_source_discovery_command(command: str) -> bool:
     if _looks_like_write_command(command):
         return False
     tokens = _shell_tokens(command)
+    for index, token in enumerate(tokens):
+        clean = _clean_token(token)
+        if not clean or clean.startswith("-"):
+            continue
+        if clean not in READ_ONLY_SOURCE_DISCOVERY_COMMANDS:
+            continue
+        return _has_read_only_discovery_prefix(tokens[:index])
+    return False
+
+
+def _has_read_only_discovery_prefix(tokens: list[str]) -> bool:
+    for token in tokens:
+        clean = _clean_token(token)
+        if not clean:
+            continue
+        if clean in READ_ONLY_SOURCE_DISCOVERY_PREFIX_TOKENS:
+            continue
+        if clean.startswith("$") or _is_hook_pathish_token(clean):
+            continue
+        return False
+    return True
+
+
+def _is_hook_pathish_token(token: str) -> bool:
+    clean = _normalize_hook_path(token).casefold()
+    if re.match(r"^[a-z]:/", clean):
+        return True
+    return clean.startswith(("project/", "src/", "tests/", "docs/", ".mylittleharness/"))
+
+
+def _is_read_only_git_inspection_command(command: str) -> bool:
+    if _looks_like_write_command(command):
+        return False
+    return _git_subcommand(command) in READ_ONLY_GIT_INSPECTION_COMMANDS
+
+
+def _git_subcommand(command: str) -> str:
+    tokens = [_clean_token(token) for token in _shell_tokens(command)]
+    tokens = [token for token in tokens if token]
+    for index, token in enumerate(tokens):
+        if token != "git":
+            continue
+        return _git_subcommand_after_options(tokens, index + 1)
+    return ""
+
+
+def _git_subcommand_after_options(tokens: list[str], start: int) -> str:
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if not token:
+            index += 1
+            continue
+        if token == "-c":
+            index += 2
+            continue
+        if token in GIT_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in GIT_OPTIONS_WITH_VALUES if option.startswith("--")):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return ""
+
+
+def _is_read_only_roadmap_direct_read_command(command: str, paths: list[str]) -> bool:
+    if _looks_like_write_command(command):
+        return False
+    tokens = _shell_tokens(command)
+    command_token = ""
     for token in tokens:
         clean = _clean_token(token)
         if not clean or clean.startswith("-"):
             continue
-        return clean in READ_ONLY_SOURCE_DISCOVERY_COMMANDS
-    return False
+        command_token = clean
+        break
+    if command_token != "get-content":
+        return False
+    return bool(paths) and all(_is_roadmap_path(path) for path in paths)
+
+
+def _active_plan_roadmap_policy_relevant(inventory: Inventory, command: str, paths: list[str]) -> bool:
+    if not _has_active_plan(inventory):
+        return False
+    lowered = command.casefold()
+    subcommand = _mlh_cli_subcommand(lowered)
+    if subcommand in {"roadmap", "meta-feedback", "incubate", "plan", "writeback", "transition"}:
+        return True
+    if any(_is_roadmap_path(path) for path in paths):
+        return True
+    return "roadmap" in lowered or "active plan" in lowered or "active-plan" in lowered
 
 
 def _looks_like_shortcut_prompt(text: str) -> bool:
@@ -1676,7 +2234,7 @@ def _looks_like_generated_cache_write(paths: list[str], command: str) -> bool:
 
 
 def _looks_like_lifecycle_markdown_write(paths: list[str], command: str) -> bool:
-    return any(_is_lifecycle_markdown_path(path) for path in paths) and _looks_like_write_command(command) and "mylittleharness" not in command.casefold()
+    return any(_is_lifecycle_route_path(path) for path in paths) and _looks_like_write_command(command) and "mylittleharness" not in command.casefold()
 
 
 def _nonroute_project_markdown_write_path(paths: list[str], command: str) -> str:
@@ -1694,18 +2252,108 @@ def _looks_like_product_root_direct_edit(inventory: Inventory, paths: list[str],
     return any(_is_under_configured_product_root(inventory, path) and not _is_active_plan_product_artifact(inventory, path) for path in paths)
 
 
-def _looks_like_code_write(paths: list[str], command: str) -> bool:
-    return _looks_like_write_command(command) and any(_is_code_path(path) for path in paths)
+def _hook_code_write_paths(inventory: Inventory, paths: list[str], command: str) -> list[str]:
+    if not _looks_like_write_command(command):
+        return []
+    code_paths: list[str] = []
+    for path in paths:
+        product_rel = _product_relative_path(inventory, path)
+        if _is_code_path(path) or (product_rel and _is_code_path(product_rel)):
+            code_paths.append(path)
+    return code_paths
+
+
+def _hook_plan_path_display(inventory: Inventory, path: str) -> str:
+    product_rel = _product_relative_path(inventory, path)
+    if product_rel:
+        return _normalize_hook_path(product_rel)
+    normalized = _normalize_plan_artifact_candidate(inventory, path)
+    return normalized or _normalize_hook_path(path)
+
+
+def _hook_scope_diagnostic_message(allowed_scope: list[str], blocked_scope: list[str]) -> str:
+    allowed = ", ".join(_dedupe_nonempty(allowed_scope)) or "none"
+    blocked = ", ".join(_dedupe_nonempty(blocked_scope)) or "none"
+    return f"allowed_paths={allowed}; blocked_paths={blocked}"
+
+
+def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
+    rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
+    route_id = classify_memory_route(rel).route_id
+    topic = _route_topic_from_path(rel)
+    if _is_roadmap_path(rel) or route_id == "roadmap":
+        return "mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> [fields]"
+    if route_id == "state":
+        return "mylittleharness --root <root> writeback --dry-run --phase-status <pending|complete> --docs-decision <updated|not-needed|uncertain>"
+    if route_id == "active-plan":
+        return "mylittleharness --root <root> plan --dry-run --roadmap-item <id> or writeback --dry-run --phase-status <status>"
+    if route_id == "incubation":
+        return f'mylittleharness --root <root> incubate --dry-run --topic "{topic}" --note-file -'
+    if route_id == "research":
+        return f'mylittleharness --root <root> research-import --dry-run --title "<title>" --topic "{topic}" --text-file -'
+    if route_id in {"adrs", "decisions", "product-docs"}:
+        return f"mylittleharness --root <root> intake --dry-run --text-file - --target {rel}"
+    if route_id == "verification":
+        return f"mylittleharness --root <root> intake --dry-run --text-file - --target {rel}"
+    if route_id == "stable-specs":
+        return "mylittleharness --root <root> check --focus route-references; then repair --dry-run or plan --dry-run --roadmap-item <id>"
+    if route_id == "archive":
+        return "mylittleharness --root <root> writeback --dry-run --archive-active-plan or memory-hygiene --dry-run --scan"
+    return f'mylittleharness --root <root> suggest --intent "route owner for {rel or path}"'
+
+
+def _route_topic_from_path(path: str) -> str:
+    stem = Path(_normalize_hook_path(path)).stem.strip()
+    return stem or "<topic>"
+
+
+def _dedupe_nonempty(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _looks_like_write_command(command: str) -> bool:
-    lowered = f" {command.casefold()} "
-    return any(token in lowered for token in WRITING_COMMAND_TOKENS)
+    expect_command = True
+    for token in _shell_tokens(command):
+        raw = str(token or "").strip()
+        clean = _clean_token(raw)
+        if _is_shell_redirection_token(raw, clean):
+            return True
+        if not clean:
+            if _is_shell_command_separator(raw, clean):
+                expect_command = True
+            continue
+        if expect_command and clean in WRITING_COMMAND_NAMES:
+            return True
+        if _is_shell_command_separator(raw, clean):
+            expect_command = True
+            continue
+        expect_command = False
+        if raw.endswith(";"):
+            expect_command = True
+    return False
+
+
+def _is_shell_redirection_token(raw: str, clean: str) -> bool:
+    stripped = raw.strip(" \t\r\n\"'`")
+    return clean in {">", ">>"} or stripped in {">", ">>"} or stripped.startswith((">", ">>"))
+
+
+def _is_shell_command_separator(raw: str, clean: str) -> bool:
+    stripped = raw.strip(" \t\r\n\"'`")
+    return clean in SHELL_COMMAND_SEPARATORS or stripped in SHELL_COMMAND_SEPARATORS or stripped.endswith(";")
 
 
 def _looks_like_git_stage_or_commit(lowered_command: str) -> bool:
     padded = f" {lowered_command} "
-    return any(token in padded for token in GIT_WRITE_COMMANDS)
+    return any(token in padded for token in GIT_WRITE_COMMANDS) or _git_subcommand(lowered_command) in GIT_MUTATION_COMMANDS
 
 
 def _looks_like_next_plan_apply(lowered_command: str) -> bool:
@@ -1747,10 +2395,34 @@ def _mlh_cli_subcommand(command: str) -> str:
 
 
 def _shell_tokens(command: str) -> list[str]:
+    command = _command_without_shell_literal_payloads(command or "")
     try:
         return shlex.split(command or "", posix=False)
     except ValueError:
         return str(command or "").split()
+
+
+def _command_without_shell_literal_payloads(command: str) -> str:
+    text = POWERSHELL_HERE_STRING_RE.sub(" <MLH_STDIN_PAYLOAD> ", command or "")
+    return _command_without_posix_heredoc_payloads(text)
+
+
+def _command_without_posix_heredoc_payloads(command: str) -> str:
+    lines = str(command or "").splitlines(keepends=True)
+    if not lines:
+        return ""
+    result: list[str] = []
+    pending_delimiter = ""
+    for line in lines:
+        if pending_delimiter:
+            if line.strip() == pending_delimiter:
+                pending_delimiter = ""
+            continue
+        result.append(line)
+        match = POSIX_HEREDOC_START_RE.search(line)
+        if match:
+            pending_delimiter = match.group(1)
+    return "".join(result)
 
 
 def _next_mlh_subcommand(tokens: list[str], start: int) -> str:
@@ -1807,7 +2479,7 @@ def _has_explicit_mlh_review_mode(lowered_command: str) -> bool:
             )
         )
     if " mylittleharness" in padded and " hooks " in padded:
-        return " --doctor" in padded or " --run " in padded
+        return " --doctor" in padded or " hooks doctor " in padded or " --run " in padded
     return False
 
 
@@ -1841,6 +2513,24 @@ def _is_lifecycle_authority_path(path: str) -> bool:
 def _is_lifecycle_markdown_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.endswith(".md") and any(rel.startswith(prefix) for prefix in LIFECYCLE_MARKDOWN_PREFIXES)
+
+
+def _is_lifecycle_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold().rstrip("/")
+    if _is_lifecycle_authority_path(rel) or _is_lifecycle_markdown_path(rel):
+        return True
+    for prefix in LIFECYCLE_MARKDOWN_PREFIXES:
+        route = prefix.rstrip("/")
+        if prefix.endswith("/") and (rel == route or rel.startswith(prefix)):
+            return True
+        if not prefix.endswith("/") and (rel == route or rel.startswith(route + "/")):
+            return True
+    return False
+
+
+def _is_roadmap_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel == "project/" + "roadmap.md"
 
 
 def _is_nonroute_project_markdown_path(path: str) -> bool:
@@ -1900,6 +2590,62 @@ def _is_active_plan_target_artifact(inventory: Inventory, path: str) -> bool:
         if candidate and normalized == candidate:
             return True
     return False
+
+
+def _active_phase_write_scope_allows_path(inventory: Inventory, rel: str) -> bool:
+    scope = _active_phase_write_scope_paths(inventory)
+    return bool(scope) and _normalize_hook_path(rel).casefold() in scope
+
+
+def _active_phase_write_scope_paths(inventory: Inventory) -> set[str]:
+    plan = inventory.active_plan_surface
+    if not plan or not plan.exists:
+        return set()
+    state_data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    active_phase = str(state_data.get("active_phase") or plan.frontmatter.data.get("active_phase") or "").strip()
+    block = _active_phase_block_text(plan.content, active_phase)
+    if not block:
+        return set()
+    paths: set[str] = set()
+    for line in block.splitlines():
+        match = re.match(r"^\s*[-*]\s*write_scope\s*:\s*(.+?)\s*$", line, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(1)
+        extracted = re.findall(r"`([^`]+)`", value)
+        for item in extracted or re.split(r"\s*,\s*", value):
+            normalized = _normalize_hook_path(item.strip().strip("`'\"")).casefold()
+            if normalized and normalized != "<none>":
+                paths.add(normalized)
+    return paths
+
+
+def _active_phase_block_text(text: str, active_phase: str) -> str:
+    if not active_phase:
+        return ""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*###\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        next_index = len(lines)
+        for candidate in range(index + 1, len(lines)):
+            if re.match(r"^\s*###\s+", lines[candidate]):
+                next_index = candidate
+                break
+        block = "\n".join(lines[index:next_index])
+        title = _normalize_phase_identifier(match.group(1))
+        if title == _normalize_phase_identifier(active_phase) or re.search(
+            rf"^\s*[-*]\s*id\s*:\s*`?{re.escape(active_phase)}`?\s*$",
+            block,
+            flags=re.MULTILINE,
+        ):
+            return block
+    return ""
+
+
+def _normalize_phase_identifier(value: str) -> str:
+    return _normalize_hook_path(value.strip().strip("`")).casefold().replace(" ", "-")
 
 
 def _normalize_plan_artifact_candidate(inventory: Inventory, path: str) -> str:
@@ -2196,6 +2942,41 @@ def _unsafe_parent_directory_findings(root: Path, path: Path, code: str) -> list
 
 def _py_literal(value: object) -> str:
     return repr(value)
+
+
+def _hook_policy_identity() -> dict[str, str]:
+    source = Path(__file__).resolve()
+    return {
+        "schema": HOOK_POLICY_SCHEMA,
+        "source": source.as_posix(),
+        "sourceHash": _hook_policy_source_hash(source),
+        "importRoot": _module_import_root().as_posix(),
+    }
+
+
+def _hook_policy_source_hash(source: Path) -> str:
+    try:
+        return hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "unavailable"
+
+
+def _hook_adapter_review_command(request: CodexHookAdapterRequest, mode: str) -> str:
+    parts = [
+        "mylittleharness",
+        "--root",
+        "<root>",
+        "hooks",
+        "adapter",
+        "--client",
+        request.client,
+        mode,
+        "--scope",
+        request.scope,
+    ]
+    if request.config_path:
+        parts.extend(["--config-path", shlex.quote(request.config_path)])
+    return " ".join(parts)
 
 
 def _component_status(components: object, key: str) -> str:

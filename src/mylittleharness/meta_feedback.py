@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
@@ -18,6 +20,8 @@ from .reporting import RouteWriteEvidence, route_write_findings
 RELEASE_BOUNDARY = "no automatic release removal, lifecycle movement, closeout, archive, staging, commit, or next-plan opening"
 CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
 META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
+META_FEEDBACK_CI_ENABLE_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI"
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 AGENT_OPERABILITY_SIGNAL_TYPES = {"agent-operability", "agent-operability-micro-friction"}
 AGENT_OPERABILITY_OWNER_COMMANDS = "meta-feedback, check, writeback, and the route-specific owner command"
 AGENT_OPERABILITY_FRICTION_SCOPE = (
@@ -163,6 +167,17 @@ class ClusterObservation:
     exact_matches: tuple[ClusterRecord, ...]
     candidate_matches: tuple[ClusterRecord, ...]
     matched_by: str
+
+
+def meta_feedback_env_destination_root(environ: Mapping[str, str] | None = None) -> str | None:
+    env = os.environ if environ is None else environ
+    if _env_truthy(env.get("GITHUB_ACTIONS")) and not _env_truthy(env.get(META_FEEDBACK_CI_ENABLE_ENV_VAR)):
+        return None
+    return env.get(META_FEEDBACK_ROOT_ENV_VAR)
+
+
+def _env_truthy(value: str | None) -> bool:
+    return str(value or "").strip().casefold() in TRUTHY_ENV_VALUES
 
 
 def make_meta_feedback_request(

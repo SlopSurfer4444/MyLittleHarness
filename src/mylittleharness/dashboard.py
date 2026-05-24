@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .adapter import codex_mcp_adoption_payload
 from .claims import work_claim_status_findings
+from .context_memory import context_memory_capsule_findings, context_memory_capsule_payload
 from .daemon import inspect_mlhd_control_state, mlhd_runtime_findings, mlhd_runtime_payload
 from .evidence import agent_run_record_findings, lifecycle_mutation_provenance_findings
 from .handoff import handoff_packet_status_findings
@@ -44,6 +45,7 @@ def dashboard_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
         ("Roadmap", _roadmap_findings(inventory)),
         ("Coordination", coordination),
         ("mlhd Runtime", runtime),
+        ("Context Memory", context_memory_capsule_findings(inventory, "dashboard-context-memory")),
         ("Projection", _projection_findings(inventory)),
         ("Lifecycle Provenance", lifecycle_mutation_provenance_findings(inventory, "dashboard-lifecycle-provenance")),
         ("Alerts", _alert_findings([*coordination, *runtime])),
@@ -66,6 +68,7 @@ def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Findi
         "lifecycle": _lifecycle_payload(inventory),
         "roadmap": _roadmap_payload(inventory),
         "mlhd": mlhd_freshness_payload(inventory),
+        "contextMemory": context_memory_capsule_payload(inventory),
         "projection": projection_summary_to_dict(build_projection(inventory)),
         "cachePosture": cache_posture,
         "agentPacket": agent_packet,
@@ -417,18 +420,19 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
             "mylittleharness --root <root> intelligence --query \"<task or route question>\"",
             "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
             "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
-            "mylittleharness --root <root> projection --warm-cache --target all",
+            "mylittleharness --root <root> mlhd run-once --apply",
             "rg \"<exact symbol or route>\"",
         ],
         "firstPassSequence": [
             "dashboard --inspect --json",
             "intelligence --query for fuzzy route discovery",
             "MCP read_projection/search/related_or_bundle when mounted",
-            "projection --warm-cache --target all when cache posture is stale or dirty",
+            "mlhd run-once --apply when cache posture or context capsule is stale or missing",
             "rg or mylittleharness.read_source for exact source verification",
         ],
         "mcpToolCoverage": mcp_tool_coverage,
         "exactVerification": exact_verification,
+        "contextMemory": context_memory_capsule_payload(inventory),
         "nextLegalDryRun": next_legal,
         "authorityCards": authority_cards,
         "authoritySummary": _authority_cards_summary(authority_cards),
@@ -468,6 +472,7 @@ def connect_readiness_packet(
     repair_targets = _repair_target_payload(inventory)
     docmap = _docmap_readiness_payload(inventory)
     mlhd = mlhd_freshness_payload(inventory)
+    context_memory = context_memory_capsule_payload(inventory)
     plan_status = str(data.get("plan_status") or "")
     authority_cards = (
         agent_packet.get("authorityCards", [])
@@ -510,6 +515,13 @@ def connect_readiness_packet(
             "changedPathCount": int(mlhd.get("changed_path_count") or 0),
             "nextSafeCommand": str(mlhd.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
         },
+        "contextMemory": {
+            "status": str(context_memory.get("status") or "unknown"),
+            "capsuleRelPath": str(context_memory.get("capsule_rel_path") or ""),
+            "capsuleId": str(context_memory.get("capsule_id") or ""),
+            "sourceRefCount": int(context_memory.get("source_ref_count") or 0),
+            "nextSafeCommand": str(context_memory.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --apply"),
+        },
         "docs": docmap,
         "repairTargets": repair_targets,
         "authorityCards": authority_cards,
@@ -537,6 +549,7 @@ def connect_readiness_findings(inventory: Inventory, code_prefix: str = "connect
     hooks = packet["hooks"]
     mcp = packet["mcp"]
     mlhd = packet["mlhd"]
+    context_memory = packet["contextMemory"]
     return [
         Finding(
             "info",
@@ -547,6 +560,7 @@ def connect_readiness_findings(inventory: Inventory, code_prefix: str = "connect
                 f"phase_status={lifecycle['phase_status'] or '<none>'}; hooks={hooks['projectHookStatus']}; "
                 f"mcp={mcp['status']}; cache artifacts={cache['artifacts']}; sqlite_index={cache['sqlite_index']}; "
                 f"mlhd={mlhd['controlStatus']}; dirty_count={mlhd['dirtyCount']}; "
+                f"context_memory={context_memory['status']}; "
                 f"docmap={docs['docmapStatus']}; writeback_required={str(writeback['requiredWhenPlanStatusActive']).lower()}; "
                 f"next_safe={packet['nextSafeCommand']}"
             ),
@@ -692,6 +706,7 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
         "mcpToolCoverage": _mcp_tool_coverage_payload(),
         "firstContactHookCommand": "mylittleharness --root <root> hooks --run session-start --json",
         "codexHookAdapterCommand": "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
+        "mlhdRefreshCommand": "mylittleharness --root <root> mlhd run-once --apply",
         "projectionWarmCacheCommand": "mylittleharness --root <root> projection --warm-cache --target all",
         "exactVerification": _exact_verification_payload(),
         "rgVerificationRequired": True,
@@ -699,7 +714,8 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
             "dashboard packet",
             "MCP read/search/bundle when mounted",
             "Codex native hook adapter when project-local hooks are explicitly applied",
-            "projection warm-cache when stale or missing",
+            "mlhd projection refresh tick when stale or missing",
+            "projection warm-cache only as manual recovery/debug",
             "rg exact verification before edits or closeout claims",
         ],
         "boundary": (
@@ -739,7 +755,8 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
             f"first-contact accelerators: dashboard_packet=available; mcp={status}; "
             "native_hooks=`mylittleharness --root <root> hooks --run session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop --json`; "
             "codex_hook_adapter=`mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project`; "
-            "projection_warm_cache_command=`mylittleharness --root <root> projection --warm-cache --target all`; "
+            "mlhd_refresh_command=`mylittleharness --root <root> mlhd run-once --apply`; "
+            "projection_warm_cache_recovery=`mylittleharness --root <root> projection --warm-cache --target all`; "
             "rg_verification=required; config_merge=idempotent-explicit"
         ),
         "project/project-state.md" if inventory.state and inventory.state.exists else None,

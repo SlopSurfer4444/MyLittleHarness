@@ -1112,6 +1112,129 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn(f"- `archived_plan`: `{archived_plan}`", roadmap_text)
             self.assertIn("writeback-incubation-auto-archive", output.getvalue())
 
+    def test_writeback_preserves_existing_archive_collision_with_explicit_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            state_rel = "project/" + "project-state.md"
+            plan_rel = "project/" + "implementation-plan.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            archive_dir = "project/" + "archive/plans"
+            (root / state_rel).write_text(
+                (root / state_rel).read_text(encoding="utf-8").replace(
+                    'phase_status: "in_progress"',
+                    'phase_status: "complete"',
+                ),
+                encoding="utf-8",
+            )
+            write_relationship_roadmap(root, "", status="active")
+            canonical_rel = f"{archive_dir}/{date.today().isoformat()}-plan.md"
+            alternate_rel = f"{archive_dir}/{date.today().isoformat()}-plan-collision-2.md"
+            canonical = root / canonical_rel
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.write_text("stale archive\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--on-archive-collision",
+                        "preserve-existing",
+                        "--roadmap-item",
+                        "relation-test",
+                        "--worktree-start-state",
+                        "dirty test fixture",
+                        "--task-scope",
+                        "archive collision closeout",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "archived active plan with preserved collision target",
+                        "--verification",
+                        "focused tests passed",
+                        "--commit-decision",
+                        "not staged",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual("stale archive\n", canonical.read_text(encoding="utf-8"))
+            self.assertTrue((root / alternate_rel).is_file())
+            self.assertFalse((root / plan_rel).exists())
+            state_text = (root / state_rel).read_text(encoding="utf-8")
+            roadmap_text = (root / roadmap_rel).read_text(encoding="utf-8")
+            self.assertIn(f'last_archived_plan: "{alternate_rel}"', state_text)
+            self.assertIn(f"- `related_plan`: `{alternate_rel}`", roadmap_text)
+            self.assertIn(f"- `archived_plan`: `{alternate_rel}`", roadmap_text)
+            self.assertIn("writeback-archive-collision-preserved", output.getvalue())
+
+    def test_writeback_reuses_same_active_plan_archive_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            state_rel = "project/" + "project-state.md"
+            plan_rel = "project/" + "implementation-plan.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            archive_dir = "project/" + "archive/plans"
+            (root / state_rel).write_text(
+                (root / state_rel).read_text(encoding="utf-8").replace(
+                    'phase_status: "in_progress"',
+                    'phase_status: "complete"',
+                ),
+                encoding="utf-8",
+            )
+            write_relationship_roadmap(root, "", status="active")
+            canonical_rel = f"{archive_dir}/{date.today().isoformat()}-plan.md"
+            alternate_rel = f"{archive_dir}/{date.today().isoformat()}-plan-collision-2.md"
+            canonical = root / canonical_rel
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical.write_text((root / plan_rel).read_text(encoding="utf-8"), encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "relation-test",
+                        "--worktree-start-state",
+                        "dirty test fixture",
+                        "--task-scope",
+                        "archive idempotency closeout",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "completed closeout after same active plan archive already existed",
+                        "--verification",
+                        "focused tests passed",
+                        "--commit-decision",
+                        "not staged",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(canonical.is_file())
+            self.assertFalse((root / alternate_rel).exists())
+            self.assertFalse((root / plan_rel).exists())
+            archived_text = canonical.read_text(encoding="utf-8")
+            self.assertIn('status: "complete"', archived_text)
+            self.assertIn("- status: `done`", archived_text)
+            state_text = (root / state_rel).read_text(encoding="utf-8")
+            roadmap_text = (root / roadmap_rel).read_text(encoding="utf-8")
+            self.assertIn(f'last_archived_plan: "{canonical_rel}"', state_text)
+            self.assertIn(f"- `related_plan`: `{canonical_rel}`", roadmap_text)
+            self.assertIn(f"- `archived_plan`: `{canonical_rel}`", roadmap_text)
+            rendered = output.getvalue()
+            self.assertIn("writeback-archive-existing-target-reused", rendered)
+            self.assertNotIn("writeback-archive-collision-preserved", rendered)
+
     def test_writeback_keeps_mixed_incubation_active_and_reports_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp))

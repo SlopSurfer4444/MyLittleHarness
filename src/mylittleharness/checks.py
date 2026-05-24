@@ -33,6 +33,7 @@ from .lifecycle_metadata import (
     lifecycle_markdown_frontmatter_fields_for_route,
     lifecycle_markdown_frontmatter_plan,
     lifecycle_markdown_requires_frontmatter,
+    lifecycle_markdown_source_provenance_plan,
     lifecycle_markdown_text_with_frontmatter,
 )
 from .lifecycle_focus import CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END, MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END
@@ -43,6 +44,7 @@ from .memory_hygiene import (
     VERIFICATION_LEDGER_CONTINUITY_MARKER,
     relationship_hygiene_scan_findings,
 )
+from .meta_feedback import CENTRAL_META_FEEDBACK_PROJECT, META_FEEDBACK_ROOT_ENV_VAR, meta_feedback_env_destination_root
 from .parsing import extract_path_refs, parse_frontmatter
 from .product_hygiene_checks import product_hygiene_findings
 from .roadmap import (
@@ -81,12 +83,20 @@ from .routes import (
     IntakeRouteAdvice,
     ROUTE_BY_ID,
     classify_intake_text,
+    classify_intake_text_for_target,
     classify_memory_route,
+    doc_target_exists,
+    existing_doc_target_candidates,
+    is_exact_doc_target,
     intake_target_matches_route,
     lifecycle_route_rows,
+    normalize_route_path,
 )
 from .writeback import (
+    CLOSEOUT_WRITEBACK_FIELDS,
     STATE_COMPACTION_CHAR_THRESHOLD,
+    WRITEBACK_BEGIN,
+    WRITEBACK_END,
     active_plan_body_facts,
     active_plan_completed_phase_handoff_findings,
     active_plan_phase_body_status_fact,
@@ -109,8 +119,6 @@ LARGE_AGGREGATE_CHARS = 125_000
 SEARCH_RESULT_LIMIT = 20
 FAN_IN_RESULT_LIMIT = 20
 CURRENT_PHASE_ONLY_POLICY = "current-phase-only"
-CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
-META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
 NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
     "project/cache/",
     "project/generated/",
@@ -165,6 +173,7 @@ DOCMAP_REPAIR_TARGET_REL = ".agents/docmap.yaml"
 DOCMAP_REPAIR_TARGET_SLUG = "agents-docmap-yaml"
 DOCMAP_REPAIR_COPY_REL = "files/.agents/docmap.yaml"
 LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS = "lifecycle-markdown-frontmatter-repair"
+LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS = "lifecycle-source-provenance-repair"
 SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS = "spec-posture-frontmatter-repair"
 STABLE_SPEC_CREATE_CLASS = "stable-spec-create"
 STABLE_SPEC_ROOT_REL = "project/specs/workflow"
@@ -518,6 +527,17 @@ class IntakeRequest:
     text_source: str
     title: str
     target: str
+    status: str = ""
+
+
+INTAKE_VERIFICATION_STATUS_VALUES = ("pending", "passed", "failed", "partial", "partially-verified", "archived")
+INTAKE_DECISION_PACKET_FIELDS = (
+    "confirmed_fixes",
+    "new_slice_candidates",
+    "scope_expansions",
+    "blocked_followups",
+    "safe_to_continue_existing_sequence",
+)
 
 
 @dataclass(frozen=True)
@@ -556,12 +576,13 @@ class SpecPostureFrontmatterPlan:
     updated_text: str
 
 
-def make_intake_request(text: str | None, text_source: str, title: str | None, target: str | None) -> IntakeRequest:
+def make_intake_request(text: str | None, text_source: str, title: str | None, target: str | None, status: str | None = None) -> IntakeRequest:
     return IntakeRequest(
         text=str(text or ""),
         text_source=str(text_source or "").strip() or "intake input",
         title=str(title or "").strip(),
         target=_normalized_intake_target(target),
+        status=str(status or "").strip(),
     )
 
 
@@ -570,8 +591,8 @@ def intake_dry_run_findings(inventory: Inventory, request: IntakeRequest) -> lis
         Finding("info", "intake-dry-run", "intake route proposal only; no files were written"),
         Finding("info", "intake-root-posture", f"root kind: {inventory.root_kind}"),
     ]
-    advice = classify_intake_text(request.text)
-    errors = _intake_request_errors(inventory, request, apply=False)
+    advice = _intake_request_advice(request)
+    errors = _intake_request_errors(inventory, request, apply=False, advice=advice)
     if errors:
         findings.extend(_with_severity(errors, "warn"))
         findings.extend(_intake_incubation_fallback_findings(request, advice))
@@ -595,8 +616,8 @@ def intake_dry_run_findings(inventory: Inventory, request: IntakeRequest) -> lis
 
 
 def intake_apply_findings(inventory: Inventory, request: IntakeRequest) -> list[Finding]:
-    advice = classify_intake_text(request.text)
-    errors = _intake_request_errors(inventory, request, apply=True)
+    advice = _intake_request_advice(request)
+    errors = _intake_request_errors(inventory, request, apply=True, advice=advice)
     if errors:
         return errors
 
@@ -697,7 +718,7 @@ def status_findings(inventory: Inventory) -> list[Finding]:
 def _meta_feedback_destination_status_findings(inventory: Inventory) -> list[Finding]:
     if inventory.root_kind != "live_operating_root":
         return []
-    if not os.environ.get(META_FEEDBACK_ROOT_ENV_VAR):
+    if not meta_feedback_env_destination_root():
         return []
     data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     project = data.get("project")
@@ -1185,7 +1206,46 @@ def _target_artifact_ownership_summary_findings(
         return []
     summary = "; ".join(f"{record.artifact}->{record.ownership} ({record.intended_root})" for record in records)
     guidance = "; ".join(sorted({record.guidance for record in records}))
-    return [Finding("info", code, f"{label} target artifact ownership: {summary}; guidance: {guidance}", source, line)]
+    findings = [Finding("info", code, f"{label} target artifact ownership: {summary}; guidance: {guidance}", source, line)]
+    findings.extend(_target_artifact_doc_target_findings(inventory, artifacts, source, label, line=line))
+    return findings
+
+
+def _target_artifact_doc_target_findings(
+    inventory: Inventory,
+    artifacts: tuple[str, ...],
+    source: str,
+    label: str,
+    *,
+    line: int | None = None,
+) -> list[Finding]:
+    target_root = _active_plan_target_root(inventory)
+    missing: list[str] = []
+    candidates: list[str] = []
+    for artifact in artifacts:
+        rel = normalize_route_path(artifact)
+        if not is_exact_doc_target(rel) or doc_target_exists(target_root, rel):
+            continue
+        missing.append(rel)
+        suggested = existing_doc_target_candidates(target_root, rel)
+        if suggested:
+            candidates.append(f"{rel} -> {', '.join(suggested)}")
+    if not missing:
+        return []
+    candidate_text = "; ".join(candidates) if candidates else "<none found>"
+    return [
+        Finding(
+            "warn",
+            "check-doc-target-missing",
+            (
+                f"{label} names missing exact docs target(s) in product/source root {target_root}: "
+                f"{', '.join(missing)}; candidates: {candidate_text}; "
+                "retarget to an existing docs/spec/template file or keep docs_decision='uncertain' before docs mutation"
+            ),
+            source,
+            line,
+        )
+    ]
 
 
 def _target_artifact_values(value: object) -> tuple[str, ...]:
@@ -3336,7 +3396,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "mutation-guard",
-            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, snapshot-protected spec posture frontmatter repair, or snapshot-protected state frontmatter repair",
+            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, snapshot-protected lifecycle source-provenance repair, snapshot-protected spec posture frontmatter repair, or snapshot-protected state frontmatter repair",
         ),
     ]
     validation = validation_findings(inventory)
@@ -3347,6 +3407,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
     ]
     findings.extend(_state_frontmatter_plan_findings(inventory, validation))
     findings.extend(_lifecycle_markdown_frontmatter_plan_findings(inventory, validation))
+    findings.extend(_lifecycle_source_provenance_plan_findings(inventory))
     findings.extend(_spec_posture_frontmatter_plan_findings(inventory, validation))
     findings.extend(_agents_contract_create_plan_findings(inventory, validation))
     findings.extend(_docmap_snapshot_plan_findings(inventory, validation))
@@ -3418,6 +3479,8 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
     if not errors:
         errors.extend(_lifecycle_markdown_frontmatter_apply_preflight_errors(inventory, validation))
     if not errors:
+        errors.extend(_lifecycle_source_provenance_apply_preflight_errors(inventory))
+    if not errors:
         errors.extend(_spec_posture_frontmatter_apply_preflight_errors(inventory, validation))
     if not errors:
         errors.extend(_repair_apply_preflight_errors(inventory))
@@ -3445,6 +3508,20 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
             )
         )
         return lifecycle_frontmatter_findings
+
+    lifecycle_source_findings, lifecycle_source_changed = _lifecycle_source_provenance_apply_findings(inventory)
+    if any(finding.severity == "error" for finding in lifecycle_source_findings):
+        return lifecycle_source_findings
+    if lifecycle_source_changed:
+        lifecycle_source_findings.extend(_post_repair_validation_findings(inventory))
+        lifecycle_source_findings.append(
+            Finding(
+                "info",
+                "lifecycle-source-provenance-rerun",
+                "lifecycle source-provenance repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+            )
+        )
+        return lifecycle_source_findings
 
     spec_posture_findings, spec_posture_changed = _spec_posture_frontmatter_apply_findings(inventory, validation)
     if any(finding.severity == "error" for finding in spec_posture_findings):
@@ -4042,6 +4119,154 @@ def _lifecycle_markdown_frontmatter_plan_findings(inventory: Inventory, validati
             )
         )
     findings.extend(_lifecycle_markdown_frontmatter_route_write_findings(plans, apply=False))
+    return findings
+
+
+def _lifecycle_source_provenance_plan_findings(inventory: Inventory) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "lifecycle-source-provenance-plan-scope",
+            f"selected repair class: {LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS}; target route files: lifecycle markdown with deprecated transport-level source provenance",
+        )
+    ]
+
+    if _is_product_source_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-source-provenance-plan-refused",
+                "target is a product-source compatibility fixture; lifecycle source-provenance repair planning is report-only and snapshot creation is refused",
+                inventory.state.rel_path if inventory.state else ATTACH_STATE_REL_PATH,
+            )
+        )
+        return findings
+    if _is_fallback_or_archive_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-source-provenance-plan-refused",
+                "target is fallback/archive or generated-output evidence; lifecycle source-provenance repair planning is refused",
+                inventory.state.rel_path if inventory.state else None,
+            )
+        )
+        return findings
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-source-provenance-plan-refused",
+                f"target root kind is {inventory.root_kind}; lifecycle source-provenance repair requires an explicit live operating root",
+            )
+        )
+        return findings
+    if not _has_repair_apply_authority(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "lifecycle-source-provenance-plan-refused",
+                "snapshot-protected lifecycle source-provenance repair would require an existing readable workflow-core manifest and strict project-state frontmatter authority",
+                inventory.manifest_surface.rel_path if inventory.manifest_surface else ATTACH_MANIFEST_REL_PATH,
+            )
+        )
+        return findings
+
+    candidates = _lifecycle_source_provenance_candidate_rows(inventory)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-source-provenance-plan-skipped",
+                "no deprecated lifecycle source provenance required normalization",
+            )
+        )
+        return findings
+
+    for surface, _plan in candidates:
+        target_conflict = _snapshot_target_conflict(inventory.root, surface.rel_path)
+        if target_conflict:
+            findings.append(_lifecycle_source_provenance_refusal_from(target_conflict, "warn"))
+            return findings
+        if surface.read_error:
+            findings.append(
+                Finding(
+                    "warn",
+                    "lifecycle-source-provenance-plan-refused",
+                    f"target file could not be read as clean UTF-8 before lifecycle source-provenance repair: {surface.read_error}",
+                    surface.rel_path,
+                )
+            )
+            return findings
+        if surface.frontmatter.errors:
+            findings.append(
+                Finding(
+                    "warn",
+                    "lifecycle-source-provenance-plan-refused",
+                    "target has malformed frontmatter; repair refuses to guess metadata boundaries",
+                    surface.rel_path,
+                )
+            )
+            return findings
+
+    plans = [plan for _surface, plan in candidates]
+    snapshot_dir = _lifecycle_source_provenance_snapshot_dir(plans, SNAPSHOT_DRY_RUN_TIMESTAMP)
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        findings.append(_lifecycle_source_provenance_refusal_from(boundary_conflict, "warn"))
+        return findings
+
+    target_paths = [plan.rel_path for plan in plans]
+    metadata_fields = ", ".join([*SNAPSHOT_METADATA_FIELDS, "planned_frontmatter_keys_by_path"])
+    findings.extend(
+        [
+            Finding(
+                "warn",
+                "lifecycle-source-provenance-plan",
+                f"would normalize deprecated route source provenance in {len(plans)} lifecycle markdown artifact(s)",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-targets",
+                f"planned target files: {_lifecycle_frontmatter_path_summary(target_paths)}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-snapshot-path",
+                f"planned snapshot directory: {snapshot_dir}/; metadata: {snapshot_dir}/snapshot.json; copied files under {snapshot_dir}/files/",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-metadata",
+                f"metadata fields: {metadata_fields}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-rollback",
+                f"manual rollback only: copy files from {snapshot_dir}/files/ back to matching repo paths; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-authority",
+                "repair-normalized source provenance is routing metadata only; it cannot approve closeout, archive, commit, lifecycle decisions, truth selection, or future repairs",
+                target_paths[0] if target_paths else None,
+            ),
+        ]
+    )
+    for plan in plans:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-source-provenance-value",
+                f"planned source provenance for {plan.rel_path}: {plan.fields['source']}",
+                plan.rel_path,
+            )
+        )
+    findings.extend(_lifecycle_source_provenance_route_write_findings(plans, apply=False))
     return findings
 
 
@@ -5431,6 +5656,138 @@ def _lifecycle_markdown_frontmatter_apply_findings(
     return findings, True
 
 
+def _lifecycle_source_provenance_apply_preflight_errors(inventory: Inventory) -> list[Finding]:
+    candidates = _lifecycle_source_provenance_candidate_rows(inventory)
+    if not candidates:
+        return []
+    for surface, _plan in candidates:
+        target_conflict = _snapshot_target_conflict(inventory.root, surface.rel_path)
+        if target_conflict:
+            return [_lifecycle_source_provenance_refusal_from(target_conflict)]
+        if surface.read_error:
+            return [
+                Finding(
+                    "error",
+                    "lifecycle-source-provenance-refused",
+                    f"target file could not be read as clean UTF-8 before lifecycle source-provenance repair: {surface.read_error}",
+                    surface.rel_path,
+                )
+            ]
+        if surface.frontmatter.errors:
+            return [
+                Finding(
+                    "error",
+                    "lifecycle-source-provenance-refused",
+                    "target has malformed frontmatter; repair refuses to guess metadata boundaries",
+                    surface.rel_path,
+                )
+            ]
+    snapshot_dir = _lifecycle_source_provenance_snapshot_dir([plan for _surface, plan in candidates], _current_snapshot_timestamp())
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        return [_lifecycle_source_provenance_refusal_from(boundary_conflict)]
+    return []
+
+
+def _lifecycle_source_provenance_apply_findings(inventory: Inventory) -> tuple[list[Finding], bool]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "lifecycle-source-provenance-apply-scope",
+            f"selected repair class: {LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS}; target route files: lifecycle markdown with deprecated transport-level source provenance",
+        )
+    ]
+    candidates = _lifecycle_source_provenance_candidate_rows(inventory)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-source-provenance-apply-skipped",
+                "no deprecated lifecycle source provenance required normalization",
+            )
+        )
+        return findings, False
+
+    plans = [plan for _surface, plan in candidates]
+    changed_plans = [plan for plan in plans if plan.current_text != plan.updated_text]
+    if not changed_plans:
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-source-provenance-apply-skipped",
+                "planned lifecycle source provenance already matched current files; no snapshot or rewrite was needed",
+            )
+        )
+        return findings, False
+
+    timestamp = _current_snapshot_timestamp()
+    snapshot_dir_rel = _lifecycle_source_provenance_snapshot_dir(changed_plans, timestamp)
+    metadata_rel = f"{snapshot_dir_rel}/snapshot.json"
+    metadata = _lifecycle_source_provenance_snapshot_metadata(inventory, timestamp, snapshot_dir_rel, changed_plans)
+    operations: list[AtomicFileWrite] = []
+    for plan in changed_plans:
+        target = inventory.root / plan.rel_path
+        copy_path = inventory.root / _lifecycle_source_provenance_copy_rel(snapshot_dir_rel, plan.rel_path)
+        operations.append(_lifecycle_frontmatter_atomic_write(copy_path, plan.current_text))
+        operations.append(_lifecycle_frontmatter_atomic_write(target, plan.updated_text))
+    operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
+
+    try:
+        cleanup_warnings = apply_file_transaction(operations)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "lifecycle-source-provenance-refused",
+                f"snapshot-protected lifecycle source-provenance repair failed before target mutation completed: {exc}",
+                changed_plans[0].rel_path,
+            )
+        ], False
+
+    findings.append(
+        Finding(
+            "info",
+            "snapshot-created",
+            f"created repair snapshot before lifecycle source-provenance mutation: {snapshot_dir_rel}/",
+            changed_plans[0].rel_path,
+        )
+    )
+    for plan in changed_plans:
+        copy_rel = _lifecycle_source_provenance_copy_rel(snapshot_dir_rel, plan.rel_path)
+        findings.extend(
+            [
+                Finding("info", "snapshot-copied-file", f"copied pre-repair bytes to {copy_rel}", plan.rel_path),
+                Finding(
+                    "info",
+                    "lifecycle-source-provenance-updated",
+                    f"normalized lifecycle source provenance: {plan.fields['source']}",
+                    plan.rel_path,
+                ),
+            ]
+        )
+    findings.extend(_lifecycle_source_provenance_route_write_findings(changed_plans, apply=True))
+    findings.extend(
+        [
+            Finding("info", "snapshot-metadata-written", f"wrote snapshot metadata: {metadata_rel}", changed_plans[0].rel_path),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-rollback",
+                f"manual rollback only: copy files from {snapshot_dir_rel}/files/ back to matching repo paths; then run validate and audit-links",
+                changed_plans[0].rel_path,
+            ),
+            Finding(
+                "info",
+                "lifecycle-source-provenance-authority",
+                "snapshot metadata and repair-normalized source provenance are safety/routing evidence only and cannot approve closeout, archive, commit, lifecycle decisions, truth selection, or future repairs",
+                changed_plans[0].rel_path,
+            ),
+        ]
+    )
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "repair-cleanup-warning", warning, changed_plans[0].rel_path))
+    return findings, True
+
+
 def _spec_posture_frontmatter_apply_preflight_errors(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
     candidates = _spec_posture_frontmatter_candidate_rows(inventory, validation)
     if not candidates:
@@ -5952,6 +6309,113 @@ def _lifecycle_markdown_frontmatter_route_write_findings(
 
 def _lifecycle_frontmatter_refusal_from(finding: Finding, severity: str = "error") -> Finding:
     code = "lifecycle-frontmatter-plan-refused" if severity == "warn" else "lifecycle-frontmatter-refused"
+    return Finding(severity, code, finding.message, finding.source, finding.line)
+
+
+def _lifecycle_source_provenance_candidate_rows(
+    inventory: Inventory,
+) -> list[tuple[Surface, LifecycleMarkdownFrontmatterPlan]]:
+    rows: list[tuple[Surface, LifecycleMarkdownFrontmatterPlan]] = []
+    for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path):
+        if surface.frontmatter.errors:
+            continue
+        plan = lifecycle_markdown_source_provenance_plan(surface)
+        if plan is None:
+            continue
+        rows.append((surface, plan))
+    return rows
+
+
+def _lifecycle_source_provenance_snapshot_dir(plans: list[LifecycleMarkdownFrontmatterPlan], timestamp: str) -> str:
+    payload_parts: list[bytes] = [LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS.encode("utf-8")]
+    for plan in sorted(plans, key=lambda item: item.rel_path):
+        payload_parts.extend(
+            [
+                plan.rel_path.encode("utf-8"),
+                plan.route_id.encode("utf-8"),
+                plan.operation.encode("utf-8"),
+                "\n".join(f"{key}={value}" for key, value in sorted(plan.fields.items())).encode("utf-8"),
+                plan.current_text.encode("utf-8"),
+                plan.updated_text.encode("utf-8"),
+            ]
+        )
+    hash_prefix = hashlib.sha256(b"\n".join(payload_parts)).hexdigest()[:12]
+    count = len(plans)
+    return f"{SNAPSHOT_REPAIR_ROOT_REL}/{timestamp}-{LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS}-{count}-files-{hash_prefix}"
+
+
+def _lifecycle_source_provenance_snapshot_metadata(
+    inventory: Inventory,
+    timestamp: str,
+    snapshot_dir_rel: str,
+    plans: list[LifecycleMarkdownFrontmatterPlan],
+) -> dict[str, object]:
+    copied_files = []
+    pre_repair_hashes: dict[str, str] = {}
+    planned_keys: dict[str, list[str]] = {}
+    planned_values: dict[str, dict[str, str]] = {}
+    target_paths = [plan.rel_path for plan in plans]
+    for plan in plans:
+        pre_repair_bytes = plan.current_text.encode("utf-8")
+        digest = hashlib.sha256(pre_repair_bytes).hexdigest()
+        copy_rel = _lifecycle_source_provenance_copy_rel(snapshot_dir_rel, plan.rel_path)
+        copied_files.append(
+            {
+                "target_path": plan.rel_path,
+                "snapshot_path": copy_rel,
+                "sha256": digest,
+                "byte_count": len(pre_repair_bytes),
+            }
+        )
+        pre_repair_hashes[plan.rel_path] = digest
+        planned_keys[plan.rel_path] = list(plan.fields)
+        planned_values[plan.rel_path] = dict(plan.fields)
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "created_at_utc": timestamp,
+        "tool_name": "mylittleharness",
+        "tool_version": __version__,
+        "command": "repair --apply",
+        "root_kind": inventory.root_kind,
+        "repair_class": LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS,
+        "target_root": str(inventory.root),
+        "snapshot_root": snapshot_dir_rel,
+        "target_paths": target_paths,
+        "copied_files": copied_files,
+        "pre_repair_hashes": pre_repair_hashes,
+        "planned_post_repair_paths": target_paths,
+        "source_diagnostics": [],
+        "planned_route_entries": [],
+        "planned_frontmatter_keys_by_path": planned_keys,
+        "planned_frontmatter_values_by_path": planned_values,
+        "retention": "manual; MyLittleHarness does not silently delete, rotate, compress, move, or hide repair snapshots",
+        "rollback_instructions": (
+            f"Copy files from {snapshot_dir_rel}/files/ back to matching repo paths, then run "
+            "python -m mylittleharness --root <target-root> validate and "
+            "python -m mylittleharness --root <target-root> audit-links."
+        ),
+        "authority_note": (
+            "snapshot metadata and repair-normalized source provenance are safety/routing evidence only and cannot approve repair, "
+            "truth selection, closeout, archive, commit, lifecycle decisions, or future repairs"
+        ),
+    }
+
+
+def _lifecycle_source_provenance_copy_rel(snapshot_dir_rel: str, rel_path: str) -> str:
+    return f"{snapshot_dir_rel}/files/{rel_path}"
+
+
+def _lifecycle_source_provenance_route_write_findings(
+    plans: list[LifecycleMarkdownFrontmatterPlan],
+    *,
+    apply: bool,
+) -> list[Finding]:
+    writes = tuple(RouteWriteEvidence(plan.rel_path, plan.current_text, plan.updated_text) for plan in plans)
+    return route_write_findings("lifecycle-source-provenance-route-write", writes, apply=apply)
+
+
+def _lifecycle_source_provenance_refusal_from(finding: Finding, severity: str = "error") -> Finding:
+    code = "lifecycle-source-provenance-plan-refused" if severity == "warn" else "lifecycle-source-provenance-refused"
     return Finding(severity, code, finding.message, finding.source, finding.line)
 
 
@@ -7443,6 +7907,7 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
                 )
             )
         if plan and plan.exists:
+            findings.extend(_active_plan_roadmap_intake_policy_findings(plan))
             findings.extend(_active_plan_generated_shape_findings(plan))
             findings.extend(_active_plan_verification_gate_findings(inventory, plan, data))
             findings.extend(_active_plan_execution_policy_findings(plan, data))
@@ -7453,12 +7918,31 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             findings.extend(product_diff_write_scope_findings(inventory, code_prefix="active-plan"))
             findings.extend(_active_plan_work_result_capsule_findings(inventory, plan, data))
             findings.extend(_active_plan_source_incubation_relationship_findings(inventory, plan))
+            findings.extend(_active_plan_covered_roadmap_scope_findings(inventory, plan, data))
+            findings.extend(_active_plan_scoped_interrupt_contract_findings(plan))
     elif plan and plan.exists:
         findings.append(Finding("warn", "stale-plan-file", "implementation plan exists while plan_status is not active", plan.rel_path))
     manifest_plan = inventory.manifest.get("memory", {}).get("plan_file") if inventory.manifest else None
     if status == "active" and manifest_plan and str(active_plan).replace("\\", "/") != str(manifest_plan).replace("\\", "/"):
         findings.append(Finding("error", "active-plan-manifest", "active_plan differs from manifest memory.plan_file", state.rel_path if state else None))
     return findings
+
+
+def _active_plan_roadmap_intake_policy_findings(plan: Surface) -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "active-plan-roadmap-intake-policy-matrix",
+            (
+                "active plan is open: read-only lifecycle inspection and MLH dry-run/apply route review are safe; "
+                "candidate capture belongs in meta-feedback/incubation now; accepted roadmap status/order/dependency/"
+                "next-item promotion waits for plan_status=none unless the active plan explicitly covers the roadmap item; "
+                "next_safe_candidate=mylittleharness --root <root> meta-feedback --dry-run ...; "
+                "next_safe_after_close=mylittleharness --root <root> roadmap --dry-run ..."
+            ),
+            plan.rel_path,
+        )
+    ]
 
 
 def _active_plan_source_incubation_relationship_findings(inventory: Inventory, plan: Surface) -> list[Finding]:
@@ -7486,6 +7970,126 @@ def _active_plan_source_incubation_relationship_findings(inventory: Inventory, p
             source_incubation,
         )
     ]
+
+
+def _active_plan_covered_roadmap_scope_findings(
+    inventory: Inventory,
+    plan: Surface,
+    state_data: dict[str, object],
+) -> list[Finding]:
+    if not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return []
+    plan_data = plan.frontmatter.data
+    covered = _active_plan_covered_roadmap_item_ids(plan_data)
+    if len(covered) <= 1:
+        return []
+    roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
+    if parse_findings or not roadmap_items:
+        return []
+
+    plan_targets = set(_dedupe_route_values(tuple(_contract_list(plan_data.get("target_artifacts")))))
+    phase_scope = set(_active_plan_current_phase_write_scope(plan, state_data))
+    if not plan_targets and not phase_scope:
+        return []
+
+    missing_plan_targets: list[str] = []
+    missing_phase_scope: list[str] = []
+    for item_id in covered:
+        item = roadmap_items.get(item_id)
+        if not item:
+            continue
+        targets = _target_artifact_values(item.fields.get("target_artifacts"))
+        if not targets:
+            continue
+        target_keys = tuple(_normalize_route_metadata_path(target).casefold() for target in targets)
+        plan_missing = [target for target, key in zip(targets, target_keys) if key and key not in plan_targets]
+        scope_missing = [target for target, key in zip(targets, target_keys) if key and key not in phase_scope]
+        if plan_missing:
+            missing_plan_targets.append(f"{item_id}: {_summarize_contract_values(plan_missing)}")
+        if scope_missing:
+            missing_phase_scope.append(f"{item_id}: {_summarize_contract_values(scope_missing)}")
+
+    if not missing_plan_targets and not missing_phase_scope:
+        return []
+
+    details: list[str] = []
+    if missing_plan_targets:
+        details.append(f"target_artifacts missing {', '.join(missing_plan_targets[:3])}")
+    if missing_phase_scope:
+        details.append(f"active-phase write_scope missing {', '.join(missing_phase_scope[:3])}")
+    return [
+        Finding(
+            "warn",
+            "active-plan-covered-roadmap-write-scope-contract",
+            (
+                "active plan covered_roadmap_items claims multiple roadmap items but does not authorize every covered "
+                f"item target_artifact in the plan target_artifacts/current-phase write_scope ({'; '.join(details)}); "
+                "use --only-requested-item for partial coverage or reopen the plan/roadmap scope before marking bundled items done"
+            ),
+            plan.rel_path,
+        )
+    ]
+
+
+def _active_plan_covered_roadmap_item_ids(plan_data: dict[str, object]) -> tuple[str, ...]:
+    values = (
+        _contract_text(plan_data.get("primary_roadmap_item")).casefold().replace("_", "-"),
+        _contract_text(plan_data.get("related_roadmap_item")).casefold().replace("_", "-"),
+        *(_contract_text(value).casefold().replace("_", "-") for value in _contract_list(plan_data.get("covered_roadmap_items"))),
+    )
+    return tuple(_dedupe_route_values(tuple(value for value in values if value)))
+
+
+def _active_plan_scoped_interrupt_contract_findings(plan: Surface) -> list[Finding]:
+    if not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return []
+    plan_data = plan.frontmatter.data
+    work_intent = _contract_text(plan_data.get("work_intent")).casefold()
+    if work_intent != "scoped_interrupt":
+        return []
+    policy = _contract_text(plan_data.get("roadmap_status_policy")) or "<empty>"
+    severity = "info" if policy == "no-roadmap-status-movement-without-explicit-request" else "warn"
+    return [
+        Finding(
+            severity,
+            "active-plan-scoped-interrupt-contract",
+            (
+                f"active plan declares scoped_interrupt work_intent with roadmap_status_policy {policy!r}; "
+                "closeout/archive must preserve explicit evidence, carry_forward/return-to-roadmap posture, "
+                "and no roadmap status movement unless the reviewed writeback or transition names it"
+            ),
+            plan.rel_path,
+        )
+    ]
+
+
+def _active_plan_current_phase_write_scope(plan: Surface, state_data: dict[str, object]) -> list[str]:
+    active_phase = _contract_text(state_data.get("active_phase") or (plan.frontmatter.data.get("active_phase") if plan.frontmatter.has_frontmatter else ""))
+    if active_phase:
+        lines = _active_phase_contract_lines(plan, active_phase, "write_scope", "write scope")
+    else:
+        lines = []
+    if not lines:
+        lines = _plan_contract_lines(plan, "write_scope", "write scope")
+    return _dedupe_route_values(tuple(_contract_route_values_from_lines(lines)))
+
+
+def _contract_route_values_from_lines(lines: list[tuple[str, int]]) -> list[str]:
+    values: list[str] = []
+    for text, _line in lines:
+        backticked = re.findall(r"`([^`]+)`", text)
+        if backticked:
+            values.extend(backticked)
+        else:
+            values.extend(_contract_list(text))
+    return values
+
+
+def _summarize_contract_values(values: list[str]) -> str:
+    sample = ", ".join(values[:3])
+    if len(values) > 3:
+        sample = f"{sample}, +{len(values) - 3} more"
+    return sample
 
 
 def _active_plan_generated_shape_findings(plan: Surface) -> list[Finding]:
@@ -8842,6 +9446,8 @@ def archive_context_findings(inventory: Inventory) -> list[Finding]:
         )
 
     classification_counts: dict[str, int] = {}
+    closeout_capsule_counts: dict[str, int] = {}
+    closeout_capsule_examples: dict[str, list[str]] = {}
     for archive_rel, archive_path in sorted(present_archives.items()):
         classification, source_refs, missing_sources = _archive_context_classification(
             inventory,
@@ -8850,6 +9456,9 @@ def archive_context_findings(inventory: Inventory) -> list[Finding]:
             roadmap_items,
             archive_refs_by_route.get(archive_rel, set()),
         )
+        capsule_status = _archive_context_closeout_evidence_capsule_status(archive_path)
+        closeout_capsule_counts[capsule_status] = closeout_capsule_counts.get(capsule_status, 0) + 1
+        closeout_capsule_examples.setdefault(capsule_status, []).append(archive_rel)
         report_classification = classification
         if classification == "stale-source-reference" and archive_rel not in referenced_routes:
             report_classification = "stale-unreferenced-source-reference"
@@ -8866,6 +9475,42 @@ def archive_context_findings(inventory: Inventory) -> list[Finding]:
     if classification_counts:
         summary = ", ".join(f"{key}={classification_counts[key]}" for key in sorted(classification_counts))
         findings.append(Finding("info", "archive-context-classification-summary", f"present archived plan classifications: {summary}", ARCHIVE_CONTEXT_ARCHIVE_DIR_REL))
+    if closeout_capsule_counts:
+        summary = ", ".join(f"{key}={closeout_capsule_counts[key]}" for key in sorted(closeout_capsule_counts))
+        findings.append(
+            Finding(
+                "info",
+                "archive-context-closeout-evidence-capsule-summary",
+                (
+                    f"archived plan closeout evidence capsule posture: {summary}; "
+                    "new writeback --archive-active-plan materializes the MLH closeout writeback capsule, "
+                    "and historical archives are not backfilled automatically"
+                ),
+                ARCHIVE_CONTEXT_ARCHIVE_DIR_REL,
+            )
+        )
+        incomplete_rels = [
+            rel
+            for status in ("missing", "partial", "unreadable")
+            for rel in closeout_capsule_examples.get(status, [])
+        ]
+        if incomplete_rels:
+            details = ", ".join(
+                f"{status}={_archive_context_sample(closeout_capsule_examples.get(status, []))}"
+                for status in ("missing", "partial", "unreadable")
+                if closeout_capsule_examples.get(status)
+            )
+            findings.append(
+                Finding(
+                    "info",
+                    "archive-context-closeout-evidence-capsule-missing",
+                    (
+                        f"{len(incomplete_rels)} archived plan file(s) lack a complete closeout evidence capsule: "
+                        f"{details}; diagnostic only; review schema and route ownership before any historical backfill"
+                    ),
+                    ARCHIVE_CONTEXT_ARCHIVE_DIR_REL,
+                )
+            )
     findings.append(
         Finding(
             "info",
@@ -9078,6 +9723,46 @@ def _archive_context_missing_cause_recovery_action(cause: str) -> str:
     if cause == "compacted-history-prose":
         return "treat as historical compacted prose unless current closeout depends on the missing file; restore only after evidence review"
     return "inspect the traced reference and choose restore, retarget, or provisional closeout wording manually"
+
+
+def _archive_context_closeout_evidence_capsule_status(archive_path: Path) -> str:
+    try:
+        archive_text = archive_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "unreadable"
+    fields = _archive_context_closeout_evidence_capsule_fields(archive_text)
+    if not fields:
+        return "missing"
+    if closeout_values_are_complete(fields):
+        return "complete"
+    return "partial"
+
+
+def _archive_context_closeout_evidence_capsule_fields(text: str) -> dict[str, str]:
+    lines = text.splitlines()
+    ranges: list[tuple[int, int]] = []
+    begin: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == WRITEBACK_BEGIN:
+            begin = index
+            continue
+        if line.strip() == WRITEBACK_END and begin is not None:
+            ranges.append((begin, index))
+            begin = None
+    if not ranges:
+        return {}
+    start, end = ranges[-1]
+    allowed = set(CLOSEOUT_WRITEBACK_FIELDS)
+    fields: dict[str, str] = {}
+    for line in lines[start + 1 : end]:
+        match = re.match(r"^\s*[-*]\s+`?([A-Za-z0-9_-]+)`?\s*:\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        field = match.group(1).replace("-", "_")
+        value = match.group(2).strip().strip("`\"'")
+        if field in allowed and value:
+            fields[field] = value
+    return fields
 
 
 def _archive_context_classification(
@@ -10568,12 +11253,29 @@ def _path_is_within(child: Path, parent: Path) -> bool:
         return False
 
 
-def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: bool) -> list[Finding]:
+def _intake_request_advice(request: IntakeRequest) -> IntakeRouteAdvice:
+    return classify_intake_text_for_target(request.text, request.target)
+
+
+def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: bool, advice: IntakeRouteAdvice | None = None) -> list[Finding]:
     errors: list[Finding] = []
     if not request.text.strip():
         errors.append(Finding("error", "intake-refused", "intake text is required"))
 
-    advice = classify_intake_text(request.text)
+    advice = advice or _intake_request_advice(request)
+    if request.status:
+        status = request.status.casefold()
+        if status not in INTAKE_VERIFICATION_STATUS_VALUES:
+            errors.append(
+                Finding(
+                    "error",
+                    "intake-refused",
+                    f"--status must be one of {', '.join(INTAKE_VERIFICATION_STATUS_VALUES)}",
+                    request.target or None,
+                )
+            )
+        elif advice.route_id != "verification":
+            errors.append(Finding("error", "intake-refused", "--status is only supported for verification intake targets", request.target or None))
     if not apply and request.target and not advice.apply_allowed:
         errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}", request.target))
     if apply:
@@ -10637,7 +11339,9 @@ def _intake_target_errors(inventory: Inventory, target: str, advice: IntakeRoute
 
 def _intake_advice_findings(advice: IntakeRouteAdvice, request: IntakeRequest, prefix: str) -> list[Finding]:
     source = request.target or None
-    return [
+    status = _intake_document_status(request, advice)
+    explicit_status = "explicit" if request.status else "derived"
+    findings = [
         Finding(
             "info",
             "intake-route-advisor",
@@ -10646,6 +11350,16 @@ def _intake_advice_findings(advice: IntakeRouteAdvice, request: IntakeRequest, p
         ),
         Finding("info", "intake-route-next-action", f"{prefix}{advice.next_action}", source),
     ]
+    if advice.route_id == "verification":
+        findings.append(
+            Finding(
+                "info",
+                "intake-verification-frontmatter-status",
+                f"{prefix}write verification frontmatter status={status!r} ({explicit_status}); decision-packet text is evidence, not status authority",
+                source,
+            )
+        )
+    return findings
 
 
 def _intake_target_preview_findings(request: IntakeRequest, advice: IntakeRouteAdvice) -> list[Finding]:
@@ -10721,8 +11435,8 @@ def _intake_boundary_findings() -> list[Finding]:
 
 def _intake_document_text(request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
     title = _intake_title(request)
-    status = INTAKE_ROUTE_DEFAULT_STATUS.get(advice.route_id, "draft")
-    body = request.text.strip()
+    status = _intake_document_status(request, advice)
+    body = _intake_document_body(request)
     return (
         "---\n"
         f'title: "{_yaml_double_quoted_value(title)}"\n'
@@ -10734,6 +11448,52 @@ def _intake_document_text(request: IntakeRequest, advice: IntakeRouteAdvice) -> 
         f"# {title}\n\n"
         f"{body}\n"
     )
+
+
+def _intake_document_status(request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
+    if request.status:
+        return request.status.casefold()
+    if advice.route_id != "verification":
+        return INTAKE_ROUTE_DEFAULT_STATUS.get(advice.route_id, "draft")
+    if _intake_looks_like_decision_packet(request.text):
+        return INTAKE_ROUTE_DEFAULT_STATUS.get("verification", "partial")
+    normalized = re.sub(r"\s+", " ", request.text.casefold().replace("_", " ").replace("-", " ")).strip()
+    if any(cue in normalized for cue in ("failed", "failure", "failing", "tests fail", "pytest fail", "validation failed")):
+        return "failed"
+    if any(cue in normalized for cue in ("tests passed", "pytest passed", "smoke passed", "validation passed", "verification passed")):
+        return "passed"
+    return INTAKE_ROUTE_DEFAULT_STATUS.get("verification", "partial")
+
+
+def _intake_document_body(request: IntakeRequest) -> str:
+    body = request.text.strip()
+    frontmatter, payload = _split_intake_payload_frontmatter(body)
+    if not frontmatter:
+        return body
+    payload = payload.strip() or "(empty payload body)"
+    return (
+        "## Intake Payload Frontmatter\n\n"
+        "```yaml\n"
+        f"{frontmatter.rstrip()}\n"
+        "```\n\n"
+        "## Intake Payload\n\n"
+        f"{payload}"
+    )
+
+
+def _split_intake_payload_frontmatter(text: str) -> tuple[str, str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "", text
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[1:index]), "\n".join(lines[index + 1 :])
+    return "", text
+
+
+def _intake_looks_like_decision_packet(text: str) -> bool:
+    lowered = text.casefold()
+    return "decision packet" in lowered or any(field in lowered for field in INTAKE_DECISION_PACKET_FIELDS)
 
 
 def _intake_title(request: IntakeRequest) -> str:

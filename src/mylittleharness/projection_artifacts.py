@@ -534,9 +534,10 @@ def projection_cache_posture_payload(
         "read_only": True,
         "authority": "repo-visible source files and in-memory projection remain authoritative",
         "refreshable_by_adapter": False,
-        "self_heal_command": "mylittleharness --root <root> projection --warm-cache --target all",
+        "self_heal_command": "mylittleharness --root <root> mlhd run-once --apply",
+        "manual_recovery_command": "mylittleharness --root <root> projection --warm-cache --target all",
         "self_healable_by_command": True,
-        "refresh_policy": "missing, dirty, stale, corrupt, or malformed generated cache can be warmed or rebuilt explicitly without creating lifecycle authority",
+        "refresh_policy": "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd; projection warm-cache/rebuild remains explicit recovery without creating lifecycle authority",
         "components": {
             "artifacts": artifact,
             "sqlite_index": index,
@@ -1267,7 +1268,7 @@ def _cache_component_posture(
 
 
 def _cache_refresh_commands(artifact: dict[str, object], index: dict[str, object]) -> list[str]:
-    commands: list[str] = []
+    commands: list[str] = ["mylittleharness --root <root> mlhd run-once --apply"]
     artifact_status = str(artifact.get("status") or "")
     index_status = str(index.get("status") or "")
     if artifact_status != "current" and index_status != "current":

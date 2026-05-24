@@ -117,6 +117,14 @@ class AgentRunRecordRequest:
     tools: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class AgentRunRecordRefreshPlan:
+    rel_path: str
+    current_text: str
+    updated_text: str
+    source_hashes: tuple[str, ...]
+
+
 def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
     return AgentRunRecordRequest(
         record_id=str(getattr(args, "record_id", "") or "").strip(),
@@ -159,6 +167,18 @@ def agent_run_record_dry_run_findings(inventory: Inventory, request: AgentRunRec
         return findings
 
     target_rel = _agent_run_record_target_rel(request)
+    target = inventory.root / target_rel
+    if target.exists() and target.is_file():
+        refresh_plan, refresh_findings = _agent_run_record_refresh_plan(inventory.root, target_rel, severity="warn")
+        findings.extend(refresh_findings)
+        if refresh_plan is None:
+            findings.append(Finding("info", "agent-run-record-validation-posture", "dry-run refused before apply; fix the existing agent run evidence record before refreshing source hashes"))
+            findings.extend(_agent_run_record_boundary_findings())
+            return findings
+        findings.extend(_agent_run_record_refresh_route_findings(refresh_plan, apply=False))
+        findings.extend(_agent_run_record_boundary_findings())
+        return findings
+
     text, hash_findings = _render_agent_run_record(inventory.root, request)
     findings.extend(hash_findings)
     findings.extend(
@@ -190,6 +210,31 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
 
     target_rel = _agent_run_record_target_rel(request)
     target = inventory.root / target_rel
+    if target.exists() and target.is_file():
+        refresh_plan, refresh_findings = _agent_run_record_refresh_plan(inventory.root, target_rel, severity="error")
+        findings.extend(refresh_findings)
+        if refresh_plan is None:
+            findings.append(Finding("info", "agent-run-record-validation-posture", "apply refused before refreshing evidence"))
+            findings.extend(_agent_run_record_boundary_findings())
+            return findings
+        if refresh_plan.current_text == refresh_plan.updated_text:
+            findings.append(Finding("info", "agent-run-record-refresh-current", "agent run evidence record source hashes are already current; no route write was needed", target_rel))
+            findings.extend(_agent_run_record_boundary_findings())
+            return findings
+        tmp_path = target.with_name(f".{target.name}.tmp")
+        backup_path = target.with_name(f".{target.name}.bak")
+        try:
+            cleanup_warnings = apply_file_transaction((AtomicFileWrite(target, tmp_path, refresh_plan.updated_text, backup_path),))
+        except FileTransactionError as exc:
+            findings.append(Finding("error", "agent-run-record-refused", f"failed to refresh agent run record before apply completed: {exc}", target_rel))
+            findings.extend(_agent_run_record_boundary_findings())
+            return findings
+        findings.extend(_agent_run_record_refresh_route_findings(refresh_plan, apply=True))
+        for warning in cleanup_warnings:
+            findings.append(Finding("warn", "agent-run-record-backup-cleanup", warning, target_rel))
+        findings.extend(_agent_run_record_boundary_findings())
+        return findings
+
     text, hash_findings = _render_agent_run_record(inventory.root, request)
     findings.extend(hash_findings)
     tmp_path = target.with_name(f".{target.name}.tmp")
@@ -634,8 +679,24 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
         target_rel = _agent_run_record_target_rel(request)
         target = inventory.root / target_rel
         findings.extend(_agent_run_record_target_findings(inventory.root, target_rel, severity))
-        if target.exists():
-            findings.append(Finding(severity, "agent-run-record-refused", "agent run record already exists; choose a new --record-id", target_rel))
+        if _has_self_output_ref(request, target_rel):
+            findings.append(
+                Finding(
+                    severity,
+                    "agent-run-record-refused",
+                    f"--output-ref must not point at the record target {target_rel}; self-referential agent run records become stale immediately",
+                    target_rel,
+                )
+            )
+        elif target.exists() and target.is_file():
+            findings.append(
+                Finding(
+                    "info",
+                    "agent-run-record-refresh-target",
+                    "agent run record already exists; same --record-id will refresh source_hashes on the existing evidence record only",
+                    target_rel,
+                )
+            )
     return findings
 
 
@@ -785,46 +846,70 @@ def _quote_yaml(value: object) -> str:
 
 
 def _source_hash_entries(root: Path, request: AgentRunRecordRequest) -> tuple[list[str], list[Finding]]:
+    return _source_hash_entries_for_refs(root, _source_bound_refs(request))
+
+
+def _source_hash_entries_for_refs(root: Path, rel_paths: Iterable[str], code_prefix: str = "agent-run-record") -> tuple[list[str], list[Finding]]:
     entries: list[str] = []
     findings: list[Finding] = []
-    for rel_path in _source_bound_refs(request):
+    for rel_path in rel_paths:
         conflict = _root_relative_path_conflict(rel_path)
         if conflict:
             entries.append(f"{rel_path} invalid-path")
-            findings.append(Finding("warn", "agent-run-record-source-hash", f"{rel_path} was recorded as invalid-path: {conflict}", rel_path))
+            findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{rel_path} was recorded as invalid-path: {conflict}", rel_path))
             continue
         path = root / rel_path
         if not path.exists():
             entries.append(f"{rel_path} missing")
-            findings.append(Finding("info", "agent-run-record-source-hash", f"{rel_path} recorded as missing source", rel_path))
+            findings.append(Finding("info", f"{code_prefix}-source-hash", f"{rel_path} recorded as missing source", rel_path))
             continue
         if not path.is_file():
             entries.append(f"{rel_path} invalid-path")
-            findings.append(Finding("warn", "agent-run-record-source-hash", f"{rel_path} is not a regular file and was recorded as invalid-path", rel_path))
+            findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{rel_path} is not a regular file and was recorded as invalid-path", rel_path))
             continue
         try:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
             entries.append(f"{rel_path} unreadable")
-            findings.append(Finding("warn", "agent-run-record-source-hash", f"{rel_path} could not be read for hashing: {exc}", rel_path))
+            findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{rel_path} could not be read for hashing: {exc}", rel_path))
             continue
         entries.append(f"{rel_path} sha256={digest}")
-        findings.append(Finding("info", "agent-run-record-source-hash", f"{rel_path} sha256={digest[:12]}", rel_path))
+        findings.append(Finding("info", f"{code_prefix}-source-hash", f"{rel_path} sha256={digest[:12]}", rel_path))
     return entries, findings
 
 
 def _source_bound_refs(request: AgentRunRecordRequest) -> tuple[str, ...]:
+    return _dedupe_source_refs(
+        (
+            *request.input_refs,
+            *request.output_refs,
+            *request.claimed_paths,
+            *request.changed_files,
+            *request.verification_refs,
+            *request.handoff_refs,
+            *request.claim_refs,
+        )
+    )
+
+
+def _record_source_refs(data: dict[str, object]) -> tuple[str, ...]:
+    return _dedupe_source_refs(
+        (
+            *_frontmatter_string_list(data.get("input_refs")),
+            *_frontmatter_string_list(data.get("output_refs")),
+            *_frontmatter_string_list(data.get("claimed_paths")),
+            *_frontmatter_string_list(data.get("changed_files")),
+            *_frontmatter_string_list(data.get("verification_refs")),
+            *_frontmatter_string_list(data.get("handoff_refs")),
+            *_frontmatter_string_list(data.get("claim_refs")),
+        )
+    )
+
+
+def _dedupe_source_refs(values: Iterable[str]) -> tuple[str, ...]:
     refs: list[str] = []
     seen: set[str] = set()
-    for rel_path in (
-        *request.input_refs,
-        *request.output_refs,
-        *request.claimed_paths,
-        *request.changed_files,
-        *request.verification_refs,
-        *request.handoff_refs,
-        *request.claim_refs,
-    ):
+    for rel_path in values:
         normalized = rel_path.replace("\\", "/").strip()
         if normalized and normalized not in seen:
             refs.append(normalized)
@@ -947,6 +1032,158 @@ def _coordination_record_paths(root: Path) -> list[Path]:
 
 def _agent_run_record_target_rel(request: AgentRunRecordRequest) -> str:
     return f"{AGENT_RUN_RECORD_PREFIX}{request.record_id}.md"
+
+
+def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -> tuple[AgentRunRecordRefreshPlan | None, list[Finding]]:
+    target = root / target_rel
+    try:
+        current_text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding(severity, "agent-run-record-refused", f"existing agent run record could not be read before source-hash refresh: {exc}", target_rel)]
+
+    frontmatter = parse_frontmatter(current_text)
+    data = frontmatter.data
+    if not frontmatter.has_frontmatter:
+        return None, [Finding(severity, "agent-run-record-refused", "existing agent run record is missing frontmatter; source-hash refresh refuses to guess metadata boundaries", target_rel)]
+    if frontmatter.errors:
+        return None, [Finding(severity, "agent-run-record-refused", "existing agent run record has malformed frontmatter; source-hash refresh refuses to guess metadata boundaries", target_rel)]
+    if data.get("schema") != AGENT_RUN_SCHEMA:
+        return None, [Finding(severity, "agent-run-record-refused", f"existing agent run record schema should be {AGENT_RUN_SCHEMA}", target_rel)]
+    if data.get("record_type") != "agent-run":
+        return None, [Finding(severity, "agent-run-record-refused", "existing agent run record record_type should be agent-run", target_rel)]
+    record_id = str(data.get("record_id") or "").strip()
+    expected_record_id = Path(target_rel).stem
+    if record_id != expected_record_id:
+        return None, [Finding(severity, "agent-run-record-refused", f"existing agent run record_id {record_id!r} does not match route target {expected_record_id!r}", target_rel)]
+
+    source_refs = _record_source_refs(data)
+    if not source_refs:
+        return None, [Finding(severity, "agent-run-record-refused", "existing agent run record has no source-bound refs to refresh", target_rel)]
+    self_refs = [ref for ref in source_refs if _same_root_relative_path(ref, target_rel)]
+    if self_refs:
+        return None, [
+            Finding(
+                severity,
+                "agent-run-record-refused",
+                f"existing agent run record source refs include its own target {target_rel}; self-referential source hashes cannot be made stable",
+                target_rel,
+            )
+        ]
+
+    source_hashes, hash_findings = _source_hash_entries_for_refs(root, source_refs)
+    updated_text = _replace_agent_run_source_hashes(current_text, source_hashes)
+    plan = AgentRunRecordRefreshPlan(target_rel, current_text, updated_text, tuple(source_hashes))
+    findings = [
+        Finding(
+            "info",
+            "agent-run-record-refresh-target",
+            f"refresh source_hashes for existing agent run evidence record: {target_rel}",
+            target_rel,
+        )
+    ]
+    findings.extend(hash_findings)
+    return plan, findings
+
+
+def _agent_run_record_refresh_route_findings(plan: AgentRunRecordRefreshPlan, *, apply: bool) -> list[Finding]:
+    if plan.current_text == plan.updated_text:
+        return [
+            Finding(
+                "info",
+                "agent-run-record-refresh-current",
+                "agent run evidence record source hashes are already current; no route write is needed",
+                plan.rel_path,
+            )
+        ]
+    before_hash = _short_hash(plan.current_text)
+    after_hash = _short_hash(plan.updated_text)
+    before_bytes = len(plan.current_text.encode("utf-8"))
+    after_bytes = len(plan.updated_text.encode("utf-8"))
+    prefix = "refreshed" if apply else "would refresh"
+    return [
+        Finding("info", "agent-run-record-refreshed" if apply else "agent-run-record-refresh-dry-run", f"{prefix} source_hashes for existing agent run evidence record: {plan.rel_path}", plan.rel_path),
+        Finding(
+            "info",
+            "agent-run-record-route-write",
+            f"{prefix} route {plan.rel_path}; before_hash={before_hash}; after_hash={after_hash}; before_bytes={before_bytes}; after_bytes={after_bytes}; source-bound write evidence is independent of Git tracking",
+            plan.rel_path,
+        ),
+    ]
+
+
+def _replace_agent_run_source_hashes(text: str, source_hashes: Iterable[str]) -> str:
+    updated = _replace_frontmatter_list(text, "source_hashes", tuple(source_hashes))
+    return _replace_source_hashes_section(updated, tuple(source_hashes))
+
+
+def _replace_frontmatter_list(text: str, key: str, values: tuple[str, ...]) -> str:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return text
+    closing_index = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            closing_index = index
+            break
+    if closing_index is None:
+        return text
+
+    replacement = _frontmatter_lines(key, values)
+    key_prefix = f"{key}:"
+    start_index = None
+    for index in range(1, closing_index):
+        if lines[index].startswith(key_prefix):
+            start_index = index
+            break
+    if start_index is None:
+        lines = [*lines[:closing_index], *replacement, *lines[closing_index:]]
+    else:
+        end_index = start_index + 1
+        while end_index < closing_index and (lines[end_index].startswith((" ", "\t")) or lines[end_index].lstrip().startswith("- ")):
+            end_index += 1
+        lines = [*lines[:start_index], *replacement, *lines[end_index:]]
+    return _join_preserving_trailing_newline(lines, text)
+
+
+def _replace_source_hashes_section(text: str, source_hashes: tuple[str, ...]) -> str:
+    lines = text.splitlines()
+    replacement = ["## Source Hashes", "", *(f"- `{entry}`" for entry in source_hashes), ""]
+    start_index = None
+    for index, line in enumerate(lines):
+        if line.strip().casefold() == "## source hashes":
+            start_index = index
+            break
+    if start_index is None:
+        lines = [*lines, "", *replacement]
+        return _join_preserving_trailing_newline(lines, text)
+
+    end_index = start_index + 1
+    while end_index < len(lines) and not re.match(r"^#{1,6}\s+", lines[end_index]):
+        end_index += 1
+    lines = [*lines[:start_index], *replacement, *lines[end_index:]]
+    return _join_preserving_trailing_newline(lines, text)
+
+
+def _join_preserving_trailing_newline(lines: list[str], original_text: str) -> str:
+    text = "\n".join(lines)
+    if original_text.endswith("\n") and not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def _has_self_output_ref(request: AgentRunRecordRequest, target_rel: str) -> bool:
+    return any(_same_root_relative_path(output_ref, target_rel) for output_ref in request.output_refs)
+
+
+def _same_root_relative_path(left: str, right: str) -> bool:
+    return _root_relative_path_key(left) == _root_relative_path_key(right)
+
+
+def _root_relative_path_key(value: str) -> str:
+    normalized = str(value or "").replace("\\", "/").strip()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.casefold()
 
 
 def _agent_run_record_boundary_findings(code_prefix: str = "agent-run-record") -> list[Finding]:

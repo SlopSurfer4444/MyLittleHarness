@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -186,6 +187,103 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
 ROUTE_REGISTRY: tuple[MemoryRoute, ...] = LIVE_LIFECYCLE_ROUTES + SUPPORT_ROUTES
 ROUTE_BY_ID = {route.route_id: route for route in ROUTE_REGISTRY}
 
+EXACT_DOC_TARGET_PREFIXES = ("docs/", "project/specs/", "src/mylittleharness/templates/")
+
+
+def normalize_route_path(value: str) -> str:
+    rel = str(value or "").strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.strip("/")
+
+
+def is_exact_doc_target(value: str) -> bool:
+    rel = normalize_route_path(value).casefold()
+    if not rel or ".." in rel.split("/"):
+        return False
+    if rel.endswith("/"):
+        return False
+    return rel.endswith(".md") and any(rel.startswith(prefix) for prefix in EXACT_DOC_TARGET_PREFIXES)
+
+
+def existing_doc_target_candidates(root: Path, value: str, *, limit: int = 4) -> tuple[str, ...]:
+    rel = normalize_route_path(value)
+    if not rel or not is_exact_doc_target(rel) or not root.is_dir():
+        return ()
+    exact = root / rel
+    if exact.is_file() and not exact.is_symlink():
+        return (rel,)
+
+    candidates: list[str] = []
+    for candidate in _known_doc_target_alternates(rel):
+        _append_existing_doc_candidate(root, candidate, candidates)
+
+    leaf = Path(rel).name
+    try:
+        matches = sorted(root.rglob(leaf), key=lambda path: _doc_candidate_sort_key(root, path))
+    except OSError:
+        matches = []
+    for candidate in matches:
+        if candidate.is_file() and not candidate.is_symlink():
+            try:
+                candidate_rel = candidate.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            _append_existing_doc_candidate(root, candidate_rel, candidates)
+        if len(candidates) >= limit:
+            break
+    return tuple(candidates[:limit])
+
+
+def doc_target_exists(root: Path, value: str) -> bool:
+    rel = normalize_route_path(value)
+    if not rel:
+        return False
+    candidate = root / rel
+    return candidate.is_file() and not candidate.is_symlink()
+
+
+def _known_doc_target_alternates(rel: str) -> tuple[str, ...]:
+    normalized = normalize_route_path(rel)
+    alternates: list[str] = []
+    if normalized.startswith("docs/specs/"):
+        tail = normalized.removeprefix("docs/specs/")
+        alternates.append(f"project/specs/{tail}")
+        alternates.append(f"src/mylittleharness/templates/{tail}")
+    elif normalized.startswith("project/specs/"):
+        tail = normalized.removeprefix("project/specs/")
+        alternates.append(f"docs/specs/{tail}")
+        alternates.append(f"src/mylittleharness/templates/{tail}")
+    elif normalized.startswith("src/mylittleharness/templates/"):
+        tail = normalized.removeprefix("src/mylittleharness/templates/")
+        alternates.append(f"project/specs/{tail}")
+        alternates.append(f"docs/specs/{tail}")
+    return tuple(alternates)
+
+
+def _append_existing_doc_candidate(root: Path, rel: str, candidates: list[str]) -> None:
+    rel = normalize_route_path(rel)
+    if not rel or rel in candidates:
+        return
+    path = root / rel
+    if path.is_file() and not path.is_symlink():
+        candidates.append(rel)
+
+
+def _doc_candidate_sort_key(root: Path, path: Path) -> tuple[int, str]:
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    priority = 2
+    if rel.startswith("project/specs/"):
+        priority = 0
+    elif rel.startswith("src/mylittleharness/templates/"):
+        priority = 1
+    elif rel.startswith("docs/"):
+        priority = 2
+    return (priority, rel)
+
 INTAKE_ROUTE_ALLOWED_TARGETS = {
     "adrs",
     "archive",
@@ -202,7 +300,23 @@ INTAKE_ROUTE_DEFAULT_STATUS = {
     "incubation": "incubating",
     "product-docs": "draft",
     "research": "imported",
-    "verification": "passed",
+    "verification": "partial",
+}
+INTAKE_TARGET_GUIDED_CUES = {
+    "verification": (
+        "verification",
+        "evidence",
+        "proof",
+        "audit",
+        "decision packet",
+        "safe to continue",
+        "safe_to_continue",
+        "replay",
+        "pytest",
+        "tests",
+        "smoke",
+        "validation",
+    ),
 }
 INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -580,6 +694,28 @@ def classify_intake_text(text: str) -> IntakeRouteAdvice:
         target=route.target,
         confidence=confidence,
         reason=f"matched cue(s): {', '.join(top_cues)}",
+        next_action=_intake_next_action(route_id),
+        apply_allowed=True,
+    )
+
+
+def classify_intake_text_for_target(text: str, target: str) -> IntakeRouteAdvice:
+    advice = classify_intake_text(text)
+    if advice.apply_allowed or not target:
+        return advice
+    route_id = classify_memory_route(target).route_id
+    if route_id not in INTAKE_ROUTE_ALLOWED_TARGETS:
+        return advice
+    normalized = _normalized_intake_text(text)
+    matched = tuple(cue for cue in INTAKE_TARGET_GUIDED_CUES.get(route_id, ()) if cue in normalized)
+    if not matched:
+        return advice
+    route = ROUTE_BY_ID[route_id]
+    return IntakeRouteAdvice(
+        route_id=route_id,
+        target=route.target,
+        confidence="medium",
+        reason=f"target route {route_id!r} matched weak cue(s): {', '.join(matched)}",
         next_action=_intake_next_action(route_id),
         apply_allowed=True,
     )
