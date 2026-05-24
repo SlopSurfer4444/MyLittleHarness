@@ -1805,7 +1805,7 @@ def _path_argument_value(token: str) -> str:
         return ""
     normalized = value.replace("\\", "/")
     if re.match(r"^[A-Za-z]:[\\/]", value) or normalized.startswith(
-        ("./", "project/", "src/", "tests/", "docs/", ".mylittleharness/")
+        ("../", "./", "project/", "src/", "tests/", "docs/", ".mylittleharness/")
     ):
         return value
     extracted = _extract_paths(value)
@@ -1918,6 +1918,12 @@ def _is_active_plan_spec_doc_patch_path(inventory: Inventory, path: str) -> bool
 
 def _hook_route_rel_path(inventory: Inventory, path: str) -> str:
     normalized = _normalize_hook_path(path)
+    candidate = _resolve_hook_path_from_root(inventory, path)
+    if candidate is not None:
+        try:
+            return candidate.relative_to(inventory.root.resolve()).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            return "" if _path_escapes_root(path) else normalized
     try:
         candidate = Path(path).expanduser()
         if candidate.is_absolute():
@@ -1978,11 +1984,32 @@ def _extract_paths(text: str) -> list[str]:
     return matches
 
 
+def _clean_hook_path_token(path: str) -> str:
+    return str(path or "").strip().strip(" \t\r\n\"'`([{").rstrip(".,;:)]}")
+
+
 def _normalize_hook_path(path: str) -> str:
-    rel = str(path or "").strip().strip(".,;:)]}").replace("\\", "/")
+    rel = _clean_hook_path_token(path).replace("\\", "/")
     while rel.startswith("./"):
         rel = rel[2:]
     return rel
+
+
+def _resolve_hook_path_from_root(inventory: Inventory, path: str) -> Path | None:
+    raw = _clean_hook_path_token(path)
+    if not raw:
+        return None
+    try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = inventory.root / candidate
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _path_escapes_root(path: str) -> bool:
+    return _normalize_hook_path(path).startswith("../")
 
 
 def _path_policy_findings(
@@ -2548,10 +2575,10 @@ def _is_under_configured_product_root(inventory: Inventory, path: str) -> bool:
     if not product_root:
         return False
     try:
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
+        candidate = _resolve_hook_path_from_root(inventory, path)
+        if candidate is None:
             return False
-        candidate.resolve().relative_to(Path(product_root).expanduser().resolve())
+        candidate.relative_to(Path(product_root).expanduser().resolve())
         return True
     except (OSError, RuntimeError, ValueError):
         return False
@@ -2667,10 +2694,10 @@ def _product_relative_path(inventory: Inventory, path: str) -> str:
     if not product_root:
         return ""
     try:
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
+        candidate = _resolve_hook_path_from_root(inventory, path)
+        if candidate is None:
             return ""
-        return candidate.resolve().relative_to(Path(product_root).expanduser().resolve()).as_posix()
+        return candidate.relative_to(Path(product_root).expanduser().resolve()).as_posix()
     except (OSError, RuntimeError, ValueError):
         return ""
 

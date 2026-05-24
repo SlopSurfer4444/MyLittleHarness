@@ -21949,6 +21949,53 @@ class CliTests(unittest.TestCase):
                 self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                 self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
 
+    def test_hooks_pre_tool_resolves_relative_product_root_apply_patch_targets(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            allowed_target = Path(os.path.relpath(product_root / "src" / "allowed.py", root)).as_posix()
+            rogue_target = Path(os.path.relpath(product_root / "src" / "rogue.py", root)).as_posix()
+            allowed_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {allowed_target}\n"
+                "@@\n"
+                "+ALLOWED = True\n"
+                "*** End Patch\n"
+            )
+            rogue_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {rogue_target}\n"
+                "@@\n"
+                "+ROGUE = True\n"
+                "*** End Patch\n"
+            )
+
+            allowed_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": allowed_patch}),
+            )
+            rogue_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": rogue_patch}),
+            )
+
+            allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            self.assertFalse(allowed_payload["block"])
+            self.assertNotIn("hooks-policy-block-product-root-path", allowed_codes)
+            self.assertNotIn("hooks-policy-block-product-root-direct-edit", allowed_codes)
+            self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", allowed_codes)
+
+            rogue_codes = {finding["code"] for finding in rogue_payload["findings"]}
+            self.assertTrue(rogue_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", rogue_codes)
+            self.assertIn("hooks-policy-block-product-root-direct-edit", rogue_codes)
+            self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
+
     def test_hooks_pre_tool_uses_apply_patch_targets_from_command_field(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -22160,6 +22207,41 @@ class CliTests(unittest.TestCase):
                 "hooks-policy-block-lifecycle-markdown-shortcut",
                 {finding["code"] for finding in direct_archive_write_payload["findings"]},
             )
+
+    def test_hooks_pre_tool_resolves_relative_product_root_shell_write_targets(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            allowed_target = Path(os.path.relpath(product_root / "src" / "allowed.py", root)).as_posix()
+            rogue_target = Path(os.path.relpath(product_root / "src" / "rogue.py", root)).as_posix()
+            allowed_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path '{allowed_target}' -Value 'x'",
+                }
+            )
+            rogue_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path '{rogue_target}' -Value 'x'",
+                }
+            )
+
+            allowed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], allowed_input)
+            rogue_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], rogue_input)
+
+            allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            self.assertFalse(allowed_payload["block"])
+            self.assertNotIn("hooks-policy-block-product-root-path", allowed_codes)
+            self.assertNotIn("hooks-policy-block-product-root-direct-edit", allowed_codes)
+            self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", allowed_codes)
+
+            rogue_codes = {finding["code"] for finding in rogue_payload["findings"]}
+            self.assertTrue(rogue_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", rogue_codes)
+            self.assertIn("hooks-policy-block-product-root-direct-edit", rogue_codes)
+            self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
 
     def test_hooks_pre_tool_allows_mlh_owner_route_stdin_payload_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
