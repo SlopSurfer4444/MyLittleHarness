@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import io
 import hashlib
@@ -12,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -23,12 +25,13 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mylittleharness import atomic_files
+from mylittleharness import atomic_files, claims
 from mylittleharness.adapter import serve_mcp_read_projection
 from mylittleharness.checks import (
     WORKFLOW_ATTACH_DIRECTORIES,
     _active_plan_covered_roadmap_scope_findings,
     _active_plan_scoped_interrupt_contract_findings,
+    _lifecycle_frontmatter_atomic_write,
     validation_findings,
 )
 from mylittleharness.cli import main
@@ -61,6 +64,94 @@ class CliTests(unittest.TestCase):
             os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI", None)
         else:
             os.environ["MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI"] = self._ambient_meta_feedback_ci_enable
+
+    def test_phase_owned_file_transaction_calls_pass_explicit_root(self) -> None:
+        callsite_files = (
+            ROOT / "src/mylittleharness/claims.py",
+            ROOT / "src/mylittleharness/planning.py",
+            ROOT / "src/mylittleharness/roadmap.py",
+            ROOT / "src/mylittleharness/writeback.py",
+        )
+        missing: list[str] = []
+        for path in callsite_files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "apply_file_transaction":
+                    if "root" not in {keyword.arg for keyword in node.keywords}:
+                        rel_path = path.relative_to(ROOT).as_posix()
+                        missing.append(f"{rel_path}:{node.lineno}")
+        self.assertEqual([], missing)
+
+    def test_file_transaction_refuses_parent_traversal_outside_explicit_root_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            target = root / ".." / "escaped.txt"
+            tmp_path = root / ".escaped.tmp"
+            backup_path = root / ".escaped.backup"
+
+            with self.assertRaisesRegex(atomic_files.FileTransactionError, "outside transaction root"):
+                atomic_files.apply_file_transaction(
+                    (atomic_files.AtomicFileWrite(target, tmp_path, "escaped\n", backup_path),),
+                    root=root,
+                )
+
+            self.assertFalse((Path(tmp) / "escaped.txt").exists())
+            self.assertFalse(tmp_path.exists())
+            self.assertFalse(backup_path.exists())
+
+    def test_file_transaction_refuses_symlink_parent_inside_explicit_root_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            outside = Path(tmp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            link = root / "linked"
+            try:
+                os.symlink(outside, link, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+            target = link / "escaped.txt"
+            tmp_path = link / ".escaped.tmp"
+            backup_path = link / ".escaped.backup"
+
+            with self.assertRaisesRegex(atomic_files.FileTransactionError, "symlink"):
+                atomic_files.apply_file_transaction(
+                    (atomic_files.AtomicFileWrite(target, tmp_path, "escaped\n", backup_path),),
+                    root=root,
+                )
+
+            self.assertFalse((outside / "escaped.txt").exists())
+            self.assertFalse((outside / ".escaped.tmp").exists())
+            self.assertFalse((outside / ".escaped.backup").exists())
+
+    def test_file_transaction_writes_paths_inside_explicit_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            target = root / "project" / "project-state.md"
+            tmp_path = target.with_name(f".{target.name}.tmp")
+            backup_path = target.with_name(f".{target.name}.backup")
+
+            cleanup_warnings = atomic_files.apply_file_transaction(
+                (atomic_files.AtomicFileWrite(target, tmp_path, "state\n", backup_path),),
+                root=root,
+            )
+
+            self.assertEqual((), cleanup_warnings)
+            self.assertEqual("state\n", target.read_text(encoding="utf-8"))
+            self.assertFalse(tmp_path.exists())
+            self.assertFalse(backup_path.exists())
+
+    def test_malformed_partial_workflow_core_state_is_not_classified_as_live_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text('---\nproject: "Sample"\nworkflow: "workflow-core"\n# no closing marker\n', encoding="utf-8")
+
+            inventory = load_inventory(root)
+
+            self.assertEqual("ambiguous", inventory.root_kind)
+            self.assertTrue(inventory.state.frontmatter.errors)
 
     def test_status_report_sections_and_zero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1271,7 +1362,7 @@ class CliTests(unittest.TestCase):
                 build_code = main(["--root", str(root), "projection", "--build", "--target", "artifacts"])
             build_rendered = build_output.getvalue()
             self.assertEqual(build_code, 0)
-            self.assertIn("projection build wrote rebuildable generated cache", build_rendered)
+            self.assertIn("projection build wrote explicit disposable generated cache", build_rendered)
             self.assertNotIn("deleting them does not change repo authority", build_rendered)
 
             rebuild_output = io.StringIO()
@@ -1279,7 +1370,7 @@ class CliTests(unittest.TestCase):
                 rebuild_code = main(["--root", str(root), "projection", "--rebuild", "--target", "artifacts"])
             rebuild_rendered = rebuild_output.getvalue()
             self.assertEqual(rebuild_code, 0)
-            self.assertIn("projection rebuild refreshed disposable generated cache", rebuild_rendered)
+            self.assertIn("projection rebuild refreshed explicit disposable generated cache", rebuild_rendered)
             self.assertNotIn("deleting them does not change repo authority", rebuild_rendered)
 
             delete_output = io.StringIO()
@@ -5548,6 +5639,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("dashboard-work-claim-status", rendered)
             self.assertIn("dashboard-handoff-packet-records", rendered)
             self.assertIn("dashboard-runtime-cache-absent", rendered)
+            self.assertIn("dashboard-cache-posture", rendered)
+            self.assertIn("commands_are_suggestions_only=true", rendered)
             self.assertIn("dashboard-alerts", rendered)
             self.assertIn("dashboard has no mutation buttons", rendered)
             self.assertIn("product-diff acceptance", rendered)
@@ -5857,7 +5950,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(worker.pid, pid_payload["pid"])
             state_payload = json.loads((runtime_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual("running", state_payload["status"])
-            self.assertEqual(["<python>", "-c", "<mlhd-background-projection-refresh-loop>", "<root>", "2", "1"], state_payload["worker_command_template"])
+            self.assertEqual(["<python>", "-c", "<mlhd-background-generated-freshness-loop>", "<root>", "2", "1"], state_payload["worker_command_template"])
 
             status_json = io.StringIO()
             with redirect_stdout(status_json):
@@ -6012,6 +6105,61 @@ class CliTests(unittest.TestCase):
             self.assertEqual("stale", stale_payload["contextMemory"]["status"])
             self.assertIn(state_rel, stale_payload["contextMemory"]["stale_or_unknown"])
 
+    def test_lifecycle_apply_refreshes_context_capsule_from_reloaded_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel = "/".join(("project", "project-state.md"))
+            plan_rel = "/".join(("project", "implementation-plan.md"))
+            capsule_rel = "/".join((".mylittleharness", "generated", "context-memory", "latest.json"))
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply", "--quiet-period-seconds", "0"]), 0)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "plan",
+                            "--apply",
+                            "--title",
+                            "Fresh Context Capsule",
+                            "--objective",
+                            "Keep generated context memory current after apply.",
+                        ]
+                    ),
+                    0,
+                )
+
+            rendered = apply_output.getvalue()
+            self.assertIn("context-memory-capsule-refreshed", rendered)
+            self.assertIn("trigger=plan --apply", rendered)
+
+            capsule = json.loads((root / capsule_rel).read_text(encoding="utf-8"))
+            self.assertEqual("plan --apply", capsule["trigger"])
+            self.assertEqual("active", capsule["lifecycle"]["plan_status"])
+            self.assertEqual(plan_rel, capsule["lifecycle"]["active_plan"])
+            source_refs = {row["rel_path"]: row for row in capsule["source_refs"]}
+            self.assertIn(state_rel, source_refs)
+            self.assertIn(plan_rel, source_refs)
+            self.assertEqual(
+                hashlib.sha256((root / state_rel).read_bytes()).hexdigest(),
+                source_refs[state_rel]["sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256((root / plan_rel).read_bytes()).hexdigest(),
+                source_refs[plan_rel]["sha256"],
+            )
+
+            dashboard_json = io.StringIO()
+            with redirect_stdout(dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+            dashboard_payload = json.loads(dashboard_json.getvalue())
+            self.assertEqual("current", dashboard_payload["contextMemory"]["status"])
+            self.assertEqual([], dashboard_payload["contextMemory"]["stale_or_unknown"])
+
     def test_mlhd_start_worker_refreshes_dirty_projection_cache_without_manual_warm_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -6030,17 +6178,28 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(main(["--root", str(root), "mlhd", "start", "--apply"]), 0)
                     self.assertIn("mlhd-start-apply", start_output.getvalue())
 
-                    deadline = time.time() + 6
+                    refresh_payload = None
+                    refresh_path = runtime_dir / "projection-refresh.json"
+                    deadline = time.time() + 8
                     while time.time() < deadline:
-                        if not (root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists() and not (
+                        markers_cleared = not (root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists() and not (
                             root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME
-                        ).exists():
+                        ).exists()
+                        if refresh_path.exists():
+                            try:
+                                candidate_payload = json.loads(refresh_path.read_text(encoding="utf-8"))
+                            except json.JSONDecodeError:
+                                candidate_payload = None
+                            if markers_cleared and candidate_payload and candidate_payload.get("status") == "refreshed":
+                                refresh_payload = candidate_payload
+                                break
+                        if markers_cleared and refresh_payload is not None:
                             break
                         time.sleep(0.2)
 
                     self.assertFalse((root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists())
                     self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
-                    refresh_payload = json.loads((runtime_dir / "projection-refresh.json").read_text(encoding="utf-8"))
+                    self.assertIsNotNone(refresh_payload)
                     self.assertEqual("refreshed", refresh_payload["status"])
 
                     dashboard_json = io.StringIO()
@@ -6233,6 +6392,61 @@ class CliTests(unittest.TestCase):
             self.assertIn("work-claim-completion-policy", release_output.getvalue())
             self.assertEqual("released", json.loads(claim_path.read_text(encoding="utf-8"))["status"])
 
+    def test_claim_apply_refuses_concurrent_overlapping_create_while_mutation_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            entered_publish = threading.Event()
+            release_publish = threading.Event()
+            original_apply_file_transaction = claims.apply_file_transaction
+
+            def claim_request(claim_id: str, claimed_path: str) -> claims.WorkClaimRequest:
+                return claims.WorkClaimRequest(
+                    action="create",
+                    claim_id=claim_id,
+                    claim_kind="write",
+                    owner_role="coder",
+                    owner_actor=claim_id,
+                    execution_slice="slice-a",
+                    worktree_id="",
+                    base_revision="",
+                    claimed_routes=(),
+                    claimed_paths=(claimed_path,),
+                    claimed_resources=(),
+                    lease_expires_at="",
+                    ttl="1h",
+                    release_condition="",
+                )
+
+            def blocking_apply_file_transaction(operations, *, root=None):
+                planned = tuple(operations)
+                if any(operation.target_path.name == "claim-1.json" for operation in planned):
+                    entered_publish.set()
+                    self.assertTrue(release_publish.wait(5))
+                return original_apply_file_transaction(planned, root=root)
+
+            def apply_claim(claim_id: str, claimed_path: str) -> list[Finding]:
+                return claims.work_claim_apply_findings(load_inventory(root), claim_request(claim_id, claimed_path))
+
+            with patch.object(claims, "apply_file_transaction", side_effect=blocking_apply_file_transaction):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(apply_claim, "claim-1", "src")
+                    self.assertTrue(entered_publish.wait(5))
+                    second = executor.submit(apply_claim, "claim-2", "src/app.py")
+                    second_findings = second.result(timeout=5)
+                    release_publish.set()
+                    first_findings = first.result(timeout=5)
+
+            self.assertTrue(any(finding.code == "work-claim-written" for finding in first_findings))
+            self.assertTrue(
+                any(
+                    finding.code == "work-claim-refused" and "mutation lock is already held" in finding.message
+                    for finding in second_findings
+                )
+            )
+            self.assertTrue((root / "project/verification/work-claims/claim-1.json").exists())
+            self.assertFalse((root / "project/verification/work-claims/claim-2.json").exists())
+            self.assertFalse((root / "project/verification/work-claims/.work-claim-mutation.lock").exists())
+
     def test_claim_release_requires_reviewed_evidence_note_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -6327,6 +6541,59 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn("work-claim-refused", rendered)
             self.assertIn("cannot extend stale work claim", rendered)
+
+    def test_claim_release_and_extend_refuse_malformed_existing_claim_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            claim_dir = root / "project/verification/work-claims"
+            claim_dir.mkdir(parents=True)
+            claim_path = claim_dir / "claim-1.json"
+            malformed_claim = "{not-json\n"
+            claim_path.write_text(malformed_claim, encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            status_output = io.StringIO()
+            with redirect_stdout(status_output):
+                self.assertEqual(main(["--root", str(root), "claim", "--status"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            status_rendered = status_output.getvalue()
+            self.assertIn("work-claim-malformed", status_rendered)
+            self.assertIn("work claim record could not be read as JSON", status_rendered)
+
+            cases = [
+                (
+                    "release-dry-run",
+                    ["claim", "--action", "release", "--claim-id", "claim-1", "--release-condition", "handoff accepted", "--dry-run"],
+                    0,
+                ),
+                (
+                    "release-apply",
+                    ["claim", "--action", "release", "--claim-id", "claim-1", "--release-condition", "handoff accepted", "--apply"],
+                    2,
+                ),
+                (
+                    "extend-dry-run",
+                    ["claim", "--action", "extend", "--claim-id", "claim-1", "--ttl", "1h", "--dry-run"],
+                    0,
+                ),
+                (
+                    "extend-apply",
+                    ["claim", "--action", "extend", "--claim-id", "claim-1", "--ttl", "1h", "--apply"],
+                    2,
+                ),
+            ]
+            for label, args, expected_code in cases:
+                with self.subTest(label=label):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        self.assertEqual(main(["--root", str(root), *args]), expected_code)
+
+                    self.assertEqual(before, snapshot_tree_bytes(root))
+                    self.assertEqual(malformed_claim, claim_path.read_text(encoding="utf-8"))
+                    rendered = output.getvalue()
+                    self.assertIn("work-claim-refused", rendered)
+                    self.assertIn("existing work claim record could not be read as JSON", rendered)
 
     def test_claim_status_and_agents_check_warn_on_malformed_work_claim_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -17457,6 +17724,150 @@ class CliTests(unittest.TestCase):
             self.assertIn("- `status`: `done`", current_block)
             self.assertIn(f"- `archived_plan`: `{archived_rel}`", current_block)
 
+    def test_transition_apply_reports_partial_recovery_when_next_plan_delegate_fails_after_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            write_sample_roadmap(root)
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "transition-current"\n'
+                'title: "Current Transition"\n'
+                'status: "pending"\n'
+                'active_phase: "Phase 4 - Validation And Closeout"\n'
+                'phase_status: "pending"\n'
+                'primary_roadmap_item: "minimal-roadmap-mutation-rail"\n'
+                "---\n"
+                "# Current Transition\n\n"
+                "## Phases\n\n"
+                "### Phase 4 - Validation And Closeout\n\n"
+                "- status: `pending`\n\n"
+                "## Closeout Summary\n\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: transition archived the completed plan before next-plan failure\n"
+                "- verification: transition partial recovery regression\n"
+                "- commit_decision: manual commit policy\n",
+                encoding="utf-8",
+            )
+            command = [
+                "--root",
+                str(root),
+                "transition",
+                "--dry-run",
+                "--complete-current-phase",
+                "--archive-active-plan",
+                "--from-active-plan",
+                "--current-roadmap-item",
+                "minimal-roadmap-mutation-rail",
+                "--next-roadmap-item",
+                "roadmap-operationalization-rail",
+                "--next-title",
+                "Next Transition",
+                "--next-objective",
+                "Open the next reviewed plan.",
+                "--only-requested-item",
+            ]
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(command)
+            self.assertEqual(dry_code, 0)
+            token = re.search(r"review token: ([0-9a-f]{16})", dry_output.getvalue()).group(1)
+
+            apply_command = command.copy()
+            apply_command[apply_command.index("--dry-run")] = "--apply"
+            apply_command.extend(["--review-token", token])
+            apply_output = io.StringIO()
+            with patch("mylittleharness.cli.plan_apply_findings", side_effect=RuntimeError("plan boom")), redirect_stdout(apply_output):
+                apply_code = main(apply_command)
+            rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 2)
+            self.assertIn("transition-next-plan-failed-after-prior-write", rendered)
+            self.assertIn("transition-partial-apply-recovery", rendered)
+            self.assertIn("transition-effective-write-set", rendered)
+            self.assertIn("previous review token must not be reused", rendered)
+            self.assertIn("partial output does not approve archive, roadmap, next-plan, Git, or release decisions", rendered)
+            self.assertFalse(plan_path.exists())
+            archived_paths = list((root / "project/archive/plans").glob("*-current-transition.md"))
+            self.assertEqual(1, len(archived_paths))
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            archived_rel = archived_paths[0].relative_to(root).as_posix()
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn(f'last_archived_plan: "{archived_rel}"', state_text)
+
+    def test_transition_apply_reports_partial_recovery_when_next_roadmap_delegate_fails_after_next_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            write_sample_roadmap(root)
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "transition-current"\n'
+                'title: "Current Transition"\n'
+                'status: "pending"\n'
+                'active_phase: "Phase 4 - Validation And Closeout"\n'
+                'phase_status: "pending"\n'
+                'primary_roadmap_item: "minimal-roadmap-mutation-rail"\n'
+                "---\n"
+                "# Current Transition\n\n"
+                "## Phases\n\n"
+                "### Phase 4 - Validation And Closeout\n\n"
+                "- status: `pending`\n\n"
+                "## Closeout Summary\n\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: transition opened the next plan before roadmap failure\n"
+                "- verification: transition partial recovery regression\n"
+                "- commit_decision: manual commit policy\n",
+                encoding="utf-8",
+            )
+            command = [
+                "--root",
+                str(root),
+                "transition",
+                "--dry-run",
+                "--complete-current-phase",
+                "--archive-active-plan",
+                "--from-active-plan",
+                "--current-roadmap-item",
+                "minimal-roadmap-mutation-rail",
+                "--next-roadmap-item",
+                "roadmap-operationalization-rail",
+                "--next-title",
+                "Next Transition",
+                "--next-objective",
+                "Open the next reviewed plan.",
+                "--only-requested-item",
+            ]
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(command)
+            self.assertEqual(dry_code, 0)
+            token = re.search(r"review token: ([0-9a-f]{16})", dry_output.getvalue()).group(1)
+
+            apply_command = command.copy()
+            apply_command[apply_command.index("--dry-run")] = "--apply"
+            apply_command.extend(["--review-token", token])
+            apply_output = io.StringIO()
+            with patch(
+                "mylittleharness.cli.roadmap_apply_findings",
+                return_value=[Finding("error", "roadmap-refused", "roadmap delegate boom", "project/roadmap.md")],
+            ), redirect_stdout(apply_output):
+                apply_code = main(apply_command)
+            rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 2)
+            self.assertIn("roadmap delegate boom", rendered)
+            self.assertIn("transition-partial-apply-recovery", rendered)
+            self.assertIn("transition-effective-write-set", rendered)
+            self.assertIn("created via plan-route-write", rendered)
+            self.assertNotIn("transition-authority", rendered)
+            archived_paths = list((root / "project/archive/plans").glob("*-current-transition.md"))
+            self.assertEqual(1, len(archived_paths))
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('plan_status: "active"', state_text)
+            self.assertIn('active_plan: "project/implementation-plan.md"', state_text)
+            self.assertIn("# Next Transition", plan_path.read_text(encoding="utf-8"))
+
     def test_transition_apply_archive_work_result_omits_completed_archive_manual_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
@@ -19378,6 +19789,64 @@ class CliTests(unittest.TestCase):
             self.assertIn('status: "incubating"', source_text)
             self.assertNotIn('status: "implemented"', source_text)
 
+    def test_writeback_archive_active_plan_retargets_stable_spec_implementation_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            spec_rel = "project/specs/workflow/workflow-artifact-model-spec.md"
+            spec_path = root / spec_rel
+            spec_path.write_text(
+                "---\n"
+                'title: "Workflow Artifact Model"\n'
+                'spec_status: "accepted"\n'
+                'implementation_posture: "partially-verified"\n'
+                'implemented_by: "project/implementation-plan.md"\n'
+                "---\n"
+                "# Workflow Artifact Model\n",
+                encoding="utf-8",
+            )
+            command = [
+                "--root",
+                str(root),
+                "writeback",
+                "--archive-active-plan",
+                "--docs-decision",
+                "updated",
+                "--state-writeback",
+                "archived active plan and retargeted stable spec implementation metadata",
+                "--verification",
+                "stable spec implementation retarget regression passed",
+                "--commit-decision",
+                "manual commit policy",
+            ]
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main([*command[:2], *command[2:3], "--dry-run", *command[3:]])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-route-retarget", dry_rendered)
+            self.assertIn(f"would change {spec_rel} frontmatter field: implemented_by", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main([*command[:2], *command[2:3], "--apply", *command[3:]])
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertIn("writeback-route-retarget", apply_rendered)
+            self.assertIn(f"change {spec_rel} frontmatter field: implemented_by", apply_rendered)
+
+            archived_plan = list((root / "project/archive/plans").glob("*.md"))[0].relative_to(root).as_posix()
+            spec_text = spec_path.read_text(encoding="utf-8")
+            self.assertIn(f'implemented_by: "{archived_plan}"', spec_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check", "--focus", "validation"])
+            self.assertEqual(check_code, 0)
+            self.assertNotIn("route-metadata-missing-target", check_output.getvalue())
+
     def test_writeback_archive_active_plan_syncs_covered_roadmap_items_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
@@ -20481,6 +20950,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("stale-or-degraded", payload["cachePosture"]["components"]["artifacts"]["status"])
             self.assertEqual("stale-or-degraded", payload["cachePosture"]["components"]["sqlite_index"]["status"])
             self.assertFalse(payload["cachePosture"]["refreshable_by_adapter"])
+            self.assertTrue(payload["cachePosture"]["displayed_commands_only"])
+            self.assertFalse(payload["cachePosture"]["read_only_surfaces_execute_refresh"])
+            self.assertEqual(ARTIFACT_DIR_REL, payload["cachePosture"]["generated_cache_mutation_boundary"])
+            self.assertFalse(payload["cachePosture"]["command_boundary"]["manualRecoveryCommand"]["invokedByReadOnlySurfaces"])
             self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
             self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
             self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
@@ -20505,6 +20978,7 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["boundary"]["authorizesProductDiff"])
             self.assertTrue(payload["continue"])
             self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("read-only hook payload displays recovery commands only", payload["additional_context"])
             self.assertIn("dashboard_packet=available", payload["hookSpecificOutput"]["additionalContext"])
             self.assertIn("accelerators: dashboard_packet=available", payload["additional_context"])
             self.assertIn("mlhd: control_status=absent", payload["additional_context"])
@@ -20532,6 +21006,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-codex-adapter-dry-run", dry_rendered)
             self.assertIn("hooks-codex-adapter-plan", dry_rendered)
             self.assertIn("hooks-codex-adapter-policy", dry_rendered)
+            self.assertIn("not correctness prerequisites", dry_rendered)
             self.assertIn("policy_hash=", dry_rendered)
             self.assertIn(".codex/hooks.json", dry_rendered)
             self.assertFalse((root / ".codex/hooks.json").exists())
@@ -20544,6 +21019,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             rendered = apply_output.getvalue()
             self.assertIn("hooks-codex-adapter-apply-written", rendered)
+            self.assertIn("not correctness prerequisites", rendered)
             hooks_path = root / ".codex/hooks.json"
             script_path = root / ".codex/hooks/mylittleharness_session_start.py"
             self.assertTrue(hooks_path.is_file())
@@ -23035,6 +23511,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["adoption"]["merge"]["storesSecrets"])
             self.assertIn("bounded source", payload["adoption"]["toolCoverage"]["mylittleharness.read_source"])
             self.assertTrue(payload["adoption"]["exactVerification"]["required"])
+            self.assertTrue(payload["adoption"]["projectHooks"]["includedInAttachApply"])
+            self.assertFalse(payload["adoption"]["projectHooks"]["boundary"]["correctnessPrerequisite"])
+            self.assertTrue(payload["adoption"]["projectHooks"]["boundary"]["eventsAreSensors"])
             self.assertIn("[mcp_servers.mylittleharness]", payload["codex"]["toml"])
             self.assertNotIn('"--root"', payload["codex"]["toml"])
             self.assertEqual(
@@ -23252,6 +23731,21 @@ class CliTests(unittest.TestCase):
             self.assertIn("[WARN] adapter-generated-artifacts", rendered)
             self.assertIn("projection-artifact-stale", rendered)
             self.assertIn("adapter fails open to repo files and in-memory projection", rendered)
+            self.assertIn("adapter_executes_refresh=false", rendered)
+            self.assertIn("commands_are_suggestions_only=true", rendered)
+
+    def test_adapter_reports_root_classification_as_coarse_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "adapter", "--inspect", "--target", "mcp-read-projection"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("adapter-root", rendered)
+            self.assertIn("root kind: live_operating_root", rendered)
+            self.assertIn("classification is coarse routing posture, not lifecycle validity proof", rendered)
 
     def test_adapter_rejects_unknown_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -23339,9 +23833,13 @@ class CliTests(unittest.TestCase):
             for required_key in ("runtime", "cachePosture", "rootSelection", "tools"):
                 self.assertIn(required_key, tool["outputSchema"]["required"])
             self.assertEqual(str(root), structured["root"]["path"])
+            self.assertEqual("coarse-routing-only", structured["root"]["classificationScope"])
+            self.assertFalse(structured["root"]["certifiesLifecycleValidity"])
+            self.assertTrue(structured["root"]["requiresRouteValidation"])
             self.assertEqual(str(root), structured["rootSelection"]["defaultRoot"])
             self.assertEqual(str(root), structured["rootSelection"]["selectedRoot"])
             self.assertTrue(structured["rootSelection"]["inventoryReloadedPerCall"])
+            self.assertFalse(structured["rootSelection"]["rootKindIsLifecycleCertification"])
             self.assertEqual("ok", structured["status"])
             self.assertTrue(structured["activation"]["defaultActive"])
             self.assertEqual("mylittleharness.read_projection", structured["activation"]["tool"])
@@ -23367,6 +23865,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter-root-selection", finding_codes)
             self.assertIn("adapter-no-authority", finding_codes)
             self.assertFalse(structured["boundary"]["sourceBodiesIncluded"])
+            self.assertEqual("none", structured["boundary"]["sourceBodyMode"])
+            self.assertIn("no source bodies", structured["boundary"]["sourceBodyContract"])
             self.assertIn('"adapter"', result["content"][0]["text"])
             self.assertNotIn("See `.agents/docmap.yaml`.", output.getvalue())
 
@@ -23433,6 +23933,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, read_structured["range"]["returned"])
             self.assertTrue(read_structured["boundary"]["readOnly"])
             self.assertTrue(read_structured["boundary"]["sourceBodiesIncluded"])
+            self.assertEqual("bounded-line-slice", read_structured["boundary"]["sourceBodyMode"])
             self.assertFalse(read_structured["boundary"]["refreshesGeneratedCache"])
             self.assertFalse(read_structured["boundary"]["authorizesLifecycle"])
 
@@ -23443,6 +23944,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any(result["kind"] == "exact" for result in search_structured["results"]))
             self.assertTrue(any(result["kind"] == "path-source" for result in search_structured["results"]))
             self.assertIn("mcp-search-read-only", [finding["code"] for finding in search_structured["findings"]])
+            self.assertEqual("matched-line-snippets", search_structured["boundary"]["sourceBodyMode"])
             self.assertFalse(search_structured["boundary"]["refreshesGeneratedCache"])
 
             related_structured = responses[3]["result"]["structuredContent"]
@@ -23451,6 +23953,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(".agents/docmap.yaml", related_structured["source"]["path"])
             self.assertTrue(any(link["source"] == "README.md" for link in related_structured["inboundLinks"]))
             self.assertFalse(related_structured["boundary"]["sourceBodiesIncluded"])
+            self.assertEqual("source-records-only", related_structured["boundary"]["sourceBodyMode"])
             self.assertFalse(related_structured["boundary"]["authorizesLifecycle"])
 
     def test_adapter_serve_mcp_stdio_read_source_rejects_path_escape_without_writes(self) -> None:
@@ -24401,6 +24904,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
             self.assertTrue((root / INDEX_REL_PATH).is_file())
             self.assertIn("attach-codex-hooks-autoadoption", rendered)
+            self.assertIn("optional non-authoritative sensors", rendered)
+            self.assertIn("not correctness prerequisites", rendered)
             self.assertIn("hooks-codex-adapter-apply-written", rendered)
             self.assertIn("attach-generated-projection-build", rendered)
 
@@ -24465,6 +24970,8 @@ class CliTests(unittest.TestCase):
                     self.assertIn("created missing advertised scaffold directory", rendered)
                     self.assertIn("attach-already-attached", rendered)
                     self.assertIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertIn("optional non-authoritative sensor", rendered)
+                    self.assertIn("not a correctness prerequisite", rendered)
                     self.assertIn("hooks-codex-adapter-apply-written", rendered)
                     self.assertNotIn("attach-generated-projection-build", rendered)
 
@@ -24556,6 +25063,39 @@ class CliTests(unittest.TestCase):
             self.assertFalse((root / INDEX_REL_PATH).exists())
             self.assertIn("attach-generated-projection-unavailable", rendered)
             self.assertIn("projection-index-fts5-unavailable", rendered)
+            self.assertNotIn("attach-generated-projection-recovery", rendered)
+
+    def test_attach_apply_reports_recovery_when_hook_apply_fails_after_scaffold_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = io.StringIO()
+            with patch("mylittleharness.hooks.codex_hook_adapter_apply_findings", side_effect=RuntimeError("hook boom")), redirect_stdout(output):
+                code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertTrue((root / ".codex/project-workflow.toml").is_file())
+            self.assertTrue((root / "project/project-state.md").is_file())
+            self.assertFalse((root / ".codex/hooks.json").exists())
+            self.assertIn("attach-codex-hooks-failed-after-scaffold", rendered)
+            self.assertIn("attach-codex-hooks-recovery", rendered)
+            self.assertIn("mylittleharness --root <root> check", rendered)
+            self.assertIn("hooks adapter --client codex --apply --scope project", rendered)
+
+    def test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = io.StringIO()
+            with patch("mylittleharness.checks.build_projection_artifacts", side_effect=RuntimeError("projection boom")), redirect_stdout(output):
+                code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertTrue((root / ".codex/project-workflow.toml").is_file())
+            self.assertTrue((root / "project/project-state.md").is_file())
+            self.assertTrue((root / ".codex/hooks.json").is_file())
+            self.assertFalse((root / ARTIFACT_DIR_REL / "manifest.json").exists())
+            self.assertIn("attach-generated-projection-failed-after-scaffold", rendered)
+            self.assertIn("attach-generated-projection-recovery", rendered)
+            self.assertIn("projection --rebuild --target all", rendered)
 
     def test_check_stays_read_only_and_intelligence_refreshes_missing_projection_index_when_search_needs_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -25160,7 +25700,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(sorted(originals), sorted(metadata["target_paths"]))
             self.assertEqual(["title", "status", "created", "updated", "source", "authority"], metadata["planned_frontmatter_keys_by_path"]["project/research/deep-research.md"])
             for rel_path, original_text in originals.items():
-                copied = snapshot_dir / "files" / rel_path
+                copied_by_target = {
+                    record["target_path"]: record["snapshot_path"]
+                    for record in metadata["copied_files"]
+                }
+                copied = root / copied_by_target[rel_path]
                 self.assertEqual(original_text, copied.read_text(encoding="utf-8"))
 
             inspect_output = io.StringIO()
@@ -25238,7 +25782,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual([note_rel], metadata["target_paths"])
             self.assertEqual(["source"], metadata["planned_frontmatter_keys_by_path"][note_rel])
             self.assertEqual({"source": "MyLittleHarness incubation route"}, metadata["planned_frontmatter_values_by_path"][note_rel])
-            self.assertEqual(original_text, (snapshot_dirs[0] / "files" / note_rel).read_text(encoding="utf-8"))
+            copied_rel = metadata["copied_files"][0]["snapshot_path"]
+            self.assertIn("/files/by-hash/", copied_rel)
+            self.assertEqual(original_text, (root / copied_rel).read_text(encoding="utf-8"))
+
+    def test_lifecycle_repair_atomic_sidecars_stay_short_for_deep_snapshot_paths(self) -> None:
+        deep_snapshot_copy = Path(
+            "C:/tmp/root/.mylittleharness/snapshots/repair/"
+            "20260524T234156Z-lifecycle-source-provenance-repair-25-files-221b9dbfc497/files/"
+            "very/deep/route/" + ("long-segment-" * 8) + "artifact.md"
+        )
+
+        operation = _lifecycle_frontmatter_atomic_write(deep_snapshot_copy, "snapshot bytes")
+
+        self.assertLess(len(str(operation.tmp_path)), len(str(deep_snapshot_copy)))
+        self.assertNotIn("lifecycle-frontmatter", operation.tmp_path.name)
+        self.assertNotIn("lifecycle-frontmatter", operation.backup_path.name)
 
     def test_check_reports_product_docs_as_lightweight_and_plan_facing_docs_specs_as_strict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -26277,6 +26836,17 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.projection-cache-posture.v1", payload["cachePosture"]["schema"])
             self.assertEqual("mylittleharness --root <root> mlhd run-once --apply", payload["cachePosture"]["self_heal_command"])
             self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["cachePosture"]["manual_recovery_command"])
+            self.assertFalse(payload["cachePosture"]["read_only_surfaces_execute_refresh"])
+            self.assertTrue(payload["cachePosture"]["displayed_commands_only"])
+            self.assertEqual(ARTIFACT_DIR_REL, payload["cachePosture"]["generated_cache_mutation_boundary"])
+            self.assertEqual("disposable-generated-cache-only", payload["cachePosture"]["manual_recovery_write_class"])
+            self.assertFalse(payload["cachePosture"]["command_boundary"]["selfHealCommand"]["invokedByReadOnlySurfaces"])
+            self.assertTrue(payload["cachePosture"]["command_boundary"]["selfHealCommand"]["requiresExplicitApply"])
+            self.assertEqual("read-only-inspect", payload["cachePosture"]["recommended_refresh_actions"][-1]["writeClass"])
+            self.assertFalse(payload["connectReadiness"]["cache"]["readOnlySurfacesExecuteRefresh"])
+            self.assertTrue(payload["connectReadiness"]["cache"]["displayedCommandsOnly"])
+            self.assertEqual(ARTIFACT_DIR_REL, payload["connectReadiness"]["cache"]["generatedCacheMutationBoundary"])
+            self.assertFalse(payload["connectReadiness"]["cache"]["commandBoundary"]["manualRecoveryCommand"]["invokedByReadOnlySurfaces"])
             section_names = [section["name"] for section in payload["sections"]]
             self.assertIn("Connect Readiness", section_names)
             self.assertIn("Lifecycle Provenance", section_names)
@@ -26306,6 +26876,15 @@ class CliTests(unittest.TestCase):
             self.assertFalse(structured["cachePosture"]["refreshable_by_adapter"])
             self.assertTrue(structured["cachePosture"]["self_healable_by_command"])
             self.assertIn("recommended_refresh_commands", structured["cachePosture"])
+            self.assertIn("recommended_refresh_actions", structured["cachePosture"])
+            self.assertFalse(structured["cachePosture"]["read_only_surfaces_execute_refresh"])
+            self.assertTrue(structured["cachePosture"]["displayed_commands_only"])
+            self.assertEqual(ARTIFACT_DIR_REL, structured["cachePosture"]["generated_cache_mutation_boundary"])
+            self.assertEqual("disposable-generated-cache-only", structured["cachePosture"]["manual_recovery_write_class"])
+            self.assertFalse(structured["cachePosture"]["command_boundary"]["manualRecoveryCommand"]["invokedByReadOnlySurfaces"])
+            self.assertTrue(structured["cachePosture"]["command_boundary"]["recommendedRefreshCommandsAreSuggestionsOnly"])
+            self.assertFalse(structured["connectReadiness"]["cache"]["readOnlySurfacesExecuteRefresh"])
+            self.assertTrue(structured["connectReadiness"]["cache"]["displayedCommandsOnly"])
             self.assertEqual("absent", structured["mlhd"]["control_status"])
             self.assertEqual("mylittleharness.dashboard-agent-packet.v1", structured["agentPacket"]["schema"])
             self.assertEqual("mylittleharness.connect-readiness-action-packet.v1", structured["connectReadiness"]["schema"])

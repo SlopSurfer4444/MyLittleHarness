@@ -173,7 +173,7 @@ def mlhd_control_boundary_findings() -> list[Finding]:
             "mlhd-control-no-hidden-runtime",
             (
                 "mlhd start opens no network listener and creates no filesystem watcher; it starts one local polling "
-                "worker for disposable projection cache ticks, while install writes only a root-local autostart manifest"
+                "worker for generated freshness ticks, while install writes only a root-local autostart manifest"
             ),
             MLHD_RUNTIME_DIR_REL,
         ),
@@ -186,7 +186,7 @@ def mlhd_control_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "mlhd-context-memory-boundary",
-            "mlhd run-once may refresh generated source-bound context capsules, but capsules stay non-authority and replayable from source refs",
+            "mlhd start/run-once may refresh generated source-bound context capsules, but capsules stay non-authority and replayable from source refs",
             CONTEXT_MEMORY_DIR_REL,
         ),
     ]
@@ -566,7 +566,7 @@ def _mlhd_dry_run_findings(
                 "info",
                 "mlhd-start-worker-preview",
                 (
-                    "would launch one local background polling worker for mlhd run-once projection refresh ticks; "
+                    "would launch one local background polling worker for mlhd run-once generated freshness ticks; "
                     f"interval_seconds={MLHD_WORKER_INTERVAL_SECONDS:g}; no listener, watcher, OS autostart entry, or lifecycle authority"
                 ),
                 MLHD_RUNTIME_DIR_REL,
@@ -635,7 +635,7 @@ def _mlhd_worker_command_template(*, quiet_period_seconds: float) -> list[str]:
     return [
         "<python>",
         "-c",
-        "<mlhd-background-projection-refresh-loop>",
+        "<mlhd-background-generated-freshness-loop>",
         "<root>",
         f"{MLHD_WORKER_INTERVAL_SECONDS:g}",
         f"{quiet_period_seconds:g}",
@@ -725,7 +725,7 @@ def _apply_mlhd_start(
             "mlhd-start-apply",
             (
                 "launched one local background polling worker and wrote root-local pid, lock, heartbeat, state, and event log files under "
-                ".mylittleharness/runtime/mlhd; the worker runs mlhd run-once projection refresh ticks without starting a listener, "
+                ".mylittleharness/runtime/mlhd; the worker runs mlhd run-once generated freshness ticks without starting a listener, "
                 "filesystem watcher, autostart entry, lifecycle mutation, or source mutation"
             ),
             MLHD_RUNTIME_DIR_REL,

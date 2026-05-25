@@ -229,7 +229,11 @@ def _projection_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "dashboard-cache-posture",
-            f"cache_posture schema=mylittleharness.projection-cache-posture.v1; refresh_by_dashboard=false; next_safe={refresh_commands}",
+            (
+                "cache_posture schema=mylittleharness.projection-cache-posture.v1; "
+                "refresh_by_dashboard=false; commands_are_suggestions_only=true; "
+                f"displayed_refresh_commands={refresh_commands}"
+            ),
             ".mylittleharness/generated/projection",
         ),
         Finding(
@@ -501,6 +505,13 @@ def connect_readiness_packet(
             "artifacts": _component_status(components, "artifacts"),
             "sqlite_index": _component_status(components, "sqlite_index"),
             "selfHealCommand": str(cache.get("self_heal_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+            "manualRecoveryCommand": str(cache.get("manual_recovery_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+            "readOnlyPayload": cache.get("read_only") is True,
+            "readOnlySurfacesExecuteRefresh": cache.get("read_only_surfaces_execute_refresh") is True,
+            "displayedCommandsOnly": cache.get("displayed_commands_only") is True,
+            "generatedCacheMutationBoundary": str(cache.get("generated_cache_mutation_boundary") or ".mylittleharness/generated/projection"),
+            "manualRecoveryWriteClass": str(cache.get("manual_recovery_write_class") or "disposable-generated-cache-only"),
+            "commandBoundary": cache.get("command_boundary", {}),
         },
         "mlhd": {
             "controlStatus": str(mlhd.get("control_status") or "unknown"),

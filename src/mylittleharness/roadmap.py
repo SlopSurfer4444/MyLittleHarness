@@ -874,7 +874,7 @@ def roadmap_batch_apply_findings(
             ),
         ]
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "roadmap-refused", f"roadmap batch apply failed before all target writes completed: {exc}", batch_plan.target_rel)]
 
@@ -2012,7 +2012,7 @@ def roadmap_apply_findings(
             ),
         ]
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "roadmap-refused", f"roadmap apply failed before all target writes completed: {exc}", plan.target_rel)]
 
@@ -2105,7 +2105,10 @@ def roadmap_normalize_apply_findings(inventory: Inventory) -> list[Finding]:
                     plan.target_rel,
                 ),
             ]
-        cleanup_warnings = apply_file_transaction([AtomicFileWrite(plan.target_path, tmp_path, plan.updated_text, backup_path)])
+        cleanup_warnings = apply_file_transaction(
+            [AtomicFileWrite(plan.target_path, tmp_path, plan.updated_text, backup_path)],
+            root=inventory.root,
+        )
     except FileTransactionError as exc:
         return [Finding("error", "roadmap-refused", f"roadmap normalize apply failed before target write completed: {exc}", plan.target_rel)]
 

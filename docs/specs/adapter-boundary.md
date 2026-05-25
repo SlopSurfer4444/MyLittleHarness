@@ -105,10 +105,11 @@ The inspect report and stdio tool payloads expose:
 
 - adapter id, purpose, owner, input root, output shape, and no-runtime posture
 - adapter runtime provenance: package version, adapter module path, router-mode posture, MCP server startup root when one exists, selected root, requested root, and the serve command that can be used to restart/reconfigure the helper
+- root kind as coarse routing posture only; it is not lifecycle validity proof, and consumers must still verify route files, frontmatter, and command-specific authority before acting
 - in-memory projection summary, source-set hash, record-set hash, link counts, and fan-in counts
 - source paths, roles, required/present/readable posture, counts, and hash prefixes without copying source bodies
 - bounded source line slices only when `mylittleharness.read_source` is explicitly called with a root-relative source path, 1-based start line, and line limit
-- source-verified search rows from direct exact text search, projection path/reference search, and a current SQLite FTS/BM25 index when available
+- source-verified search rows from direct exact text search, projection path/reference search, and a current SQLite FTS/BM25 index when available; search may return matched lines or bounded snippets, not whole source files
 - nearby route/source bundles for a root-relative projection source, including outbound links, inbound links, fan-in rows, relationship graph rows, and adjacent source records without source bodies
 - optional generated artifact and SQLite index posture as degraded input when missing, stale, corrupt, or unavailable
 - structured `cachePosture` with component statuses, source refs, recommended `projection --inspect` or `projection --rebuild` commands, and a bounded `projection --warm-cache --target all` self-heal command when supported; adapters expose this posture read-only and never refresh caches themselves
@@ -118,10 +119,11 @@ The inspect report and stdio tool payloads expose:
 The stdio server supports only `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`.
 It exposes four read-only tools: `mylittleharness.read_projection`, `mylittleharness.read_source`, `mylittleharness.search`, and `mylittleharness.related_or_bundle`.
 Each tool accepts optional per-call `root` selection and reloads that root inventory for the call.
-`read_projection` returns summary posture without source bodies. Its structured payload also carries the compact `agentPacket`, `connectReadiness`, and `mlhd` freshness objects, and the sectioned report includes an `Agent Action Packet` section so MCP consumers see the same next-safe-command posture as dashboard and hooks.
-`read_source` returns only the requested bounded source slice and never stores it.
-`search` accepts `query`, optional `mode` (`all`, `exact`, `path`, or `full-text`), and `limit`; it never refreshes generated caches from inside the adapter.
-`related_or_bundle` accepts a root-relative projection source path and returns graph/link/source metadata only.
+Each tool reports its own `boundary.sourceBodiesIncluded` and `boundary.sourceBodyMode`; consumers must not treat one tool's source-body posture as an adapter-wide promise.
+`read_projection` returns summary posture without source bodies (`sourceBodyMode = "none"`). Its structured payload also carries the compact `agentPacket`, `connectReadiness`, and `mlhd` freshness objects, and the sectioned report includes an `Agent Action Packet` section so MCP consumers see the same next-safe-command posture as dashboard and hooks.
+`read_source` returns only the requested bounded source slice (`sourceBodyMode = "bounded-line-slice"`) and never stores it.
+`search` accepts `query`, optional `mode` (`all`, `exact`, `path`, or `full-text`), and `limit`; it may return matched lines or bounded snippets (`sourceBodyMode = "matched-line-snippets"`) and never refreshes generated caches from inside the adapter.
+`related_or_bundle` accepts a root-relative projection source path and returns graph/link/source metadata only (`sourceBodyMode = "source-records-only"`).
 It reads newline-delimited JSON-RPC from stdin, writes only JSON-RPC messages to stdout, exits cleanly on EOF, and keeps generated projection files and SQLite indexes optional degraded inputs.
 
 Both modes fail open to repo files and the current in-memory projection when generated projection files are missing or stale.

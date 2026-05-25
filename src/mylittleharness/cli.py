@@ -67,6 +67,7 @@ from .command_discovery import (
     command_suggestions_to_dict,
     rails_not_cognition_boundary_finding,
 )
+from .context_memory import CONTEXT_MEMORY_DIR_REL, CONTEXT_MEMORY_LATEST_REL, refresh_context_memory_capsule
 from .dashboard import dashboard_payload, dashboard_sections
 from .daemon import mlhd_control_payload, mlhd_control_sections
 from .evidence import (
@@ -1233,15 +1234,24 @@ def _transition_apply_findings(inventory, args) -> list[Finding]:
         Finding("info", "transition-no-vcs", "transition does not stage, commit, push, or mutate Git state"),
     ]
     current = inventory
+    completed_write_steps: list[str] = []
     if args.complete_current_phase:
         findings.append(Finding("info", "transition-step", "completing current phase through writeback --phase-status complete", "project/project-state.md"))
-        step_findings = writeback_apply_findings(current, _transition_phase_complete_request(args))
+        step_findings = _transition_delegate_apply_findings(
+            "phase-complete",
+            "phase completion writeback",
+            "project/project-state.md",
+            lambda: writeback_apply_findings(current, _transition_phase_complete_request(args)),
+        )
         findings.extend(step_findings)
         if any(finding.severity == "error" for finding in step_findings):
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "phase completion writeback"))
             return findings
+        _transition_record_completed_write_step(completed_write_steps, "phase completion writeback", step_findings)
         current, reload_findings = _reload_transition_inventory(current)
         findings.extend(reload_findings)
         if reload_findings:
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "post-phase reload"))
             return findings
     if args.archive_active_plan:
         findings.append(
@@ -1252,31 +1262,54 @@ def _transition_apply_findings(inventory, args) -> list[Finding]:
                 "project/implementation-plan.md",
             )
         )
-        step_findings = writeback_apply_findings(current, _transition_archive_request(current, args))
+        step_findings = _transition_delegate_apply_findings(
+            "archive-active-plan",
+            "active-plan archive writeback",
+            "project/implementation-plan.md",
+            lambda: writeback_apply_findings(current, _transition_archive_request(current, args)),
+        )
         findings.extend(step_findings)
         if any(finding.severity == "error" for finding in step_findings):
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "active-plan archive writeback"))
             return findings
+        _transition_record_completed_write_step(completed_write_steps, "active-plan archive writeback", step_findings)
         current, reload_findings = _reload_transition_inventory(current)
         findings.extend(reload_findings)
         if reload_findings:
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "post-archive reload"))
             return findings
     if args.next_roadmap_item:
         findings.append(Finding("info", "transition-step", f"opening next active plan for roadmap item {args.next_roadmap_item!r}", "project/implementation-plan.md"))
         current_next_plan_resolution = _transition_next_plan_resolution(current, args)
         findings.extend(_transition_next_plan_input_findings(current_next_plan_resolution, apply=True))
-        step_findings = plan_apply_findings(current, _transition_next_plan_request(args))
+        step_findings = _transition_delegate_apply_findings(
+            "next-plan",
+            "next active-plan opening",
+            "project/implementation-plan.md",
+            lambda: plan_apply_findings(current, _transition_next_plan_request(args)),
+        )
         findings.extend(step_findings)
         if any(finding.severity == "error" for finding in step_findings):
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "next active-plan opening"))
             return findings
+        _transition_record_completed_write_step(completed_write_steps, "next active-plan opening", step_findings)
         current, reload_findings = _reload_transition_inventory(current)
         findings.extend(reload_findings)
         if reload_findings:
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "post-next-plan reload"))
             return findings
         findings.append(Finding("info", "transition-step", f"marking next roadmap item {args.next_roadmap_item!r} active", "project/roadmap.md"))
-        step_findings = roadmap_apply_findings(current, _transition_next_roadmap_status_request(args))
+        step_findings = _transition_delegate_apply_findings(
+            "next-roadmap",
+            "next roadmap status update",
+            "project/roadmap.md",
+            lambda: roadmap_apply_findings(current, _transition_next_roadmap_status_request(args)),
+        )
         findings.extend(step_findings)
         if any(finding.severity == "error" for finding in step_findings):
+            findings.extend(_transition_partial_apply_recovery_findings(inventory, args, findings, completed_write_steps, "next roadmap status update"))
             return findings
+        _transition_record_completed_write_step(completed_write_steps, "next roadmap status update", step_findings)
     findings.extend(_transition_effective_write_set_findings(inventory, args, findings))
     findings.append(
         Finding(
@@ -1287,6 +1320,52 @@ def _transition_apply_findings(inventory, args) -> list[Finding]:
         )
     )
     return findings
+
+
+def _transition_delegate_apply_findings(step_code: str, step_label: str, source: str, callback) -> list[Finding]:
+    try:
+        return callback()
+    except Exception as exc:
+        return [
+            Finding(
+                "error",
+                f"transition-{step_code}-failed-after-prior-write",
+                f"transition delegate failed while running {step_label}: {type(exc).__name__}: {exc}",
+                source,
+            )
+        ]
+
+
+def _transition_record_completed_write_step(completed_steps: list[str], step_label: str, step_findings: list[Finding]) -> None:
+    if _transition_route_write_entries(step_findings):
+        completed_steps.append(step_label)
+
+
+def _transition_partial_apply_recovery_findings(
+    inventory,
+    args,
+    findings: list[Finding],
+    completed_write_steps: list[str],
+    failed_step: str,
+) -> list[Finding]:
+    recovery: list[Finding] = []
+    recovery.extend(_transition_effective_write_set_findings(inventory, args, findings))
+    if not completed_write_steps and not _transition_route_write_entries(findings):
+        return recovery
+    completed = ", ".join(completed_write_steps) if completed_write_steps else "route-write evidence above"
+    recovery.append(
+        Finding(
+            "error",
+            "transition-partial-apply-recovery",
+            (
+                f"partial transition apply: earlier delegated rail(s) already wrote repo-visible files ({completed}) before {failed_step} failed or was refused. "
+                "Run `mylittleharness --root <root> check`, review the transition-effective-write-set evidence above, then rerun transition --dry-run from current repo-visible state; "
+                "the previous review token must not be reused, and partial output does not approve archive, roadmap, next-plan, Git, or release decisions."
+            ),
+            "project/project-state.md",
+        )
+    )
+    return recovery
 
 
 def _transition_effective_write_set_findings(inventory, args, findings: list[Finding]) -> list[Finding]:
@@ -2056,13 +2135,13 @@ def _projection_suggestions(report_name: str, findings: list[Finding]) -> list[s
             return ["projection build was refused before generated cache was written."]
         if warnings:
             return ["projection build completed with generated-cache warnings; repo-visible files remain authoritative."]
-        return ["projection build wrote rebuildable generated cache under the owned boundary; repo-visible files remain authoritative."]
+        return ["projection build wrote explicit disposable generated cache under the owned boundary; repo-visible files remain authoritative."]
     if "--rebuild" in lowered:
         if errors:
             return ["projection rebuild was refused before generated cache was refreshed."]
         if warnings:
             return ["projection rebuild completed with generated-cache warnings; review degraded cache posture before relying on generated navigation."]
-        return ["projection rebuild refreshed disposable generated cache under the owned boundary; repo-visible files remain authoritative."]
+        return ["projection rebuild refreshed explicit disposable generated cache under the owned boundary; repo-visible files remain authoritative."]
     if "--delete" in lowered:
         if errors:
             return ["projection delete was refused before generated cache was removed."]
@@ -2074,7 +2153,7 @@ def _projection_suggestions(report_name: str, findings: list[Finding]) -> list[s
             return ["projection warm-cache was refused before optional generated cache refresh completed."]
         if warnings:
             return ["projection warm-cache completed with advisory warnings; direct repo files remain authoritative."]
-        return ["projection warm-cache checked optional generated cache inside the owned boundary; repo-visible files remain authoritative."]
+        return ["projection warm-cache explicitly refreshed generated-cache-only state inside the owned boundary; repo-visible files remain authoritative."]
     return _suggestions("projection", findings)
 
 
@@ -2084,7 +2163,50 @@ def _with_projection_cache_dirty_findings(command: str, args: object, inventory:
     if any(finding.severity == "error" for finding in findings):
         return findings
     changed_paths = _projection_cache_changed_paths(findings)
-    return findings + mark_projection_cache_dirty(inventory, changed_paths, f"{command} --apply")
+    result = [*findings, *mark_projection_cache_dirty(inventory, changed_paths, f"{command} --apply")]
+    if not changed_paths or not _existing_context_memory_capsule(inventory):
+        return result
+    return [*result, *_refresh_context_memory_after_apply(command, inventory)]
+
+
+def _existing_context_memory_capsule(inventory: object) -> bool:
+    try:
+        root = Path(getattr(inventory, "root"))
+    except (TypeError, ValueError):
+        return False
+    return (root / CONTEXT_MEMORY_LATEST_REL).is_file()
+
+
+def _refresh_context_memory_after_apply(command: str, inventory: object) -> list[Finding]:
+    try:
+        refreshed_inventory = load_for_root(Path(getattr(inventory, "root")))
+    except (OSError, RootLoadError, TypeError, ValueError) as exc:
+        return [
+            Finding(
+                "warn",
+                "context-memory-capsule-refresh-skipped",
+                (
+                    f"could not reload source refs after {command} --apply; generated context capsule was left as-is "
+                    f"and can be refreshed with mylittleharness --root <root> mlhd run-once --apply: {exc}"
+                ),
+                CONTEXT_MEMORY_DIR_REL,
+            )
+        ]
+    try:
+        refresh_findings, _ = refresh_context_memory_capsule(refreshed_inventory, trigger=f"{command} --apply")
+    except (OSError, TypeError, ValueError) as exc:
+        return [
+            Finding(
+                "warn",
+                "context-memory-capsule-refresh-skipped",
+                (
+                    f"could not refresh generated context capsule after {command} --apply; source files remain authoritative "
+                    f"and recovery is mylittleharness --root <root> mlhd run-once --apply: {exc}"
+                ),
+                CONTEXT_MEMORY_DIR_REL,
+            )
+        ]
+    return refresh_findings
 
 
 def _projection_cache_changed_paths(findings: list[Finding]) -> tuple[str, ...]:

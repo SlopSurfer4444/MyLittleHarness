@@ -65,6 +65,7 @@ from .roadmap_semantics import roadmap_item_is_terminal_history_stub
 from .projection import Projection, ProjectionLinkRecord, build_projection, historical_link_context_reason, product_target_artifact_reason
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
+    PROJECTION_REBUILD_NEXT_SAFE_COMMAND,
     build_projection_artifacts,
     inspect_projection_artifacts,
     projection_cache_posture_payload,
@@ -2840,7 +2841,7 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
         Finding(
             "warn",
             "attach-codex-hooks-plan",
-            "would ensure project-local Codex native hooks by default: .codex/hooks.json and .codex/hooks/mylittleharness_session_start.py",
+            "would ensure project-local Codex native hooks by default: .codex/hooks.json and .codex/hooks/mylittleharness_session_start.py; hooks are optional non-authoritative sensors, not correctness prerequisites",
             ".codex/hooks.json",
         )
     )
@@ -2864,6 +2865,8 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
 
 ATTACH_MANIFEST_REL_PATH = ".codex/project-workflow.toml"
 ATTACH_STATE_REL_PATH = "project/project-state.md"
+ATTACH_RECOVERY_CHECK_COMMAND = "next_safe_command=mylittleharness --root <root> check"
+ATTACH_CODEX_HOOK_RECOVERY_COMMAND = "next_safe_command=mylittleharness --root <root> hooks adapter --client codex --apply --scope project"
 
 
 def attach_apply_findings(inventory: Inventory, project_name: str | None) -> list[Finding]:
@@ -2939,17 +2942,17 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         Finding(
             "info",
             "attach-apply-boundary",
-            "attach --apply wrote eager scaffold directories, absent manifest/state templates, project-local Codex native hooks, and attach-time disposable generated projection output",
+            "attach --apply wrote eager scaffold directories, absent manifest/state templates, project-local Codex native hooks as optional non-authoritative sensors, and attach-time disposable generated projection output; hooks are not correctness prerequisites",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
-    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory))
-    findings.extend(_attach_generated_projection_findings(refreshed_inventory))
+    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory, after_scaffold_write=True))
+    findings.extend(_attach_generated_projection_findings(refreshed_inventory, after_scaffold_write=True))
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 
 
-def _attach_generated_projection_findings(inventory: Inventory) -> list[Finding]:
+def _attach_generated_projection_findings(inventory: Inventory, *, after_scaffold_write: bool = False) -> list[Finding]:
     findings: list[Finding] = [
         Finding(
             "info",
@@ -2958,8 +2961,51 @@ def _attach_generated_projection_findings(inventory: Inventory) -> list[Finding]
             ARTIFACT_DIR_REL,
         )
     ]
-    artifact_findings = build_projection_artifacts(inventory)
-    index_findings = build_projection_index(inventory)
+    try:
+        artifact_findings = build_projection_artifacts(inventory)
+    except Exception as exc:
+        findings.append(
+            _attach_post_step_exception_finding(
+                "generated-projection",
+                "attach-time generated projection artifact build",
+                exc,
+                ARTIFACT_DIR_REL,
+            )
+        )
+        if after_scaffold_write:
+            findings.append(
+                _attach_post_scaffold_recovery_finding(
+                    "attach-generated-projection-recovery",
+                    "generated projection setup",
+                    PROJECTION_REBUILD_NEXT_SAFE_COMMAND,
+                    ARTIFACT_DIR_REL,
+                    severity="error",
+                )
+            )
+        return findings
+    try:
+        index_findings = build_projection_index(inventory)
+    except Exception as exc:
+        findings.extend(artifact_findings)
+        findings.append(
+            _attach_post_step_exception_finding(
+                "generated-projection",
+                "attach-time SQLite projection index build",
+                exc,
+                INDEX_REL_PATH,
+            )
+        )
+        if after_scaffold_write:
+            findings.append(
+                _attach_post_scaffold_recovery_finding(
+                    "attach-generated-projection-recovery",
+                    "generated projection setup",
+                    PROJECTION_REBUILD_NEXT_SAFE_COMMAND,
+                    INDEX_REL_PATH,
+                    severity="error",
+                )
+            )
+        return findings
     build_findings = artifact_findings + index_findings
     if any(finding.severity == "error" for finding in build_findings):
         findings.append(
@@ -2970,6 +3016,16 @@ def _attach_generated_projection_findings(inventory: Inventory) -> list[Finding]
                 ARTIFACT_DIR_REL,
             )
         )
+        if after_scaffold_write:
+            findings.append(
+                _attach_post_scaffold_recovery_finding(
+                    "attach-generated-projection-recovery",
+                    "generated projection setup",
+                    PROJECTION_REBUILD_NEXT_SAFE_COMMAND,
+                    ARTIFACT_DIR_REL,
+                    severity="error",
+                )
+            )
     elif any(finding.code in {"projection-index-fts5-unavailable", "projection-index-build-failed"} for finding in index_findings):
         findings.append(
             Finding(
@@ -2977,6 +3033,26 @@ def _attach_generated_projection_findings(inventory: Inventory) -> list[Finding]
                 "attach-generated-projection-unavailable",
                 f"SQLite FTS/BM25 index was unavailable; JSON projection artifacts were built and no current index is required: {INDEX_REL_PATH}",
                 INDEX_REL_PATH,
+            )
+        )
+        if after_scaffold_write and any(finding.code == "projection-index-build-failed" for finding in index_findings):
+            findings.append(
+                _attach_post_scaffold_recovery_finding(
+                    "attach-generated-projection-recovery",
+                    "SQLite projection index build",
+                    PROJECTION_REBUILD_NEXT_SAFE_COMMAND,
+                    INDEX_REL_PATH,
+                    severity="warn",
+                )
+            )
+    elif after_scaffold_write and any(finding.code == "projection-artifact-refresh-degraded" for finding in artifact_findings):
+        findings.append(
+            _attach_post_scaffold_recovery_finding(
+                "attach-generated-projection-recovery",
+                "projection artifact build",
+                PROJECTION_REBUILD_NEXT_SAFE_COMMAND,
+                ARTIFACT_DIR_REL,
+                severity="warn",
             )
         )
     elif any(finding.code == "projection-index-build" for finding in index_findings):
@@ -3055,7 +3131,12 @@ def _attach_already_attached_dry_run_findings(inventory: Inventory) -> list[Find
         ),
         Finding("info", "attach-existing", f"existing workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
         Finding("info", "attach-existing", f"existing project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
-        Finding("info", "attach-codex-hooks-plan", "attach --apply would still ensure project-local Codex native hooks by default", ".codex/hooks.json"),
+        Finding(
+            "info",
+            "attach-codex-hooks-plan",
+            "attach --apply would still ensure project-local Codex native hooks by default as optional non-authoritative sensors, not correctness prerequisites",
+            ".codex/hooks.json",
+        ),
     ]
     missing_dirs = [rel_path for rel_path in WORKFLOW_ATTACH_DIRECTORIES if not (inventory.root / rel_path).exists()]
     if missing_dirs:
@@ -3102,11 +3183,11 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
         Finding(
             "info",
             "attach-apply-boundary",
-            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories and keep project-local Codex native hooks current",
+            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories and keep project-local Codex native hooks current as optional non-authoritative sensors, not correctness prerequisites",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
-    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory))
+    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory, after_scaffold_write=True))
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 
@@ -3127,19 +3208,83 @@ def _attach_codex_hook_preflight_errors(inventory: Inventory) -> list[Finding]:
     ]
 
 
-def _attach_codex_hook_apply_findings(inventory: Inventory) -> list[Finding]:
+def _attach_codex_hook_apply_findings(inventory: Inventory, *, after_scaffold_write: bool = False) -> list[Finding]:
     from .hooks import CodexHookAdapterRequest, codex_hook_adapter_apply_findings
 
     findings = [
         Finding(
             "info",
             "attach-codex-hooks-autoadoption",
-            "attach --apply keeps the project-local Codex native hook adapter current by default",
+            "attach --apply keeps the project-local Codex native hook adapter current by default as an optional non-authoritative sensor, not a correctness prerequisite",
             ".codex/hooks.json",
         )
     ]
-    findings.extend(codex_hook_adapter_apply_findings(inventory, CodexHookAdapterRequest()))
+    try:
+        hook_findings = codex_hook_adapter_apply_findings(inventory, CodexHookAdapterRequest())
+    except Exception as exc:
+        findings.append(
+            _attach_post_step_exception_finding(
+                "codex-hooks",
+                "project-local Codex native hook adapter apply",
+                exc,
+                ".codex/hooks.json",
+            )
+        )
+        if after_scaffold_write:
+            findings.append(
+                _attach_post_scaffold_recovery_finding(
+                    "attach-codex-hooks-recovery",
+                    "Codex hook adapter adoption",
+                    ATTACH_CODEX_HOOK_RECOVERY_COMMAND,
+                    ".codex/hooks.json",
+                    severity="error",
+                )
+            )
+        return findings
+    findings.extend(hook_findings)
+    if after_scaffold_write and any(finding.severity == "error" for finding in hook_findings):
+        findings.append(
+            _attach_post_scaffold_recovery_finding(
+                "attach-codex-hooks-recovery",
+                "Codex hook adapter adoption",
+                ATTACH_CODEX_HOOK_RECOVERY_COMMAND,
+                ".codex/hooks.json",
+                severity="error",
+            )
+        )
     return findings
+
+
+def _attach_post_step_exception_finding(step_code: str, step_label: str, exc: Exception, source: str) -> Finding:
+    return Finding(
+        "error",
+        f"attach-{step_code}-failed-after-scaffold",
+        (
+            f"partial attach apply: scaffold writes may already be durable, but {step_label} failed after preflight "
+            f"with {type(exc).__name__}: {exc}"
+        ),
+        source,
+    )
+
+
+def _attach_post_scaffold_recovery_finding(
+    code: str,
+    step_label: str,
+    recovery_command: str,
+    source: str,
+    *,
+    severity: str,
+) -> Finding:
+    return Finding(
+        severity,
+        code,
+        (
+            f"partial attach recovery: repo-visible scaffold and authority files remain authoritative even though {step_label} "
+            f"did not complete cleanly; verify current posture with {ATTACH_RECOVERY_CHECK_COMMAND}; then rerun {recovery_command} "
+            "after fixing the reported cause"
+        ),
+        source,
+    )
 
 
 def _is_attach_already_attached_live_root(inventory: Inventory, project_name: str | None) -> bool:
@@ -6286,15 +6431,22 @@ def _lifecycle_markdown_frontmatter_snapshot_metadata(
 
 
 def _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel: str, rel_path: str) -> str:
-    return f"{snapshot_dir_rel}/files/{rel_path}"
+    return _repair_snapshot_copy_rel(snapshot_dir_rel, rel_path)
+
+
+def _repair_snapshot_copy_rel(snapshot_dir_rel: str, rel_path: str) -> str:
+    digest = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
+    suffix = Path(rel_path).suffix or ".txt"
+    return f"{snapshot_dir_rel}/files/by-hash/{digest}{suffix}"
 
 
 def _lifecycle_frontmatter_atomic_write(path: Path, text: str) -> AtomicFileWrite:
+    sidecar_id = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
     return AtomicFileWrite(
         path,
-        path.with_name(f".{path.name}.lifecycle-frontmatter.tmp"),
+        path.with_name(f".mlh-{sidecar_id}.tmp"),
         text,
-        path.with_name(f".{path.name}.lifecycle-frontmatter.backup"),
+        path.with_name(f".mlh-{sidecar_id}.backup"),
     )
 
 
@@ -6402,7 +6554,7 @@ def _lifecycle_source_provenance_snapshot_metadata(
 
 
 def _lifecycle_source_provenance_copy_rel(snapshot_dir_rel: str, rel_path: str) -> str:
-    return f"{snapshot_dir_rel}/files/{rel_path}"
+    return _repair_snapshot_copy_rel(snapshot_dir_rel, rel_path)
 
 
 def _lifecycle_source_provenance_route_write_findings(

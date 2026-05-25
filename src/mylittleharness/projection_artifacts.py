@@ -46,6 +46,19 @@ PAYLOAD_HASH_ARTIFACT_NAMES = tuple(name for name in ARTIFACT_NAMES if name != "
 SOURCE_SET_ARTIFACT_NAMES = ("sources.json", "source-hashes.json")
 RECORD_SET_ARTIFACT_NAMES = ("links.json", "backlinks.json", "fan-in.json", "relationships.json", "summary.json")
 PROJECTION_REBUILD_NEXT_SAFE_COMMAND = "next_safe_command=mylittleharness --root <root> projection --rebuild --target all"
+PROJECTION_CACHE_SELF_HEAL_COMMAND = "mylittleharness --root <root> mlhd run-once --apply"
+PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND = "mylittleharness --root <root> projection --warm-cache --target all"
+PROJECTION_CACHE_CANNOT_APPROVE = (
+    "lifecycle",
+    "archive",
+    "roadmap",
+    "staging",
+    "commit",
+    "push",
+    "release",
+    "source-truth",
+    "cache-truth",
+)
 
 
 def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
@@ -529,15 +542,25 @@ def projection_cache_posture_payload(
         current_code="projection-index-current",
         missing_code="projection-index-missing",
     )
+    refresh_commands = _cache_refresh_commands(artifact, index)
     return {
         "schema": "mylittleharness.projection-cache-posture.v1",
         "read_only": True,
+        "read_only_surfaces_execute_refresh": False,
+        "displayed_commands_only": True,
         "authority": "repo-visible source files and in-memory projection remain authoritative",
         "refreshable_by_adapter": False,
-        "self_heal_command": "mylittleharness --root <root> mlhd run-once --apply",
-        "manual_recovery_command": "mylittleharness --root <root> projection --warm-cache --target all",
+        "self_heal_command": PROJECTION_CACHE_SELF_HEAL_COMMAND,
+        "manual_recovery_command": PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
         "self_healable_by_command": True,
-        "refresh_policy": "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd; projection warm-cache/rebuild remains explicit recovery without creating lifecycle authority",
+        "generated_cache_mutation_boundary": ARTIFACT_DIR_REL,
+        "manual_recovery_write_class": "disposable-generated-cache-only",
+        "refresh_policy": (
+            "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd; "
+            "projection warm-cache/rebuild remains explicit recovery without creating lifecycle authority; "
+            "read-only surfaces display recovery commands only and never execute them"
+        ),
+        "command_boundary": _cache_command_boundary(),
         "components": {
             "artifacts": artifact,
             "sqlite_index": index,
@@ -550,8 +573,60 @@ def projection_cache_posture_payload(
             f"{ARTIFACT_DIR_REL}/{INDEX_DIRTY_MARKER_NAME}",
             f"{ARTIFACT_DIR_REL}/{CACHE_OPERATION_MARKER_NAME}",
         ],
-        "recommended_refresh_commands": _cache_refresh_commands(artifact, index),
+        "recommended_refresh_commands": refresh_commands,
+        "recommended_refresh_actions": _cache_refresh_actions(refresh_commands),
     }
+
+
+def _cache_command_boundary() -> dict[str, object]:
+    return {
+        "readOnlyPayload": True,
+        "readOnlySurfacesExecuteRefresh": False,
+        "displayedCommandsOnly": True,
+        "recommendedRefreshCommandsAreSuggestionsOnly": True,
+        "selfHealCommand": {
+            "command": PROJECTION_CACHE_SELF_HEAL_COMMAND,
+            "requiresExplicitApply": True,
+            "invokedByReadOnlySurfaces": False,
+            "writeClass": "runtime-and-disposable-generated-cache",
+            "writeBoundary": ".mylittleharness/runtime/mlhd and .mylittleharness/generated/projection",
+            "cannotApprove": list(PROJECTION_CACHE_CANNOT_APPROVE),
+        },
+        "manualRecoveryCommand": {
+            "command": PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
+            "requiresExplicitCommand": True,
+            "invokedByReadOnlySurfaces": False,
+            "writeClass": "disposable-generated-cache-only",
+            "writeBoundary": ARTIFACT_DIR_REL,
+            "cannotApprove": list(PROJECTION_CACHE_CANNOT_APPROVE),
+        },
+    }
+
+
+def _cache_refresh_actions(commands: list[str]) -> list[dict[str, object]]:
+    actions: list[dict[str, object]] = []
+    for command in commands:
+        if " mlhd run-once --apply" in command:
+            write_class = "runtime-and-disposable-generated-cache"
+            requires_explicit_apply = True
+        elif " projection --inspect " in command:
+            write_class = "read-only-inspect"
+            requires_explicit_apply = False
+        else:
+            write_class = "disposable-generated-cache-only"
+            requires_explicit_apply = False
+        actions.append(
+            {
+                "command": command,
+                "displayOnly": True,
+                "invokedByReadOnlySurfaces": False,
+                "writeClass": write_class,
+                "writeBoundary": ARTIFACT_DIR_REL if write_class != "read-only-inspect" else "",
+                "requiresExplicitApply": requires_explicit_apply,
+                "requiresExplicitCommand": True,
+            }
+        )
+    return actions
 
 
 def projection_cache_operation_marker_findings(root: Path) -> list[Finding]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sys
 import tempfile
 import tomllib
@@ -20,6 +21,65 @@ from mylittleharness.routes import route_manifest, route_protocol_for_id
 import mylittleharness_build
 
 
+EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX = {
+    "malformed claim mutation records": {
+        "tests/test_cli.py": (
+            "test_claim_release_and_extend_refuse_malformed_existing_claim_without_writing",
+            "test_claim_status_and_agents_check_warn_on_malformed_work_claim_metadata",
+        ),
+    },
+    "concurrent claims": {
+        "tests/test_cli.py": (
+            "test_claim_apply_refuses_concurrent_overlapping_create_while_mutation_lock_is_held",
+        ),
+    },
+    "attach late failures": {
+        "tests/test_cli.py": (
+            "test_attach_apply_reports_recovery_when_hook_apply_fails_after_scaffold_writes",
+            "test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes",
+        ),
+    },
+    "transition partial failures": {
+        "tests/test_cli.py": (
+            "test_transition_apply_reports_partial_recovery_when_next_plan_delegate_fails_after_archive",
+            "test_transition_apply_reports_partial_recovery_when_next_roadmap_delegate_fails_after_next_plan",
+        ),
+    },
+    "transaction confinement": {
+        "tests/test_cli.py": (
+            "test_phase_owned_file_transaction_calls_pass_explicit_root",
+            "test_file_transaction_refuses_parent_traversal_outside_explicit_root_before_writes",
+            "test_file_transaction_refuses_symlink_parent_inside_explicit_root_before_writes",
+        ),
+        "tests/test_projection_artifacts.py": (
+            "test_projection_build_refuses_boundary_path_conflict_without_partial_writes",
+        ),
+    },
+    "generated-cache command wording": {
+        "tests/test_cli.py": (
+            "test_dashboard_json_includes_agent_packet_cache_posture_and_lifecycle_provenance",
+            "test_adapter_mcp_payload_exposes_cache_posture_without_refresh_authority",
+        ),
+        "tests/test_projection_artifacts.py": (
+            "test_projection_warm_cache_target_all_refreshes_disposable_cache_only",
+        ),
+    },
+    "root classification": {
+        "tests/test_cli.py": (
+            "test_malformed_partial_workflow_core_state_is_not_classified_as_live_root",
+            "test_adapter_reports_root_classification_as_coarse_boundary",
+        ),
+    },
+    "adapter source-body boundaries": {
+        "tests/test_cli.py": (
+            "test_adapter_serve_mcp_stdio_lifecycle_tool_call_and_no_writes",
+            "test_adapter_serve_mcp_stdio_source_search_and_related_tools_are_bounded_read_only",
+            "test_adapter_serve_mcp_stdio_read_source_rejects_path_escape_without_writes",
+        ),
+    },
+}
+
+
 class PackageMetadataTests(unittest.TestCase):
     def test_package_metadata_matches_runtime_contract(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -30,6 +90,41 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertEqual("1.0.0", __version__)
         self.assertEqual([], project["dependencies"])
         self.assertEqual({"mylittleharness": "mylittleharness.cli:main"}, project["scripts"])
+
+    def test_external_audit_safety_failure_coverage_matrix_points_to_regressions(self) -> None:
+        expected_classes = {
+            "malformed claim mutation records",
+            "concurrent claims",
+            "attach late failures",
+            "transition partial failures",
+            "transaction confinement",
+            "generated-cache command wording",
+            "root classification",
+            "adapter source-body boundaries",
+        }
+        self.assertEqual(expected_classes, set(EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX))
+
+        test_names_by_file: dict[str, set[str]] = {}
+        for rel_path in {
+            path
+            for file_map in EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX.values()
+            for path in file_map
+        }:
+            tree = ast.parse((ROOT / rel_path).read_text(encoding="utf-8"), filename=rel_path)
+            test_names_by_file[rel_path] = {
+                node.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+            }
+
+        missing = []
+        for risk_class, file_map in EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX.items():
+            for rel_path, expected_tests in file_map.items():
+                for test_name in expected_tests:
+                    if test_name not in test_names_by_file[rel_path]:
+                        missing.append(f"{risk_class}: {rel_path}::{test_name}")
+
+        self.assertEqual([], missing)
 
     def test_stdlib_build_backend_stays_self_contained(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -497,7 +592,8 @@ class PackageMetadataTests(unittest.TestCase):
             "runtime storage stays under `.mylittleharness/runtime/mlhd/`",
             "The implemented `mlhd` control plane exposes `status`, `doctor`, `start`, `stop`, `run-once`, `install`, and `uninstall`",
             "`mlhd install --apply` writes a deterministic root-local `autostart.json` manifest",
-            "No daemon process, listener, scheduler, filesystem watcher, background projection refresh loop, OS/user autostart entry, or supervision process is created by attach, repair, dashboard, check, hooks, MCP, projection, or `mlhd` control-plane commands",
+            "`mlhd start --apply` launches a local polling worker that repeatedly runs that generated freshness tick without creating a filesystem watcher or lifecycle authority",
+            "No daemon process, listener, scheduler, filesystem watcher, OS/user autostart entry, or supervision process is created by attach, repair, dashboard, check, hooks, MCP, projection, or `mlhd` control-plane commands",
             "Daemon process autostart or supervision beyond the root-local manifest requires a later reviewed dry-run/apply rail",
             "No hidden control plane",
         ):
@@ -851,6 +947,23 @@ class PackageMetadataTests(unittest.TestCase):
         ):
             self.assertIn(expected, projection_spec)
         self.assertNotIn("accepts only an empty-object tool argument shape", cli_spec)
+
+    def test_default_codex_hooks_docs_keep_default_but_not_correctness_path(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
+        product_boundary = (ROOT / "docs/specs/product-boundary.md").read_text(encoding="utf-8")
+
+        for doc in (readme, docs_readme, cli_spec, product_boundary):
+            self.assertIn("project-local Codex native hooks", doc)
+            self.assertIn("optional non-authoritative sensors", doc)
+        for doc in (readme, docs_readme, cli_spec):
+            self.assertIn("not correctness prerequisites", doc)
+        self.assertIn("Successful `init --apply`/`attach --apply` keeps project-local Codex native hooks current by default", readme)
+        self.assertIn("Successful `init --apply` and compatibility `attach --apply` keep project-local Codex native hooks current by default", docs_readme)
+        self.assertIn("Those hooks are optional non-authoritative sensors, not correctness prerequisites", cli_spec)
+        self.assertIn("cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions", cli_spec)
+        self.assertIn("not correctness prerequisites", product_boundary)
 
     def test_rule_context_drift_docs_keep_check_compact(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

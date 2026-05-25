@@ -410,6 +410,7 @@ def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHook
             "writesUserConfig": False,
             "startsRuntime": False,
             "authorizesLifecycle": False,
+            "correctnessPrerequisite": False,
             "eventsAreSensors": True,
         },
     }
@@ -1061,7 +1062,7 @@ def _hook_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "hooks-boundary",
-            "hooks are sensors, blockers, or context injectors only; hook output cannot approve lifecycle movement, closeout, archive, roadmap status, staging, commit, push, rollback, release, product-diff acceptance, dispatcher work, provider routing, or next-plan opening",
+            "hooks are sensors, blockers, or context injectors only; they are optional and not correctness prerequisites; hook output cannot approve lifecycle movement, closeout, archive, roadmap status, staging, commit, push, rollback, release, product-diff acceptance, dispatcher work, provider routing, or next-plan opening",
         ),
         Finding(
             "info",
@@ -1545,6 +1546,7 @@ def _hook_additional_context(
             f"- context memory: status={_payload_value(context_memory_payload, 'status')}; capsule={_payload_value(context_memory_payload, 'capsule_rel_path')}; source_refs={_payload_value(context_memory_payload, 'source_ref_count')}",
             f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe={_payload_value(readiness, 'nextSafeCommand')}",
             f"- authority cards: {authority_summary or 'unavailable'}; dashboard/check/hooks/cache/search output remains non-authority.",
+            "- cache command boundary: read-only hook payload displays recovery commands only; hooks do not execute generated-cache refreshes.",
             f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; mlhd_refresh=mylittleharness --root <root> mlhd run-once --apply; rg_verification=required",
             "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",

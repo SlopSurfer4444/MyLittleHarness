@@ -303,6 +303,7 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertIn("projection --warm-cache --target all", rendered)
             self.assertIn("projection-artifact-warm-cache", rendered)
             self.assertIn("projection-index-warm-cache", rendered)
+            self.assertIn("projection warm-cache explicitly refreshed generated-cache-only state", rendered)
             self.assertIn("cannot affect lifecycle authority", rendered)
 
     def test_dashboard_projection_pulse_reports_dirty_and_operation_markers_without_writes(self) -> None:

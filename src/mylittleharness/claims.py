@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ WORK_CLAIM_KINDS = {
 EXCLUSIVE_CLAIM_KINDS = {"write", "lifecycle", "route", "path", "resource", "port", "database", "external_service"}
 WORK_CLAIM_REQUIRED_SCALARS = ("claim_id", "claim_kind", "owner_role", "owner_actor", "execution_slice", "status")
 WORK_CLAIM_SCOPE_FIELDS = ("claimed_routes", "claimed_paths", "claimed_resources")
+WORK_CLAIM_MUTATION_LOCK_NAME = ".work-claim-mutation.lock"
 ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -85,6 +87,16 @@ class WorkClaimRecord:
         return str(self.data.get("lease_expires_at") or "")
 
 
+@dataclass(frozen=True)
+class _WorkClaimMutationLock:
+    path: Path
+    fd: int
+
+
+class WorkClaimMutationLockError(OSError):
+    pass
+
+
 def make_work_claim_request(args: object) -> WorkClaimRequest:
     return WorkClaimRequest(
         action=str(getattr(args, "action", "") or "").strip() or "create",
@@ -117,12 +129,22 @@ def work_claim_dry_run_findings(inventory: Inventory, request: WorkClaimRequest)
         return findings
 
     if request.action == "release":
-        current = _load_claim_record(inventory.root, request.claim_id)
+        current, read_findings = _load_claim_record_for_mutation(inventory.root, request.claim_id, severity="warn")
+        findings.extend(read_findings)
+        if current is None:
+            findings.append(Finding("info", "work-claim-validation-posture", "dry-run refused before apply; fix explicit claim fields before writing claim evidence"))
+            findings.extend(_boundary_findings())
+            return findings
         text = _claim_json({**current.data, **_release_fields(request)})
         findings.append(Finding("info", "work-claim-target", f"would release work claim: {_claim_rel_path(request.claim_id)}", _claim_rel_path(request.claim_id)))
         findings.append(_route_write_finding(_claim_rel_path(request.claim_id), current.data, json.loads(text), apply=False))
     elif request.action == "extend":
-        current = _load_claim_record(inventory.root, request.claim_id)
+        current, read_findings = _load_claim_record_for_mutation(inventory.root, request.claim_id, severity="warn")
+        findings.extend(read_findings)
+        if current is None:
+            findings.append(Finding("info", "work-claim-validation-posture", "dry-run refused before apply; fix explicit claim fields before writing claim evidence"))
+            findings.extend(_boundary_findings())
+            return findings
         text = _claim_json({**current.data, **_extend_fields(request)})
         findings.append(Finding("info", "work-claim-target", f"would extend work claim: {_claim_rel_path(request.claim_id)}", _claim_rel_path(request.claim_id)))
         findings.append(_route_write_finding(_claim_rel_path(request.claim_id), current.data, json.loads(text), apply=False))
@@ -160,49 +182,79 @@ def work_claim_apply_findings(inventory: Inventory, request: WorkClaimRequest) -
         findings.extend(_boundary_findings())
         return findings
 
-    rel_path = _claim_rel_path(request.claim_id)
-    target = inventory.root / rel_path
-    if request.action == "release":
-        current = _load_claim_record(inventory.root, request.claim_id)
-        before_data = current.data
-        after_data = {**before_data, **_release_fields(request)}
-    elif request.action == "extend":
-        current = _load_claim_record(inventory.root, request.claim_id)
-        before_data = current.data
-        after_data = {**before_data, **_extend_fields(request)}
-    else:
-        before_data = None
-        after_data = _created_claim_record(request)
-
-    text = _claim_json(after_data)
     try:
-        cleanup_warnings = apply_file_transaction(
-            (
-                AtomicFileWrite(
-                    target_path=target,
-                    tmp_path=target.with_name(f".{target.name}.tmp"),
-                    text=text,
-                    backup_path=target.with_name(f".{target.name}.bak"),
-                ),
-            )
-        )
-    except FileTransactionError as exc:
-        findings.append(Finding("error", "work-claim-refused", f"failed to write work claim before apply completed: {exc}", rel_path))
+        mutation_lock = _acquire_work_claim_mutation_lock(inventory.root)
+    except WorkClaimMutationLockError as exc:
+        findings.append(Finding("error", "work-claim-refused", str(exc), _work_claim_mutation_lock_rel_path()))
+        findings.append(Finding("info", "work-claim-apply-refused", "work claim apply refused before writing claim evidence"))
         findings.extend(_boundary_findings())
         return findings
 
-    if request.action == "release":
-        findings.append(Finding("info", "work-claim-released", f"released work claim: {rel_path}", rel_path))
-    elif request.action == "extend":
-        findings.append(Finding("info", "work-claim-extended", f"extended work claim lease: {rel_path}", rel_path))
-    else:
-        findings.append(Finding("info", "work-claim-written", f"created work claim: {rel_path}", rel_path))
-    findings.append(_route_write_finding(rel_path, before_data, after_data, apply=True))
-    for warning in cleanup_warnings:
-        findings.append(Finding("warn", "work-claim-backup-cleanup", warning, rel_path))
-    findings.extend(_scope_findings(request))
-    findings.extend(_boundary_findings())
-    return findings
+    try:
+        locked_findings = _request_findings(inventory, request, apply=True)
+        locked_errors = [finding for finding in locked_findings if finding.severity == "error"]
+        if locked_errors:
+            findings.extend(locked_errors)
+            findings.append(Finding("info", "work-claim-apply-refused", "work claim apply refused after rechecking current claim records under the mutation lock"))
+            findings.extend(_boundary_findings())
+            return findings
+
+        rel_path = _claim_rel_path(request.claim_id)
+        target = inventory.root / rel_path
+        if request.action == "release":
+            current, read_findings = _load_claim_record_for_mutation(inventory.root, request.claim_id, severity="error")
+            findings.extend(read_findings)
+            if current is None:
+                findings.append(Finding("info", "work-claim-apply-refused", "work claim apply refused before writing claim evidence"))
+                findings.extend(_boundary_findings())
+                return findings
+            before_data = current.data
+            after_data = {**before_data, **_release_fields(request)}
+        elif request.action == "extend":
+            current, read_findings = _load_claim_record_for_mutation(inventory.root, request.claim_id, severity="error")
+            findings.extend(read_findings)
+            if current is None:
+                findings.append(Finding("info", "work-claim-apply-refused", "work claim apply refused before writing claim evidence"))
+                findings.extend(_boundary_findings())
+                return findings
+            before_data = current.data
+            after_data = {**before_data, **_extend_fields(request)}
+        else:
+            before_data = None
+            after_data = _created_claim_record(request)
+
+        text = _claim_json(after_data)
+        try:
+            cleanup_warnings = apply_file_transaction(
+                (
+                    AtomicFileWrite(
+                        target_path=target,
+                        tmp_path=target.with_name(f".{target.name}.tmp"),
+                        text=text,
+                        backup_path=target.with_name(f".{target.name}.bak"),
+                    ),
+                ),
+                root=inventory.root,
+            )
+        except FileTransactionError as exc:
+            findings.append(Finding("error", "work-claim-refused", f"failed to write work claim before apply completed: {exc}", rel_path))
+            findings.extend(_boundary_findings())
+            return findings
+
+        if request.action == "release":
+            findings.append(Finding("info", "work-claim-released", f"released work claim: {rel_path}", rel_path))
+        elif request.action == "extend":
+            findings.append(Finding("info", "work-claim-extended", f"extended work claim lease: {rel_path}", rel_path))
+        else:
+            findings.append(Finding("info", "work-claim-written", f"created work claim: {rel_path}", rel_path))
+        findings.append(_route_write_finding(rel_path, before_data, after_data, apply=True))
+        for warning in cleanup_warnings:
+            findings.append(Finding("warn", "work-claim-backup-cleanup", warning, rel_path))
+        findings.extend(_scope_findings(request))
+        findings.extend(_boundary_findings())
+        return findings
+    finally:
+        _release_work_claim_mutation_lock(mutation_lock)
 
 
 def work_claim_status_findings(inventory: Inventory, code_prefix: str = "work-claim") -> list[Finding]:
@@ -376,6 +428,9 @@ def _request_findings(inventory: Inventory, request: WorkClaimRequest, *, apply:
             )
         if request.claim_id and not target.exists():
             findings.append(Finding(severity, "work-claim-refused", "cannot release a missing work claim", _claim_rel_path(request.claim_id)))
+        elif request.claim_id:
+            _, read_findings = _load_claim_record_for_mutation(inventory.root, request.claim_id, severity=severity)
+            findings.extend(read_findings)
         return findings
     if request.action == "extend":
         if request.claim_id:
@@ -384,8 +439,11 @@ def _request_findings(inventory: Inventory, request: WorkClaimRequest, *, apply:
             if not target.exists():
                 findings.append(Finding(severity, "work-claim-refused", "cannot extend a missing work claim", rel_path))
             elif not lease_findings:
-                current = _load_claim_record(inventory.root, request.claim_id)
-                if current.status != "active":
+                current, read_findings = _load_claim_record_for_mutation(inventory.root, request.claim_id, severity=severity)
+                findings.extend(read_findings)
+                if current is None:
+                    pass
+                elif current.status != "active":
                     findings.append(Finding(severity, "work-claim-refused", "can only extend an active work claim", rel_path))
                 elif _claim_is_stale(current):
                     findings.append(Finding(severity, "work-claim-refused", "cannot extend stale work claim; release it or create a new reviewed claim", rel_path))
@@ -530,6 +588,52 @@ def _load_claim_record(root: Path, claim_id: str) -> WorkClaimRecord:
     path = root / _claim_rel_path(claim_id)
     data = json.loads(path.read_text(encoding="utf-8"))
     return WorkClaimRecord(_to_rel_path(root, path), data)
+
+
+def _load_claim_record_for_mutation(root: Path, claim_id: str, *, severity: str) -> tuple[WorkClaimRecord | None, list[Finding]]:
+    path = root / _claim_rel_path(claim_id)
+    rel_path = _to_rel_path(root, path)
+    if path.is_symlink() or not path.is_file():
+        return None, [Finding(severity, "work-claim-refused", "existing work claim record path is not a regular file", rel_path)]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, [Finding(severity, "work-claim-refused", f"existing work claim record could not be read as JSON: {exc}", rel_path)]
+    if not isinstance(data, dict):
+        return None, [Finding(severity, "work-claim-refused", "existing work claim record JSON root must be an object", rel_path)]
+    return WorkClaimRecord(rel_path, data), []
+
+
+def _work_claim_mutation_lock_rel_path() -> str:
+    return f"{WORK_CLAIMS_DIR_REL}/{WORK_CLAIM_MUTATION_LOCK_NAME}"
+
+
+def _acquire_work_claim_mutation_lock(root: Path) -> _WorkClaimMutationLock:
+    lock_path = root / _work_claim_mutation_lock_rel_path()
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WorkClaimMutationLockError(f"failed to prepare work claim mutation lock: {exc}") from exc
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except FileExistsError as exc:
+        raise WorkClaimMutationLockError("work claim mutation lock is already held; retry after the in-flight claim mutation finishes") from exc
+    except OSError as exc:
+        raise WorkClaimMutationLockError(f"failed to acquire work claim mutation lock: {exc}") from exc
+    return _WorkClaimMutationLock(path=lock_path, fd=fd)
+
+
+def _release_work_claim_mutation_lock(lock: _WorkClaimMutationLock) -> None:
+    try:
+        os.close(lock.fd)
+    finally:
+        try:
+            lock.path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def _created_claim_record(request: WorkClaimRequest) -> dict[str, object]:

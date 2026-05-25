@@ -150,6 +150,7 @@ python -m mylittleharness --root "$TargetRoot" detach --dry-run
 ```
 
 Apply modes are intentionally explicit. Prefer dry-run first.
+Successful `init --apply`/`attach --apply` keeps project-local Codex native hooks current by default; those hooks are optional non-authoritative sensors, not correctness prerequisites.
 
 ---
 
@@ -304,6 +305,7 @@ python -m mylittleharness --root $TargetRoot detach --dry-run
 ```
 
 Apply modes stay explicit and target-bound after dry-run review. `bootstrap --inspect`, `tasks --inspect`, hooks, CI, MCP clients, semantic providers, global installation, and workstation adoption can help later; they are not required first-contact steps.
+When `init --apply` or compatibility `attach --apply` writes the operating scaffold, project-local Codex native hooks are kept current by default as optional non-authoritative sensors, not correctness prerequisites.
 
 Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible files plus CLI reports. Start with `AGENTS.md`, `.codex/project-workflow.toml`, and `project/project-state.md`; read `project/implementation-plan.md` only when `plan_status = "active"` or the user asks about plan, phase, or closeout. When a plan is active, `active_phase` and `phase_status` are first-class continuation pointers. `status`/`check` report a compact lifecycle route table for live roots, and `intelligence --focus routes` prints the same read-only route table for the `project/roadmap.md` sequencing route, decision/do-not-revisit records, ADR records, and optional `project/verification/*.md` proof/evidence records. For fuzzy repo, lifecycle, impact, or product-source navigation, start with `dashboard --inspect` or `dashboard --inspect --json` as the cockpit packet, then use `intelligence --query`, optional `adapter --client-config --target mcp-read-projection`, and `rg` or direct file reads for exact verification. Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow, but no Codex skill or generated docs-impact report is required for v1.
 

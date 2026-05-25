@@ -1753,7 +1753,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         ]
     route_write_evidence = route_write_findings("plan-route-write", route_writes, apply=True)
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "plan-refused", f"plan apply failed before all target writes completed: {exc}", DEFAULT_PLAN_REL)]
 
@@ -1914,7 +1914,7 @@ def plan_cancel_apply_findings(inventory: Inventory, request: PlanCancelRequest)
             )
         )
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "plan-cancel-refused", f"plan-cancel apply failed before all target writes completed: {exc}", DEFAULT_PLAN_REL)]
 

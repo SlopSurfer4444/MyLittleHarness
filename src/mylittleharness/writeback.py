@@ -961,7 +961,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
     route_write_evidence = route_write_findings("writeback-route-write", route_writes, apply=True)
     if operations:
         try:
-            cleanup_warnings = apply_file_transaction(operations)
+            cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
         except FileTransactionError as exc:
             return [Finding("error", "writeback-refused", f"writeback failed before all target files were written: {exc}")]
     else:
@@ -1793,7 +1793,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
         operations.append(AtomicFileWrite(target_path, tmp_path, text, backup_path))
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "writeback-refused", f"archive-active-plan failed before all target files were written: {exc}")]
 
@@ -3531,7 +3531,7 @@ def _archive_route_retarget_plans(
     for surface in inventory.present_surfaces:
         if surface.rel_path in skip or surface.rel_path.startswith("project/archive/"):
             continue
-        if surface.memory_route not in {"research", "incubation", "verification", "decisions", "adrs"}:
+        if surface.memory_route not in {"research", "incubation", "verification", "decisions", "adrs", "stable-specs"}:
             continue
         if surface.path.suffix.lower() != ".md" or not surface.frontmatter.has_frontmatter or surface.frontmatter.errors:
             continue
@@ -3846,7 +3846,8 @@ def _apply_state_compaction(
             (
                 AtomicFileWrite(plan.archive_path, archive_tmp, plan.archive_text, archive_backup),
                 AtomicFileWrite(state.path, state_tmp, plan.compacted_state_text, state_backup),
-            )
+            ),
+            root=inventory.root,
         )
     except (FileTransactionError, OSError) as exc:
         refused = StateCompactionPlan("refused", f"auto-compaction failed after state writeback: {exc}", plan.archive_rel_path, plan.archive_path)

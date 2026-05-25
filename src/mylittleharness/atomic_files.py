@@ -29,12 +29,16 @@ class FileTransactionError(OSError):
     pass
 
 
-def apply_file_transaction(operations: Iterable[AtomicFileWrite | AtomicFileDelete]) -> tuple[str, ...]:
+def apply_file_transaction(
+    operations: Iterable[AtomicFileWrite | AtomicFileDelete],
+    *,
+    root: Path | None = None,
+) -> tuple[str, ...]:
     planned = tuple(operations)
     if not planned:
         return ()
 
-    _validate_transaction_paths(planned)
+    _validate_transaction_paths(planned, root=root)
 
     created_dirs: list[Path] = []
     written_tmps: list[Path] = []
@@ -65,7 +69,11 @@ def apply_file_transaction(operations: Iterable[AtomicFileWrite | AtomicFileDele
     return tuple(_cleanup_success_backups(applied))
 
 
-def _validate_transaction_paths(operations: tuple[AtomicFileWrite | AtomicFileDelete, ...]) -> None:
+def _validate_transaction_paths(
+    operations: tuple[AtomicFileWrite | AtomicFileDelete, ...],
+    *,
+    root: Path | None = None,
+) -> None:
     targets = [operation.target_path for operation in operations]
     if len(set(targets)) != len(targets):
         raise FileTransactionError("file transaction target paths must be unique")
@@ -88,6 +96,60 @@ def _validate_transaction_paths(operations: tuple[AtomicFileWrite | AtomicFileDe
                 raise FileTransactionError(f"temporary write path overlaps transaction target or backup: {operation.tmp_path}")
             if operation.tmp_path.exists():
                 raise FileTransactionError(f"temporary write path already exists: {operation.tmp_path}")
+    if root is not None:
+        _validate_transaction_root_paths(operations, root)
+
+
+def _validate_transaction_root_paths(operations: tuple[AtomicFileWrite | AtomicFileDelete, ...], root: Path) -> None:
+    root_path = _absolute_path(root)
+    if root_path.is_symlink():
+        raise FileTransactionError(f"transaction root cannot be a symlink: {root}")
+    root_resolved = root_path.resolve(strict=False)
+    targets = [_validate_path_under_root(operation.target_path, root_path, root_resolved, "target") for operation in operations]
+    backups = [_validate_path_under_root(operation.backup_path, root_path, root_resolved, "backup") for operation in operations]
+    tmps = [
+        _validate_path_under_root(operation.tmp_path, root_path, root_resolved, "temporary")
+        for operation in operations
+        if isinstance(operation, AtomicFileWrite)
+    ]
+    if len(set(targets)) != len(targets):
+        raise FileTransactionError("file transaction target paths must resolve uniquely within the transaction root")
+    if len(set(backups)) != len(backups):
+        raise FileTransactionError("file transaction backup paths must resolve uniquely within the transaction root")
+    if len(set(tmps)) != len(tmps):
+        raise FileTransactionError("file transaction temporary paths must resolve uniquely within the transaction root")
+
+
+def _validate_path_under_root(path: Path, root_path: Path, root_resolved: Path, label: str) -> Path:
+    absolute_path = _absolute_path(path)
+    symlink_path = _first_symlink_prefix(root_path, absolute_path)
+    if symlink_path is not None:
+        raise FileTransactionError(f"file transaction {label} path crosses symlink inside transaction root: {symlink_path}")
+    resolved_path = absolute_path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(root_resolved)
+    except ValueError as exc:
+        raise FileTransactionError(f"file transaction {label} path is outside transaction root: {path}") from exc
+    return resolved_path
+
+
+def _first_symlink_prefix(root_path: Path, path: Path) -> Path | None:
+    try:
+        relative = path.relative_to(root_path)
+    except ValueError:
+        return None
+    current = root_path
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
+def _absolute_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
 
 
 def _rollback_applied_operations(applied: list[_AppliedOperation]) -> list[str]:

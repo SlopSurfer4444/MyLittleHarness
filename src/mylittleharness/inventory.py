@@ -324,6 +324,15 @@ STATE_ASSIGNMENT_KEYS = {
     "projection_status",
     "historical_fallback_root",
 }
+LIVE_ROOT_CLASSIFICATION_KEYS = {
+    "project",
+    "workflow",
+    "operating_mode",
+    "plan_status",
+    "active_plan",
+    "active_phase",
+    "phase_status",
+}
 
 
 def _parse_project_state_assignments(text: str) -> Frontmatter:
@@ -368,9 +377,18 @@ def _classify_root_kind(root: Path, manifest: dict[str, Any], state: Surface) ->
     if _same_path_value(data.get("historical_fallback_root"), root):
         return "fallback_or_archive"
 
-    if manifest.get("workflow") == "workflow-core" and state and state.exists:
+    if manifest.get("workflow") == "workflow-core" and _state_can_classify_live_root(state):
         return "live_operating_root"
     return "ambiguous"
+
+
+def _state_can_classify_live_root(state: Surface | None) -> bool:
+    if state is None or not state.exists:
+        return False
+    frontmatter = state.frontmatter
+    if frontmatter.has_frontmatter and frontmatter.errors:
+        return False
+    return any(key in frontmatter.data for key in LIVE_ROOT_CLASSIFICATION_KEYS)
 
 
 def _docmap_mode_is_lazy(manifest: dict[str, Any]) -> bool:

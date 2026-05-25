@@ -345,10 +345,7 @@ def mcp_read_projection_payload(
             "transport": "stdio",
         },
         "activation": mcp_read_projection_client_config(inventory),
-        "root": {
-            "path": str(inventory.root),
-            "kind": inventory.root_kind,
-        },
+        "root": _root_payload(inventory),
         "tools": list(MCP_TOOL_NAMES),
         "runtime": runtime,
         "rootSelection": root_selection,
@@ -370,11 +367,7 @@ def mcp_read_projection_payload(
             for section_name, section_findings in sections
         ],
         "boundary": {
-            "readOnly": True,
-            "sourceBodiesIncluded": False,
-            "writesFiles": False,
-            "createsAdapterState": False,
-            "authorizesLifecycle": False,
+            **_mcp_tool_boundary(root_selection, source_bodies_included=False, source_body_mode="none"),
             "serveCommand": mcp_read_projection_serve_command(inventory),
             "refreshPolicy": (
                 "tool calls reload the selected root inventory in memory; generated projection artifacts and SQLite indexes "
@@ -669,7 +662,14 @@ def _adapter_findings(inventory: Inventory, *, root_selection: dict[str, object]
             "adapter-target",
             "adapter_id=mcp-read-projection; group=MCP; role=read/projection helper; owner=MyLittleHarness adapter boundary",
         ),
-        Finding("info", "adapter-root", f"input root: {inventory.root}; root kind: {inventory.root_kind}"),
+        Finding(
+            "info",
+            "adapter-root",
+            (
+                f"input root: {inventory.root}; root kind: {inventory.root_kind}; "
+                "classification is coarse routing posture, not lifecycle validity proof"
+            ),
+        ),
         Finding(
             "info",
             "adapter-output-shape",
@@ -702,7 +702,7 @@ def _adapter_findings(inventory: Inventory, *, root_selection: dict[str, object]
             "adapter-mcp-tools",
             (
                 "MCP tools: mylittleharness.read_projection, mylittleharness.read_source, "
-                "mylittleharness.search, mylittleharness.related_or_bundle"
+                "mylittleharness.search, mylittleharness.related_or_bundle; source-body policy is per-tool"
             ),
         ),
         Finding(
@@ -858,7 +858,9 @@ def _generated_input_findings(inventory: Inventory, projection: Projection) -> l
             "adapter-cache-posture",
             (
                 "cache_posture schema=mylittleharness.projection-cache-posture.v1; "
-                f"source_refs={len(posture['source_refs'])}; refresh_by_adapter=false; next_safe={refresh_commands}"
+                f"source_refs={len(posture['source_refs'])}; refresh_by_adapter=false; "
+                "adapter_executes_refresh=false; commands_are_suggestions_only=true; "
+                f"displayed_refresh_commands={refresh_commands}"
             ),
         ),
         _generated_posture("artifacts", artifact_findings),
@@ -1158,6 +1160,7 @@ def _root_selection_payload(inventory: Inventory, default_root: Path | None, req
         "inventoryReloadedPerCall": True,
         "startupRootAvailable": default_root is not None,
         "routerMode": default_root is None,
+        "rootKindIsLifecycleCertification": False,
         "writesFiles": False,
         "authorizesLifecycle": False,
     }
@@ -1571,7 +1574,7 @@ def _mcp_read_source_payload(
         },
         "lines": [{"number": start + offset, "text": line} for offset, line in enumerate(selected)],
         "text": "\n".join(selected),
-        "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=True),
+        "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=True, source_body_mode="bounded-line-slice"),
     }, None
 
 
@@ -1639,7 +1642,7 @@ def _mcp_search_payload(
         "limit": limit,
         "results": results,
         "findings": [_finding_payload(finding) for finding in findings],
-        "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=True),
+        "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=True, source_body_mode="matched-line-snippets"),
     }, None
 
 
@@ -1700,7 +1703,7 @@ def _mcp_related_or_bundle_payload(
         "relationshipNodes": [_relationship_node_payload(node) for node in relationship_nodes],
         "relationshipEdges": [_relationship_edge_payload(edge) for edge in relationship_edges],
         "bundleSources": bundle_sources,
-        "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=False),
+        "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=False, source_body_mode="source-records-only"),
     }, None
 
 
@@ -1819,7 +1822,13 @@ def _search_mode_argument(value: object) -> tuple[str, str | None]:
 
 
 def _root_payload(inventory: Inventory) -> dict[str, object]:
-    return {"path": str(inventory.root), "kind": inventory.root_kind}
+    return {
+        "path": str(inventory.root),
+        "kind": inventory.root_kind,
+        "classificationScope": "coarse-routing-only",
+        "certifiesLifecycleValidity": False,
+        "requiresRouteValidation": True,
+    }
 
 
 def _source_record_payload(source: object) -> dict[str, object]:
@@ -1879,10 +1888,18 @@ def _relationship_edge_payload(edge: object) -> dict[str, object]:
     }
 
 
-def _mcp_tool_boundary(root_selection: dict[str, object], *, source_bodies_included: bool) -> dict[str, object]:
+def _mcp_tool_boundary(
+    root_selection: dict[str, object],
+    *,
+    source_bodies_included: bool,
+    source_body_mode: str | None = None,
+) -> dict[str, object]:
+    mode = source_body_mode or ("source-content" if source_bodies_included else "none")
     return {
         "readOnly": True,
         "sourceBodiesIncluded": source_bodies_included,
+        "sourceBodyMode": mode,
+        "sourceBodyContract": _source_body_contract(mode),
         "sourceBodiesPersisted": False,
         "writesFiles": False,
         "refreshesGeneratedCache": False,
@@ -1891,6 +1908,18 @@ def _mcp_tool_boundary(root_selection: dict[str, object], *, source_bodies_inclu
         "boundedByArguments": True,
         "rootSelection": root_selection,
     }
+
+
+def _source_body_contract(mode: str) -> str:
+    if mode == "none":
+        return "no source bodies or snippets are copied into this payload"
+    if mode == "bounded-line-slice":
+        return "only the requested bounded source line slice is returned"
+    if mode == "matched-line-snippets":
+        return "only matched lines or bounded snippets from source-verified search results are returned"
+    if mode == "source-records-only":
+        return "only source records, links, fan-in, and relationship rows are returned without source bodies"
+    return "source body inclusion is bounded by the tool arguments"
 
 
 def _tool_error_response(request_id: object, text: str) -> dict[str, object]:
