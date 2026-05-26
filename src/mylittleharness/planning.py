@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .atomic_files import AtomicFileDelete, AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .command_discovery import rails_not_cognition_boundary_finding
-from .inventory import Inventory, target_artifact_ownerships
+from .inventory import Inventory, LEGACY_WORKFLOW_MANIFEST_REL, WORKFLOW_MANIFEST_REL, target_artifact_ownerships
 from .lifecycle_focus import sync_current_focus_block
 from .memory_hygiene import (
     ROADMAP_CURRENT_POSTURE_FIELD,
@@ -198,6 +198,7 @@ def render_implementation_plan(
     request: PlanRequest,
     *,
     today: date | None = None,
+    manifest_rel: str = LEGACY_WORKFLOW_MANIFEST_REL,
     source_incubation: str = "",
     slice_contract: RoadmapSliceContract | None = None,
     synthesis_report: RoadmapSynthesisReport | None = None,
@@ -207,7 +208,7 @@ def render_implementation_plan(
     title = request.title or "Implementation Plan"
     objective = request.objective or "Define and verify the requested implementation work."
     plan_id = f"{current_date}-{_safe_slug(title) or 'implementation-plan'}"
-    phases = _generated_phases(slice_contract, synthesis_report, verification_profile, request=request)
+    phases = _generated_phases(slice_contract, synthesis_report, verification_profile, request=request, manifest_rel=manifest_rel)
     active_phase = phases[0].phase_id if phases else DEFAULT_ACTIVE_PHASE
     scaffold_noun = _plan_scaffold_noun(request, slice_contract)
     relationship_frontmatter = _slice_frontmatter(request, slice_contract, source_incubation)
@@ -241,7 +242,7 @@ def render_implementation_plan(
         f"{synthesis_section}"
         "\n## Authority Inputs\n\n"
         "- `AGENTS.md`\n"
-        "- `.codex/project-workflow.toml`\n"
+        f"- `{manifest_rel}`\n"
         "- `project/project-state.md`\n"
         f"{roadmap_authority_input}"
         "- `project/specs/workflow/workflow-plan-synthesis-spec.md`\n"
@@ -538,15 +539,16 @@ def _generated_phases(
     verification_profile: VerificationGateProfile | None = None,
     *,
     request: PlanRequest | None = None,
+    manifest_rel: str = LEGACY_WORKFLOW_MANIFEST_REL,
 ) -> tuple[GeneratedPlanPhase, ...]:
     if report is None:
         if _is_scoped_interrupt_context(request, slice_contract):
-            return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile)
+            return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile, manifest_rel=manifest_rel)
         return (_default_generated_phase(),)
     if _is_non_implementation_contract(slice_contract):
-        return _non_implementation_generated_phases(slice_contract, report)
+        return _non_implementation_generated_phases(slice_contract, report, manifest_rel=manifest_rel)
     if _is_scoped_interrupt_context(request, slice_contract):
-        return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile)
+        return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile, manifest_rel=manifest_rel)
 
     targets = tuple(report.target_artifacts)
     groups = _artifact_groups(targets)
@@ -554,7 +556,7 @@ def _generated_phases(
         _dedupe_nonempty(
             (
                 "AGENTS.md",
-                ".codex/project-workflow.toml",
+                manifest_rel,
                 "project/project-state.md",
                 "project/roadmap.md",
                 *report.related_specs,
@@ -642,6 +644,8 @@ def _scoped_interrupt_generated_phases(
     slice_contract: RoadmapSliceContract | None,
     report: RoadmapSynthesisReport | None,
     verification_profile: VerificationGateProfile | None = None,
+    *,
+    manifest_rel: str = LEGACY_WORKFLOW_MANIFEST_REL,
 ) -> tuple[GeneratedPlanPhase, ...]:
     targets = tuple(report.target_artifacts) if report else ("declare exact interrupt source/test/docs files before mutation",)
     groups = _artifact_groups(targets)
@@ -649,7 +653,7 @@ def _scoped_interrupt_generated_phases(
         _dedupe_nonempty(
             (
                 "AGENTS.md",
-                ".codex/project-workflow.toml",
+                manifest_rel,
                 DEFAULT_STATE_REL,
                 ROADMAP_REL if slice_contract or (request and request.roadmap_item) else "",
                 *(report.related_specs if report else ()),
@@ -726,6 +730,8 @@ def _scoped_interrupt_generated_phases(
 def _non_implementation_generated_phases(
     slice_contract: RoadmapSliceContract | None,
     report: RoadmapSynthesisReport,
+    *,
+    manifest_rel: str = LEGACY_WORKFLOW_MANIFEST_REL,
 ) -> tuple[GeneratedPlanPhase, ...]:
     deliverable_class = _contract_deliverable_class(slice_contract)
     phase_1_id, phase_2_id, phase_3_id = _non_implementation_phase_ids(deliverable_class)
@@ -734,7 +740,7 @@ def _non_implementation_generated_phases(
         _dedupe_nonempty(
             (
                 "AGENTS.md",
-                ".codex/project-workflow.toml",
+                manifest_rel,
                 "project/project-state.md",
                 "project/roadmap.md",
                 *report.related_specs,
@@ -1955,11 +1961,18 @@ def _render_plan_text_for_request(inventory: Inventory, request: PlanRequest) ->
     verification_profile = _repo_verification_gate_profile(inventory, request, synthesis_report, slice_contract)
     return render_implementation_plan(
         request,
+        manifest_rel=_selected_manifest_rel(inventory),
         source_incubation=source_incubation,
         slice_contract=slice_contract,
         synthesis_report=synthesis_report,
         verification_profile=verification_profile,
     )
+
+
+def _selected_manifest_rel(inventory: Inventory) -> str:
+    if inventory.manifest_surface:
+        return inventory.manifest_surface.rel_path
+    return WORKFLOW_MANIFEST_REL
 
 
 def _plan_cancel_preflight_errors(inventory: Inventory, request: PlanCancelRequest, *, apply: bool) -> list[Finding]:

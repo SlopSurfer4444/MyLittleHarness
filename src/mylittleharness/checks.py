@@ -23,8 +23,10 @@ from .evidence import lifecycle_mutation_provenance_findings
 from .inventory import (
     EXPECTED_SPEC_NAMES,
     Inventory,
+    LEGACY_WORKFLOW_MANIFEST_REL,
     LinkRef,
     Surface,
+    WORKFLOW_MANIFEST_REL,
     load_inventory,
     target_artifact_ownerships,
 )
@@ -230,7 +232,8 @@ RULE_CONTEXT_PRIMARY_SURFACES = (
     "AGENTS.md",
     "README.md",
     ".agents/docmap.yaml",
-    ".codex/project-workflow.toml",
+    WORKFLOW_MANIFEST_REL,
+    LEGACY_WORKFLOW_MANIFEST_REL,
     "project/project-state.md",
 )
 REMAINDER_DRIFT_SURFACE_ROLES = {
@@ -2420,7 +2423,8 @@ WORKFLOW_ATTACH_DIRECTORIES = (
 )
 
 DETACH_PRESERVED_AUTHORITY_PATHS = (
-    ".codex/project-workflow.toml",
+    WORKFLOW_MANIFEST_REL,
+    LEGACY_WORKFLOW_MANIFEST_REL,
     "project/project-state.md",
     ".agents/docmap.yaml",
     "project/specs/workflow/",
@@ -2495,11 +2499,11 @@ def _detach_root_posture_findings(inventory: Inventory) -> list[Finding]:
 
     manifest = inventory.manifest_surface
     if manifest is None or not manifest.exists:
-        findings.append(Finding("warn", "detach-refused", "workflow manifest is missing; future detach apply would be refused", ".codex/project-workflow.toml"))
+        findings.append(Finding("warn", "detach-refused", "workflow manifest is missing; future detach apply would be refused", _selected_manifest_rel(inventory)))
     elif manifest.read_error:
         findings.append(Finding("warn", "detach-refused", f"workflow manifest is unreadable: {manifest.read_error}", manifest.rel_path))
     for error in inventory.manifest_errors:
-        findings.append(Finding("warn", "detach-refused", f"workflow manifest is malformed: {error}", manifest.rel_path if manifest else ".codex/project-workflow.toml"))
+        findings.append(Finding("warn", "detach-refused", f"workflow manifest is malformed: {error}", manifest.rel_path if manifest else _selected_manifest_rel(inventory)))
 
     state = inventory.state
     if state is None or not state.exists:
@@ -2642,6 +2646,7 @@ def _detach_path_conflict_findings(inventory: Inventory, severity: str = "warn")
     checks = {
         ".codex": "dir",
         ".codex/project-workflow.toml": "file",
+        ".mylittleharness/project-workflow.toml": "file",
         "project": "dir",
         "project/project-state.md": "file",
         ".agents": "dir",
@@ -2688,13 +2693,13 @@ def _detach_apply_refusal_findings(inventory: Inventory) -> list[Finding]:
 
     manifest = inventory.manifest_surface
     if manifest is None or not manifest.exists:
-        findings.append(Finding("error", "detach-refused", "workflow manifest is missing; detach --apply is refused", ".codex/project-workflow.toml"))
+        findings.append(Finding("error", "detach-refused", "workflow manifest is missing; detach --apply is refused", _selected_manifest_rel(inventory)))
     elif manifest.read_error:
         findings.append(Finding("error", "detach-refused", f"workflow manifest is unreadable: {manifest.read_error}", manifest.rel_path))
     for error in inventory.manifest_errors:
-        findings.append(Finding("error", "detach-refused", f"workflow manifest is malformed: {error}", manifest.rel_path if manifest else ".codex/project-workflow.toml"))
+        findings.append(Finding("error", "detach-refused", f"workflow manifest is malformed: {error}", manifest.rel_path if manifest else _selected_manifest_rel(inventory)))
     if inventory.manifest and inventory.manifest.get("workflow") != "workflow-core":
-        findings.append(Finding("error", "detach-refused", "detach --apply requires manifest workflow = workflow-core", manifest.rel_path if manifest else ".codex/project-workflow.toml"))
+        findings.append(Finding("error", "detach-refused", "detach --apply requires manifest workflow = workflow-core", manifest.rel_path if manifest else _selected_manifest_rel(inventory)))
 
     state = inventory.state
     if state is None or not state.exists:
@@ -6103,7 +6108,7 @@ def _docmap_create_route_entries(inventory: Inventory) -> list[str]:
     expected = [
         "README.md",
         "AGENTS.md",
-        ".codex/project-workflow.toml",
+        _selected_manifest_rel(inventory),
         "project/project-state.md",
         "project/specs/workflow/",
     ]
@@ -7520,6 +7525,8 @@ def _manifest_findings(inventory: Inventory) -> list[Finding]:
     manifest = inventory.manifest_surface
     if not manifest or not manifest.exists:
         return findings
+    for warning in inventory.manifest_warnings:
+        findings.append(Finding("warn", "manifest-resolution-drift", warning, manifest.rel_path))
     for error in inventory.manifest_errors:
         findings.append(Finding("error", "manifest-parse", error, manifest.rel_path))
     workflow = inventory.manifest.get("workflow") if isinstance(inventory.manifest, dict) else None
@@ -7531,6 +7538,12 @@ def _manifest_findings(inventory: Inventory) -> list[Finding]:
     if memory.get("plan_file", "project/implementation-plan.md") != "project/implementation-plan.md":
         findings.append(Finding("warn", "manifest-plan-file", "manifest plan_file differs from project/implementation-plan.md", manifest.rel_path))
     return findings
+
+
+def _selected_manifest_rel(inventory: Inventory) -> str:
+    if inventory.manifest_surface:
+        return inventory.manifest_surface.rel_path
+    return WORKFLOW_MANIFEST_REL
 
 
 def _state_findings(inventory: Inventory) -> list[Finding]:
@@ -11123,7 +11136,7 @@ def _docmap_gap_findings(inventory: Inventory) -> list[Finding]:
     expected = [
         "README.md",
         "AGENTS.md",
-        ".codex/project-workflow.toml",
+        _selected_manifest_rel(inventory),
         "project/project-state.md",
         "project/specs/workflow/",
     ]
@@ -11229,7 +11242,7 @@ def _start_path_surfaces(inventory: Inventory) -> list[Surface]:
         "README.md",
         "AGENTS.md",
         ".agents/docmap.yaml",
-        ".codex/project-workflow.toml",
+        _selected_manifest_rel(inventory),
         "docs/README.md",
         "docs/architecture/product-architecture.md",
         "docs/architecture/layer-model.md",

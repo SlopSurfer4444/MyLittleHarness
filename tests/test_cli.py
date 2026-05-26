@@ -39,7 +39,13 @@ from mylittleharness.checks import (
 )
 from mylittleharness.cli import main
 from mylittleharness.context_memory import build_context_memory_capsule
-from mylittleharness.inventory import EXPECTED_SPEC_NAMES, Surface, load_inventory
+from mylittleharness.inventory import (
+    EXPECTED_SPEC_NAMES,
+    LEGACY_WORKFLOW_MANIFEST_REL,
+    WORKFLOW_MANIFEST_REL,
+    Surface,
+    load_inventory,
+)
 from mylittleharness.models import Finding
 from mylittleharness.parsing import parse_frontmatter
 from mylittleharness.projection_artifacts import (
@@ -210,6 +216,75 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual("ambiguous", inventory.root_kind)
             self.assertTrue(inventory.state.frontmatter.errors)
+
+    def test_inventory_resolves_vendor_neutral_manifest_with_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            legacy_only = make_live_root(base / "legacy-only")
+            legacy_inventory = load_inventory(legacy_only)
+            self.assertEqual(LEGACY_WORKFLOW_MANIFEST_REL, legacy_inventory.manifest_surface.rel_path)
+            self.assertEqual("live_operating_root", legacy_inventory.root_kind)
+            self.assertEqual([], legacy_inventory.manifest_warnings)
+
+            neutral_only = make_live_root(base / "neutral-only")
+            write_neutral_manifest_from_legacy(neutral_only, remove_legacy=True)
+            neutral_inventory = load_inventory(neutral_only)
+            self.assertEqual(WORKFLOW_MANIFEST_REL, neutral_inventory.manifest_surface.rel_path)
+            self.assertEqual("live_operating_root", neutral_inventory.root_kind)
+            self.assertEqual([], neutral_inventory.manifest_warnings)
+
+            identical = make_live_root(base / "identical")
+            write_neutral_manifest_from_legacy(identical)
+            identical_inventory = load_inventory(identical)
+            self.assertEqual(WORKFLOW_MANIFEST_REL, identical_inventory.manifest_surface.rel_path)
+            self.assertEqual([], identical_inventory.manifest_warnings)
+
+            conflict = make_live_root(base / "conflict")
+            write_neutral_manifest_from_legacy(conflict)
+            (conflict / LEGACY_WORKFLOW_MANIFEST_REL).write_text(
+                'workflow = "workflow-core"\nversion = 1\n\n[memory]\nstate_file = "project/other-state.md"\n',
+                encoding="utf-8",
+            )
+            conflict_inventory = load_inventory(conflict)
+            self.assertEqual(WORKFLOW_MANIFEST_REL, conflict_inventory.manifest_surface.rel_path)
+            self.assertEqual("project/project-state.md", conflict_inventory.state.rel_path)
+            self.assertEqual("live_operating_root", conflict_inventory.root_kind)
+            self.assertEqual(1, len(conflict_inventory.manifest_warnings))
+            self.assertIn("are present and differ", conflict_inventory.manifest_warnings[0])
+
+            missing = make_live_root(base / "missing")
+            (missing / LEGACY_WORKFLOW_MANIFEST_REL).unlink()
+            missing_inventory = load_inventory(missing)
+            self.assertEqual(WORKFLOW_MANIFEST_REL, missing_inventory.manifest_surface.rel_path)
+            self.assertFalse(missing_inventory.manifest_surface.exists)
+            self.assertTrue(missing_inventory.manifest_surface.required)
+            self.assertEqual("ambiguous", missing_inventory.root_kind)
+
+    def test_check_reports_dual_manifest_drift_without_breaking_legacy_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            legacy_root = make_live_root(base / "legacy")
+            legacy_output = io.StringIO()
+            with redirect_stdout(legacy_output):
+                legacy_code = main(["--root", str(legacy_root), "check"])
+            self.assertEqual(legacy_code, 0)
+            self.assertNotIn("missing required surface: .mylittleharness/project-workflow.toml", legacy_output.getvalue())
+
+            drift_root = make_live_root(base / "drift")
+            write_neutral_manifest_from_legacy(drift_root)
+            (drift_root / LEGACY_WORKFLOW_MANIFEST_REL).write_text(
+                'workflow = "workflow-core"\nversion = 1\n\n[policy]\ndocmap_mode = "lazy"\n',
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(drift_root), "check"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertIn("manifest-resolution-drift", rendered)
+            self.assertIn("using .mylittleharness/project-workflow.toml", rendered)
 
     def test_status_report_sections_and_zero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -28318,6 +28393,15 @@ def make_live_root(root: Path) -> Path:
     for name in EXPECTED_SPEC_NAMES:
         (root / "project/specs/workflow" / name).write_text(workflow_spec_fixture_text(name), encoding="utf-8")
     return root
+
+
+def write_neutral_manifest_from_legacy(root: Path, *, remove_legacy: bool = False) -> None:
+    neutral_path = root / WORKFLOW_MANIFEST_REL
+    legacy_path = root / LEGACY_WORKFLOW_MANIFEST_REL
+    neutral_path.parent.mkdir(parents=True, exist_ok=True)
+    neutral_path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
+    if remove_legacy:
+        legacy_path.unlink()
 
 
 def make_central_mlh_dev_root(root: Path) -> Path:

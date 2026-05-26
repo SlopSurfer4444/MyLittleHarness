@@ -22,11 +22,8 @@ DOCS_ROUTE_PREFIX = "docs/"
 STATE_ROUTE_REL = PROJECT_ROUTE_PREFIX + "project-state.md"
 ROADMAP_ROUTE_REL = PROJECT_ROUTE_PREFIX + "roadmap.md"
 PLAN_ROUTE_REL = PROJECT_ROUTE_PREFIX + "implementation-plan.md"
-WORKFLOW_MANIFEST_REL = ".codex/" + "project-workflow.toml"
-
 CORE_SOURCE_REFS = (
     "AGENTS.md",
-    WORKFLOW_MANIFEST_REL,
     STATE_ROUTE_REL,
     ROADMAP_ROUTE_REL,
 )
@@ -209,6 +206,9 @@ def build_context_memory_capsule(inventory: Inventory, *, trigger: str, now: str
 
 def _source_ref_rows(inventory: Inventory) -> list[dict[str, object]]:
     rels = list(CORE_SOURCE_REFS)
+    if inventory.manifest_surface:
+        rels.append(inventory.manifest_surface.rel_path)
+    rels.extend(surface.rel_path for surface in inventory.manifest_candidate_surfaces if surface.exists)
     if inventory.state and inventory.state.exists:
         active_plan = str(inventory.state.frontmatter.data.get("active_plan") or "").strip()
         if active_plan:

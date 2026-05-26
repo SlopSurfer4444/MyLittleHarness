@@ -25,6 +25,9 @@ EXPECTED_SPEC_NAMES = (
     "workflow-rollout-slices-spec.md",
     "workflow-capability-roadmap-spec.md",
 )
+WORKFLOW_MANIFEST_REL = ".mylittleharness/project-workflow.toml"
+LEGACY_WORKFLOW_MANIFEST_REL = ".codex/project-workflow.toml"
+WORKFLOW_MANIFEST_CANDIDATE_RELS = (WORKFLOW_MANIFEST_REL, LEGACY_WORKFLOW_MANIFEST_REL)
 
 
 class RootLoadError(Exception):
@@ -92,9 +95,11 @@ class Inventory:
     surfaces: list[Surface]
     manifest: dict[str, Any]
     manifest_errors: list[str]
+    manifest_warnings: list[str]
     surface_by_rel: dict[str, Surface]
     state: Surface | None
     manifest_surface: Surface | None
+    manifest_candidate_surfaces: tuple[Surface, ...]
     active_plan_surface: Surface | None
 
     @property
@@ -121,6 +126,7 @@ class TargetArtifactOwnership:
 PRODUCT_SOURCE_TARGET_PREFIXES = ("build_backend/", "docs/", "src/", "tests/")
 PRODUCT_SOURCE_TARGET_NAMES = {"AGENTS.md", "README.md", "pyproject.toml", "uv.lock"}
 OPERATING_MEMORY_TARGET_PREFIXES = (".agents/", ".codex/", "project/")
+OPERATING_MEMORY_TARGET_NAMES = {WORKFLOW_MANIFEST_REL}
 GENERATED_CACHE_TARGET_PREFIXES = (".mylittleharness/generated/",)
 ARCHIVE_EVIDENCE_TARGET_PREFIXES = ("project/archive/",)
 
@@ -137,7 +143,7 @@ def target_artifact_ownership(inventory: Inventory, artifact: str) -> TargetArti
         return TargetArtifactOwnership(rel, "archive-evidence", "operating-root", "historical evidence route; not a live product write target")
     if rel.startswith(GENERATED_CACHE_TARGET_PREFIXES):
         return TargetArtifactOwnership(rel, "generated-cache", "generated-output", "disposable generated cache; source files remain authority")
-    if rel.startswith(OPERATING_MEMORY_TARGET_PREFIXES):
+    if rel in OPERATING_MEMORY_TARGET_NAMES or rel.startswith(OPERATING_MEMORY_TARGET_PREFIXES):
         return TargetArtifactOwnership(rel, "operating-memory-route", "operating-root", "MLH operating memory route owned by the serviced root")
     if _is_product_source_target_artifact(rel):
         if inventory.root_kind == "product_source_fixture":
@@ -211,8 +217,11 @@ def load_inventory(root: Path | str) -> Inventory:
         surfaces[normalized] = surface
         return surface
 
-    manifest_surface = add(".codex/project-workflow.toml", "manifest", True)
+    manifest_candidates = tuple(add(rel_path, "manifest", False) for rel_path in WORKFLOW_MANIFEST_CANDIDATE_RELS)
+    manifest_surface = _select_manifest_surface(manifest_candidates)
+    manifest_surface.required = True
     manifest, manifest_errors = _parse_manifest(manifest_surface)
+    manifest_warnings = _manifest_resolution_warnings(manifest_candidates, manifest_surface)
     state_rel = manifest.get("memory", {}).get("state_file", "project/project-state.md") if manifest else "project/project-state.md"
     plan_rel = manifest.get("memory", {}).get("plan_file", "project/implementation-plan.md") if manifest else "project/implementation-plan.md"
 
@@ -257,11 +266,46 @@ def load_inventory(root: Path | str) -> Inventory:
         surfaces=ordered,
         manifest=manifest,
         manifest_errors=manifest_errors,
+        manifest_warnings=manifest_warnings,
         surface_by_rel={surface.rel_path: surface for surface in ordered},
         state=surfaces.get(state_rel.replace("\\", "/")),
         manifest_surface=manifest_surface,
+        manifest_candidate_surfaces=manifest_candidates,
         active_plan_surface=active_plan_surface,
     )
+
+
+def _select_manifest_surface(candidates: tuple[Surface, ...]) -> Surface:
+    for surface in candidates:
+        if surface.exists:
+            return surface
+    return candidates[0]
+
+
+def _manifest_resolution_warnings(candidates: tuple[Surface, ...], selected: Surface) -> list[str]:
+    warnings: list[str] = []
+    by_rel = {surface.rel_path: surface for surface in candidates}
+    neutral = by_rel.get(WORKFLOW_MANIFEST_REL)
+    legacy = by_rel.get(LEGACY_WORKFLOW_MANIFEST_REL)
+    if not neutral or not legacy or not neutral.exists or not legacy.exists:
+        return warnings
+    if selected.rel_path != WORKFLOW_MANIFEST_REL:
+        return warnings
+    if neutral.read_error or legacy.read_error:
+        warnings.append(
+            (
+                f"both {WORKFLOW_MANIFEST_REL} and {LEGACY_WORKFLOW_MANIFEST_REL} are present; "
+                "using the neutral manifest, but one candidate could not be read cleanly"
+            )
+        )
+    elif neutral.content != legacy.content:
+        warnings.append(
+            (
+                f"both {WORKFLOW_MANIFEST_REL} and {LEGACY_WORKFLOW_MANIFEST_REL} are present and differ; "
+                f"using {WORKFLOW_MANIFEST_REL}"
+            )
+        )
+    return warnings
 
 
 def _read_surface(root: Path, rel_path: str, role: str, required: bool, path: Path) -> Surface:

@@ -68,7 +68,7 @@ def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Findi
         "root": str(inventory.root),
         "root_kind": inventory.root_kind,
         "read_only": True,
-        "source_refs": _dashboard_source_refs(sections),
+        "source_refs": _dashboard_source_refs(inventory, sections),
         "lifecycle": _lifecycle_payload(inventory),
         "roadmap": _roadmap_payload(inventory),
         "mlhd": mlhd_freshness_payload(inventory),
@@ -402,6 +402,7 @@ def _value(data: dict[str, object], key: str) -> str:
 
 def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
     data = _state_data(inventory)
+    manifest_rel = _selected_manifest_rel(inventory)
     adoption = _accelerator_adoption_payload(inventory)
     mcp_tool_coverage = _mcp_tool_coverage_payload()
     exact_verification = _exact_verification_payload()
@@ -411,14 +412,14 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
         "schema": "mylittleharness.dashboard-agent-packet.v1",
         "source_refs": [
             "AGENTS.md",
-            ".codex/project-workflow.toml",
+            manifest_rel,
             "project/project-state.md",
             "project/roadmap.md",
             "project/implementation-plan.md",
         ],
         "readOrder": [
             "AGENTS.md",
-            ".codex/project-workflow.toml",
+            manifest_rel,
             "project/project-state.md",
             "project/roadmap.md",
             "project/implementation-plan.md when plan_status is active",
@@ -964,10 +965,10 @@ def _mlhd_freshness_findings(inventory: Inventory, code_prefix: str = "dashboard
     ]
 
 
-def _dashboard_source_refs(sections: list[tuple[str, list[Finding]]]) -> list[str]:
+def _dashboard_source_refs(inventory: Inventory, sections: list[tuple[str, list[Finding]]]) -> list[str]:
     refs = {
         "AGENTS.md",
-        ".codex/project-workflow.toml",
+        _selected_manifest_rel(inventory),
         "project/project-state.md",
         "project/roadmap.md",
     }
@@ -976,6 +977,12 @@ def _dashboard_source_refs(sections: list[tuple[str, list[Finding]]]) -> list[st
             if finding.source:
                 refs.add(str(finding.source))
     return sorted(refs)
+
+
+def _selected_manifest_rel(inventory: Inventory) -> str:
+    if inventory.manifest_surface:
+        return inventory.manifest_surface.rel_path
+    return ".mylittleharness/project-workflow.toml"
 
 
 def _next_legal_dry_run_payload(inventory: Inventory) -> dict[str, object]:

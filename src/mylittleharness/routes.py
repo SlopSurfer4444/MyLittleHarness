@@ -142,7 +142,7 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
 SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
     MemoryRoute(
         "operating-guardrails",
-        "AGENTS.md; .codex/project-workflow.toml",
+        "AGENTS.md; .mylittleharness/project-workflow.toml; .codex/project-workflow.toml",
         "operator contract and workflow manifest",
         "always",
         "authority",
@@ -754,6 +754,7 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
 
     exact = {
         ".agents/docmap.yaml": "docs-routing",
+        ".mylittleharness/project-workflow.toml": "operating-guardrails",
         ".codex/project-workflow.toml": "operating-guardrails",
         "agents.md": "operating-guardrails",
         "readme.md": "orientation",
