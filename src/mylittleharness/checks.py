@@ -7135,6 +7135,7 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
         DOCMAP_REPAIR_CLASS,
         STATE_FRONTMATTER_REPAIR_CLASS,
         LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS,
+        LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS,
         SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS,
     }:
         findings.append(Finding("info", "snapshot-repair-class", f"repair class: {repair_class}", f"{snapshot_rel}/snapshot.json"))
@@ -7195,7 +7196,11 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
             )
 
     planned_frontmatter_keys_by_path = metadata.get("planned_frontmatter_keys_by_path")
-    if repair_class in {LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS, SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS}:
+    if repair_class in {
+        LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS,
+        LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS,
+        SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS,
+    }:
         if _is_frontmatter_keys_by_path(planned_frontmatter_keys_by_path):
             key_summary = "; ".join(
                 f"{path}: {', '.join(keys)}" for path, keys in sorted(planned_frontmatter_keys_by_path.items())
@@ -10447,7 +10452,7 @@ def _route_reference_target_state(inventory: Inventory, record: RouteReferenceRe
         return "external_non_file", target
     rel_path = _route_reference_root_relative_target(inventory, target)
     if rel_path is None:
-        return "external_non_file", target
+        return ("unsafe", target) if _is_absolute_path(target) else ("external_non_file", target)
     if not rel_path:
         return "skip", target
     if _route_metadata_path_is_unsafe(rel_path):
@@ -10995,7 +11000,7 @@ def _normalize_route_metadata_path(value: str) -> str:
 
 
 def _route_metadata_value_is_path_like(value: str) -> bool:
-    if not value or any(separator in value for separator in (";", "|")):
+    if not value:
         return False
     return (
         "/" in value
@@ -11008,6 +11013,8 @@ def _route_metadata_value_is_path_like(value: str) -> bool:
 
 def _route_metadata_path_is_unsafe(rel_path: str) -> bool:
     if not rel_path or rel_path.startswith("/") or _is_absolute_path(rel_path):
+        return True
+    if any(separator in rel_path for separator in (";", "|")):
         return True
     return any(part in {".", ".."} for part in rel_path.split("/"))
 

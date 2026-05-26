@@ -2651,6 +2651,12 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["roadmap dry-run reported the planned item mutation without writing files."]
         return ["roadmap apply updated only the declared roadmap route and any explicitly owned relationship metadata."]
     if command == "adapter":
+        if any(finding.code == "adapter-codex-config-apply-refused" for finding in findings):
+            return ["adapter install apply was refused before writing Codex MCP config or project-local native hook files."]
+        if any(finding.code == "adapter-codex-config-apply-written" for finding in findings):
+            return ["adapter install apply wrote the reviewed Codex MCP config mount and project-local Codex native hook adapter; lifecycle, Git, provider, product diff, and cache authority remain unchanged."]
+        if any(finding.code == "adapter-codex-config-apply-unchanged" for finding in findings):
+            return ["adapter install apply found the Codex MCP config already mounted and kept project-local Codex native hook posture idempotent; lifecycle, Git, provider, product diff, and cache authority remain unchanged."]
         if any(finding.severity == "warn" for finding in findings):
             return ["Use adapter findings as optional read/projection input; repo files and the generic CLI remain authoritative."]
         return ["adapter inspection completed as a terminal-only read-only report; it did not install MCP tooling, write adapter state, or approve lifecycle decisions."]
@@ -2667,8 +2673,12 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["Use preflight findings as optional warning inputs; source files, observed verification, and operator decisions remain authority."]
         return ["preflight completed as a terminal-only optional report; it did not install hooks, add CI, write reports, or approve lifecycle decisions."]
     if command == "hooks":
-        if any(finding.code == "hooks-codex-adapter-apply-written" for finding in findings):
+        if any(finding.code in {"hooks-codex-adapter-refused", "hooks-native-adapter-refused"} for finding in findings):
+            return ["hooks adapter apply was refused before writing project-local hook adapter files; rerun the matching dry-run after fixing the reported posture."]
+        if any(finding.code in {"hooks-codex-adapter-apply-written", "hooks-codex-adapter-apply-unchanged"} for finding in findings):
             return ["hooks adapter apply installed only the project-local Codex native event adapter; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
+        if any(finding.code in {"hooks-native-adapter-apply-written", "hooks-native-adapter-apply-unchanged"} for finding in findings):
+            return ["hooks adapter apply installed only the project-local native event adapter for the selected client; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
         if any(finding.code == "hooks-install-written" for finding in findings):
             return ["hooks apply installed only the selected warning-only shim; hook output remains advisory and cannot approve lifecycle, archive, roadmap, staging, commit, push, or release decisions."]
         if any(finding.code == "hooks-install-refused" for finding in findings):

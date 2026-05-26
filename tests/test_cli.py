@@ -29,9 +29,12 @@ from mylittleharness import atomic_files, claims
 from mylittleharness.adapter import serve_mcp_read_projection
 from mylittleharness.checks import (
     WORKFLOW_ATTACH_DIRECTORIES,
+    RouteReferenceRecord,
     _active_plan_covered_roadmap_scope_findings,
     _active_plan_scoped_interrupt_contract_findings,
     _lifecycle_frontmatter_atomic_write,
+    _route_reference_target_state,
+    resolve_link,
     validation_findings,
 )
 from mylittleharness.cli import main
@@ -49,7 +52,7 @@ from mylittleharness.projection_artifacts import (
 from mylittleharness.projection_index import INDEX_REL_PATH
 from mylittleharness.reporting import next_safe_routes_for_report, render_report
 from mylittleharness.root_boundary import first_symlink_prefix, path_resolves_within_root, source_path_boundary_violation
-from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrailerParseResult
+from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrailerParseResult, product_diff_write_scope_findings
 
 
 class CliTests(unittest.TestCase):
@@ -533,6 +536,8 @@ class CliTests(unittest.TestCase):
                 "human_gate_reason",
                 "allowed_decisions",
                 "advisory",
+                "finding_advisory",
+                "route_advisory",
                 "human_gate",
             ):
                 self.assertIn(key, finding)
@@ -622,6 +627,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("route-manifest-boundary", finding_codes)
             self.assertIn("agent-role-profile-entry", finding_codes)
             self.assertIn("agent-role-manifest-boundary", finding_codes)
+            state_finding = next(finding for finding in payload["findings"] if finding["route_id"] == "state")
+            self.assertTrue(state_finding["finding_advisory"])
+            self.assertFalse(state_finding["route_advisory"])
 
     def test_manifest_governance_docs_keep_roles_protocol_only(self) -> None:
         metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
@@ -1937,6 +1945,7 @@ class CliTests(unittest.TestCase):
                 "---\n"
                 'status: "teleported"\n'
                 'archived_to: "project/archive/reference/research/missing.md"\n'
+                'related_research: "project/research/bad.md; echo BAD"\n'
                 "---\n"
                 "# Bad\n",
                 encoding="utf-8",
@@ -1956,6 +1965,8 @@ class CliTests(unittest.TestCase):
                     self.assertIn("advisory only, no lifecycle approval", rendered)
                     self.assertIn("route-metadata-missing-target", rendered)
                     self.assertIn("route-metadata-authority", rendered)
+                    self.assertIn("route-metadata-path", rendered)
+                    self.assertIn("project/research/bad.md; echo BAD", rendered)
 
     def test_check_reports_explicit_route_lifecycle_states_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3096,6 +3107,45 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("tests/test_cli.py: 463 passed", rendered)
             self.assertIn("route-reference-boundary", rendered)
             self.assertIn("cannot approve repair, archive recreation", rendered)
+
+    def test_check_focus_route_references_reports_absolute_local_paths_outside_root_as_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "root")
+            outside = Path(tmp) / "outside" / "evidence.md"
+            outside.parent.mkdir()
+            outside.write_text("# Outside\n", encoding="utf-8")
+            outside_ref = outside.as_posix()
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "absolute-reference-test"\n'
+                'title: "Absolute Reference Test"\n'
+                "target_artifacts:\n"
+                f'  - "{outside_ref}"\n'
+                "---\n"
+                "# Absolute Reference Test\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "route-references"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-reference-unsafe-target", rendered)
+            self.assertIn(outside_ref, rendered)
+            inventory = load_inventory(root)
+            record = RouteReferenceRecord(
+                target=outside_ref,
+                source="project/implementation-plan.md",
+                line=5,
+                owner="absolute-reference-test",
+                field="target_artifacts",
+            )
+            self.assertEqual(("unsafe", outside_ref), _route_reference_target_state(inventory, record))
+            self.assertEqual("unsafe", resolve_link(root, outside_ref, "project/implementation-plan.md").kind)
 
     def test_check_focus_route_references_demotes_inactive_and_archived_noise(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9572,6 +9622,44 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("writeback-product-diff-write-scope-disclosed", rendered)
             self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
+
+    def test_product_diff_disclosure_requires_every_out_of_scope_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            changed = (
+                VcsChangedPath("M", "src/allowed.py"),
+                VcsChangedPath("M", "docs/out.md"),
+                VcsChangedPath("M", "docs/second.md"),
+            )
+            posture = VcsPosture(
+                root=product_root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                top_level=str(product_root),
+                changed_count=len(changed),
+                changed_samples=changed,
+                changed_paths=changed,
+            )
+            closeout = {
+                "residual_risk": "Out-of-scope product dirty diff docs/out.md remains unaccepted and outside this slice.",
+                "state_writeback": "Implemented product-diff-scope-gate in src/allowed.py",
+            }
+
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture):
+                findings = product_diff_write_scope_findings(
+                    load_inventory(root),
+                    closeout,
+                    completion_reason="writeback closeout",
+                    apply=True,
+                    code_prefix="writeback",
+                )
+
+            self.assertEqual(1, len(findings))
+            self.assertEqual("error", findings[0].severity)
+            self.assertEqual("writeback-product-diff-write-scope-blocked", findings[0].code)
+            self.assertIn("docs/out.md", findings[0].message)
+            self.assertIn("docs/second.md", findings[0].message)
 
     def test_writeback_partial_closeout_refuses_unkeyed_prior_facts_for_active_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18883,6 +18971,14 @@ class CliTests(unittest.TestCase):
                 rendered,
             )
             self.assertIn(
+                "Ceremony: cost=review batch preview; guarantee=read-only scan; token-bound scan apply requires the reported proposal token",
+                rendered,
+            )
+            self.assertIn(
+                "What changed: No repository files were changed; batch cleanup remains advisory until the reviewed token-bound scan apply succeeds.",
+                rendered,
+            )
+            self.assertIn(
                 "What remains: Cleanup candidates remain advisory until the reviewed token-bound scan apply succeeds; stale source or link hashes require a fresh dry-run scan.",
                 rendered,
             )
@@ -21373,6 +21469,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             rendered = apply_output.getvalue()
             self.assertIn("hooks-codex-adapter-apply-written", rendered)
+            self.assertIn("hooks adapter apply installed only the project-local Codex native event adapter", rendered)
+            self.assertNotIn("without installing hooks", rendered)
             self.assertIn("not correctness prerequisites", rendered)
             hooks_path = root / ".codex/hooks.json"
             script_path = root / ".codex/hooks/mylittleharness_session_start.py"
@@ -21496,6 +21594,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             rendered = apply_output.getvalue()
             self.assertIn("hooks-native-adapter-apply-written", rendered)
+            self.assertIn("hooks adapter apply installed only the project-local native event adapter for the selected client", rendered)
+            self.assertNotIn("without installing hooks", rendered)
             settings_path = root / ".claude/settings.json"
             script_path = root / ".claude/hooks/mylittleharness_hook.py"
             self.assertTrue(settings_path.is_file())
@@ -23961,6 +24061,9 @@ class CliTests(unittest.TestCase):
             self.assertIn(payload["adoption"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["adoption"]["merge"]["idempotent"])
             self.assertFalse(payload["adoption"]["merge"]["storesSecrets"])
+            self.assertFalse(payload["adoption"]["merge"]["storesNewSecrets"])
+            self.assertTrue(payload["adoption"]["merge"]["backupMayPreserveExistingConfigSecrets"])
+            self.assertFalse(payload["adoption"]["merge"]["printsExistingConfigValues"])
             self.assertIn("bounded source", payload["adoption"]["toolCoverage"]["mylittleharness.read_source"])
             self.assertTrue(payload["adoption"]["exactVerification"]["required"])
             self.assertTrue(payload["adoption"]["projectHooks"]["includedInAttachApply"])
@@ -23986,6 +24089,9 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["boundary"]["writesUserConfigOnApplyOnly"])
             self.assertFalse(payload["boundary"]["writesRepoFiles"])
             self.assertFalse(payload["boundary"]["storesSecrets"])
+            self.assertFalse(payload["boundary"]["storesNewSecrets"])
+            self.assertTrue(payload["boundary"]["backupMayPreserveExistingConfigSecrets"])
+            self.assertFalse(payload["boundary"]["printsExistingConfigValues"])
             self.assertFalse(payload["boundary"]["authorizesLifecycle"])
 
     def test_adapter_install_client_config_dry_run_and_apply_are_idempotent(self) -> None:
@@ -24016,7 +24122,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter-codex-config-dry-run", dry_output.getvalue())
             self.assertIn("adapter-codex-hook-autoadoption", dry_output.getvalue())
             self.assertIn("hooks-codex-adapter-plan", dry_output.getvalue())
-            self.assertIn("stores_secrets=false", dry_output.getvalue())
+            self.assertIn("stores_new_secrets=false", dry_output.getvalue())
+            self.assertIn("backup_may_preserve_existing_config_secrets=true", dry_output.getvalue())
 
             apply_output = io.StringIO()
             with redirect_stdout(apply_output):
@@ -24043,6 +24150,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter-codex-config-apply-written", apply_output.getvalue())
             self.assertIn("adapter-codex-hook-autoadoption", apply_output.getvalue())
             self.assertIn("hooks-codex-adapter-apply-written", apply_output.getvalue())
+            self.assertIn("adapter install apply wrote the reviewed Codex MCP config mount", apply_output.getvalue())
+            self.assertNotIn("Use adapter findings as optional read/projection input", apply_output.getvalue())
+            self.assertNotIn("adapter inspection completed as a terminal-only read-only report", apply_output.getvalue())
             for event_name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
                 self.assertIn(event_name, hook_config["hooks"])
             self.assertIn("MLH_HOOK_EVENT", hook_script)
@@ -24069,6 +24179,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(hook_script, (root / ".codex/hooks/mylittleharness_session_start.py").read_text(encoding="utf-8"))
             self.assertIn("adapter-codex-config-apply-unchanged", second_apply_output.getvalue())
             self.assertIn("hooks-codex-adapter-apply-unchanged", second_apply_output.getvalue())
+            self.assertIn("adapter install apply found the Codex MCP config already mounted", second_apply_output.getvalue())
+            self.assertNotIn("adapter inspection completed as a terminal-only read-only report", second_apply_output.getvalue())
 
     def test_adapter_install_client_config_refuses_conflicting_existing_server_without_secret_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -26237,6 +26349,18 @@ class CliTests(unittest.TestCase):
             copied_rel = metadata["copied_files"][0]["snapshot_path"]
             self.assertIn("/files/by-hash/", copied_rel)
             self.assertEqual(original_text, (root / copied_rel).read_text(encoding="utf-8"))
+
+            inspect_before = snapshot_tree(root)
+            inspect_output = io.StringIO()
+            with redirect_stdout(inspect_output):
+                inspect_code = main(["--root", str(root), "snapshot", "--inspect"])
+            inspect_rendered = inspect_output.getvalue()
+            self.assertEqual(inspect_code, 0)
+            self.assertEqual(inspect_before, snapshot_tree(root))
+            self.assertIn("repair class: lifecycle-source-provenance-repair", inspect_rendered)
+            self.assertIn("planned frontmatter keys by path", inspect_rendered)
+            self.assertNotIn("unexpected or missing repair class", inspect_rendered)
+            self.assertNotIn("malformed planned_frontmatter_keys_by_path", inspect_rendered)
 
     def test_lifecycle_repair_atomic_sidecars_stay_short_for_deep_snapshot_paths(self) -> None:
         deep_snapshot_copy = Path(

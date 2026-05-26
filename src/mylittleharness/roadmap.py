@@ -4558,7 +4558,7 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "roadmap-boundary",
-            "roadmap writes only project/roadmap.md in eligible live operating roots; it does not repair, archive, stage, commit, or mutate product-source fixtures",
+            "roadmap writes only project/roadmap.md and explicitly owned roadmap relationship metadata in eligible live operating roots; it does not repair, archive, stage, commit, or mutate product-source fixtures",
         ),
         Finding(
             "info",

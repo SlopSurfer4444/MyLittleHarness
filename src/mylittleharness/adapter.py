@@ -451,6 +451,9 @@ def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path
             "writesRepoFiles": False,
             "writesProjectCodexHooksOnInstallApplyOnly": True,
             "storesSecrets": False,
+            "storesNewSecrets": False,
+            "printsExistingConfigValues": False,
+            "backupMayPreserveExistingConfigSecrets": True,
             "authorizesLifecycle": False,
             "fallback": "repo-visible files and generic CLI remain authoritative when no MCP client is active",
         },
@@ -490,6 +493,8 @@ def codex_mcp_adoption_payload(
             "writesUserConfigOnApply": True,
             "writesProjectCodexHooksOnApply": True,
             "storesSecrets": False,
+            "storesNewSecrets": False,
+            "backupMayPreserveExistingConfigSecrets": True,
             "printsExistingConfigValues": False,
         },
         "projectHooks": codex_hook_adapter_adoption_payload(inventory),
@@ -557,7 +562,8 @@ def codex_mcp_install_sections(
             "adapter-codex-config-merge",
             (
                 f"merge_mode={_codex_merge_mode(status)}; backup_existing_config_on_apply=true; "
-                "stores_secrets=false; apply is refused for conflicting or invalid existing server tables"
+                "stores_new_secrets=false; backup_may_preserve_existing_config_secrets=true; "
+                "apply is refused for conflicting or invalid existing server tables"
             ),
         ),
     ]
@@ -1111,7 +1117,7 @@ def _backup_codex_config(config_path: Path, text: str) -> Finding:
     return Finding(
         "info",
         "adapter-codex-config-backup",
-        f"existing Codex config backup present: {backup_path}; backup content was not printed",
+        f"existing Codex config backup present: {backup_path}; backup content was not printed and may preserve pre-existing secret values",
     )
 
 
@@ -1158,7 +1164,7 @@ def _codex_config_install_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "adapter-codex-config-no-secrets",
-            "reports include only status, expected command/args, hashes, and field names; existing config values are never printed",
+            "reports include only status, expected command/args, hashes, and field names; MLH stores no new secrets, prints no existing config values, and full backups may preserve pre-existing secret values",
         ),
         Finding(
             "info",

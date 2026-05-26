@@ -258,7 +258,7 @@ def product_diff_write_scope_findings(
         return []
 
     values = closeout_values or {}
-    disclosed = _closeout_disclaims_out_of_scope_product_diff(values)
+    disclosed = _closeout_disclaims_out_of_scope_product_diff(values, out_of_scope)
     sample = _sample_text(out_of_scope)
     allowed_sample = _sample_text(allowed_paths)
     completion = completion_reason or "active plan read-only posture"
@@ -519,7 +519,7 @@ def _path_is_in_scope(path: str, allowed_paths: tuple[str, ...]) -> bool:
     return False
 
 
-def _closeout_disclaims_out_of_scope_product_diff(values: dict[str, str]) -> bool:
+def _closeout_disclaims_out_of_scope_product_diff(values: dict[str, str], out_of_scope: Sequence[str] = ()) -> bool:
     text = " ".join(
         str(values.get(field) or "")
         for field in (
@@ -530,6 +530,12 @@ def _closeout_disclaims_out_of_scope_product_diff(values: dict[str, str]) -> boo
             "work_result",
         )
     ).casefold()
+    normalized_text = text.replace("\\", "/")
+    normalized_out_of_scope = tuple(
+        _normalize_product_rel(path).casefold()
+        for path in out_of_scope
+        if _normalize_product_rel(path)
+    )
     scope_markers = (
         "out-of-scope",
         "out of scope",
@@ -552,7 +558,10 @@ def _closeout_disclaims_out_of_scope_product_diff(values: dict[str, str]) -> boo
         "not owned",
         "not covered",
     )
-    return any(marker in text for marker in scope_markers) and any(marker in text for marker in unaccepted_markers)
+    mentions_scope = any(marker in text for marker in scope_markers)
+    leaves_unaccepted = any(marker in text for marker in unaccepted_markers)
+    mentions_paths = all(path in normalized_text for path in normalized_out_of_scope)
+    return mentions_scope and leaves_unaccepted and mentions_paths
 
 
 def _sample_text(values: Sequence[str], limit: int = CHANGED_SAMPLE_LIMIT) -> str:

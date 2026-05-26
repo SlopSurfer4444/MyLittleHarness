@@ -358,6 +358,8 @@ def finding_to_report_dict(finding: Finding) -> dict[str, object]:
     route_id = str(data.get("route_id") or _route_id_for_source(finding.source))
     protocol = route_protocol_for_id(route_id)
     human_gate = protocol["human_gate"]
+    finding_advisory = bool(data.get("advisory", True))
+    route_advisory = bool(protocol.get("advisory", True))
     data.update(
         {
             "route_id": route_id,
@@ -366,7 +368,9 @@ def finding_to_report_dict(finding: Finding) -> dict[str, object]:
             "gate_class": data.get("gate_class") or protocol["gate_class"],
             "human_gate_reason": data.get("human_gate_reason") or protocol["human_gate_reason"],
             "allowed_decisions": data.get("allowed_decisions") or protocol["allowed_decisions"],
-            "advisory": bool(data.get("advisory", True)),
+            "advisory": finding_advisory,
+            "finding_advisory": finding_advisory,
+            "route_advisory": route_advisory,
             "human_gate": {
                 "required": bool(data.get("requires_human_gate")) or bool(human_gate["required"]),
                 "gate_class": data.get("gate_class") or protocol["gate_class"],
@@ -400,6 +404,7 @@ def work_result_capsule_for_report(
     warnings = [finding for finding in findings if finding.severity == "warn"]
     apply = _is_apply_report(command, findings)
     scan_read_only = _is_memory_hygiene_scan_report(command, findings) and not apply
+    scan_batch_preview = scan_read_only and _is_memory_hygiene_batch_preview_report(findings)
     preview = _is_preview_report(command, findings) and not scan_read_only
     refused_preview = preview and _is_refused_preview_report(base_command, findings)
     noop = _is_noop_report(command, findings) and not _has_change_evidence(findings)
@@ -440,9 +445,14 @@ def work_result_capsule_for_report(
     additions: tuple[str, ...]
     removals: tuple[str, ...]
     if scan_read_only:
-        changes = (
-            "No repository files were changed; scan findings are advisory and any mutation requires a separate explicit source dry-run/apply path.",
-        )
+        if scan_batch_preview:
+            changes = (
+                "No repository files were changed; batch cleanup remains advisory until the reviewed token-bound scan apply succeeds.",
+            )
+        else:
+            changes = (
+                "No repository files were changed; scan findings are advisory and any mutation requires a separate explicit source dry-run/apply path.",
+            )
         additions = ()
         removals = ()
     elif refused_preview:
@@ -482,7 +492,7 @@ def work_result_capsule_for_report(
         outcome=outcome,
         work_kind="verification" if projection_inspect else _work_kind_for_command(base_command),
         what_done=_what_done(command, suggestions),
-        ceremony=_ceremony_budget_for_report(base_command, preview, apply, read_only, errors, actionable_warnings, scan_read_only, noop, refused_preview),
+        ceremony=_ceremony_budget_for_report(base_command, preview, apply, read_only, errors, actionable_warnings, scan_read_only, scan_batch_preview, noop, refused_preview),
         next_safe_command=_next_safe_command_for_report(base_command, preview, apply, read_only, findings, errors, actionable_warnings, scan_read_only, noop, refused_preview),
         changed=changes,
         added=additions,
@@ -622,6 +632,10 @@ def _is_memory_hygiene_scan_report(command: str, findings: list[Finding]) -> boo
     return "--scan" in lowered or any(finding.code == "memory-hygiene-scan" for finding in findings)
 
 
+def _is_memory_hygiene_batch_preview_report(findings: list[Finding]) -> bool:
+    return any(finding.code == "incubation-cleanup-batch-preview" for finding in findings)
+
+
 def _is_noop_report(command: str, findings: list[Finding]) -> bool:
     for finding in findings:
         if _finding_is_noop(finding):
@@ -678,6 +692,7 @@ def _ceremony_budget_for_report(
     errors: list[Finding],
     warnings: list[Finding],
     scan_read_only: bool = False,
+    scan_batch_preview: bool = False,
     noop: bool = False,
     refused_preview: bool = False,
 ) -> str:
@@ -699,6 +714,8 @@ def _ceremony_budget_for_report(
         return "cost=review warning findings; guarantee=repo-visible authority is unchanged until an explicit apply succeeds"
     if noop and preview:
         return "cost=low; guarantee=no repository writes and no matching apply is needed for the current posture"
+    if scan_read_only and scan_batch_preview:
+        return "cost=review batch preview; guarantee=read-only scan; token-bound scan apply requires the reported proposal token"
     if scan_read_only:
         return "cost=low; guarantee=read-only scan; explicit source dry-run is required before any memory-hygiene apply"
     if preview:
