@@ -25762,31 +25762,32 @@ class CliTests(unittest.TestCase):
             self.assertIn("attach-project-required", output.getvalue())
 
     def test_attach_apply_creates_only_allowed_scaffold_and_templates(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            output = io.StringIO()
-            with redirect_stdout(output):
-                code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
-            rendered = output.getvalue()
-            self.assertEqual(code, 0)
-            for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
-                self.assertTrue((root / rel_path).is_dir(), rel_path)
-                self.assertIn(rel_path, rendered)
-            self.assertTrue((root / ".codex/project-workflow.toml").is_file())
-            self.assertTrue((root / ".codex/hooks.json").is_file())
-            self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
-            self.assertTrue((root / "project/project-state.md").is_file())
-            self.assertIn('project: "Sample"', (root / "project/project-state.md").read_text(encoding="utf-8"))
-            self.assertFalse((root / ".agents/docmap.yaml").exists())
-            self.assertFalse((root / "project/implementation-plan.md").exists())
-            self.assertEqual([], list((root / "project/specs/workflow").glob("*.md")))
-            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
-            self.assertTrue((root / INDEX_REL_PATH).is_file())
-            self.assertIn("attach-codex-hooks-autoadoption", rendered)
-            self.assertIn("optional non-authoritative sensors", rendered)
-            self.assertIn("not correctness prerequisites", rendered)
-            self.assertIn("hooks-codex-adapter-apply-written", rendered)
-            self.assertIn("attach-generated-projection-build", rendered)
+        for command in ("init", "attach"):
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), command, "--apply", "--project", "Sample"])
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
+                        self.assertTrue((root / rel_path).is_dir(), rel_path)
+                        self.assertIn(rel_path, rendered)
+                    self.assertTrue((root / ".mylittleharness/project-workflow.toml").is_file())
+                    self.assertFalse((root / ".codex").exists())
+                    self.assertTrue((root / "project/project-state.md").is_file())
+                    self.assertIn('project: "Sample"', (root / "project/project-state.md").read_text(encoding="utf-8"))
+                    self.assertFalse((root / ".agents/docmap.yaml").exists())
+                    self.assertFalse((root / "project/implementation-plan.md").exists())
+                    self.assertEqual([], list((root / "project/specs/workflow").glob("*.md")))
+                    self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+                    self.assertTrue((root / INDEX_REL_PATH).is_file())
+                    self.assertIn("attach-client-adapters-explicit", rendered)
+                    self.assertIn("client adapters and hooks are explicit opt-in", rendered)
+                    self.assertNotIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertNotIn("hooks-codex-adapter-apply-written", rendered)
+                    self.assertIn("attach-generated-projection-build", rendered)
 
     def test_attach_apply_is_idempotent_and_preserves_contents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -25794,7 +25795,7 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 first_code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             preserved_paths = (
-                ".codex/project-workflow.toml",
+                ".mylittleharness/project-workflow.toml",
                 "project/project-state.md",
             )
             before = {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths}
@@ -25804,12 +25805,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(first_code, 0)
             self.assertEqual(second_code, 0)
             self.assertEqual(before, {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths})
-            self.assertTrue((root / ".codex/hooks.json").is_file())
-            self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
+            self.assertFalse((root / ".codex").exists())
             self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
             self.assertTrue((root / INDEX_REL_PATH).is_file())
             self.assertIn("attach-already-attached", output.getvalue())
-            self.assertIn("hooks-codex-adapter-apply-unchanged", output.getvalue())
+            self.assertIn("client hooks remain explicit opt-in adapters", output.getvalue())
+            self.assertNotIn("hooks-codex-adapter-apply", output.getvalue())
             self.assertNotIn("attach-generated-projection-build", output.getvalue())
 
     def test_init_attach_dry_run_reports_already_attached_live_root_noop_without_writes(self) -> None:
@@ -25827,11 +25828,12 @@ class CliTests(unittest.TestCase):
                     self.assertIn("Result\n- status: warn", rendered)
                     self.assertIn("attach-already-attached", rendered)
                     self.assertIn("would create missing advertised scaffold directory", rendered)
-                    self.assertIn(".codex/project-workflow.toml", rendered)
+                    self.assertIn(LEGACY_WORKFLOW_MANIFEST_REL, rendered)
                     self.assertIn("project/project-state.md", rendered)
+                    self.assertIn("attach-client-adapters-explicit", rendered)
                     self.assertNotIn("attach-target-conflict", rendered)
 
-    def test_init_attach_apply_already_attached_live_root_keeps_codex_hooks_current(self) -> None:
+    def test_init_attach_apply_already_attached_live_root_preserves_authority_without_hooks(self) -> None:
         for command in ("init", "attach"):
             with self.subTest(command=command):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -25842,16 +25844,15 @@ class CliTests(unittest.TestCase):
                     rendered = output.getvalue()
                     self.assertEqual(code, 0)
                     self.assertFalse((root / ARTIFACT_DIR_REL).exists())
-                    self.assertTrue((root / ".codex/hooks.json").is_file())
-                    self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
+                    self.assertFalse((root / ".codex/hooks.json").exists())
+                    self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
                     for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
                         self.assertTrue((root / rel_path).is_dir(), rel_path)
                     self.assertIn("created missing advertised scaffold directory", rendered)
                     self.assertIn("attach-already-attached", rendered)
-                    self.assertIn("attach-codex-hooks-autoadoption", rendered)
-                    self.assertIn("optional non-authoritative sensor", rendered)
-                    self.assertIn("not a correctness prerequisite", rendered)
-                    self.assertIn("hooks-codex-adapter-apply-written", rendered)
+                    self.assertIn("client hooks remain explicit opt-in adapters", rendered)
+                    self.assertNotIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertNotIn("hooks-codex-adapter-apply-written", rendered)
                     self.assertNotIn("attach-generated-projection-build", rendered)
 
     def test_init_attach_refuses_detached_live_root_without_noop(self) -> None:
@@ -25905,19 +25906,21 @@ class CliTests(unittest.TestCase):
     def test_attach_apply_refuses_path_conflict_without_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".codex").write_text("not a directory\n", encoding="utf-8")
+            (root / ".mylittleharness").write_text("not a directory\n", encoding="utf-8")
             output = io.StringIO()
             with redirect_stdout(output):
                 code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             self.assertEqual(code, 2)
-            self.assertTrue((root / ".codex").is_file())
+            self.assertTrue((root / ".mylittleharness").is_file())
+            self.assertFalse((root / ".codex").exists())
             self.assertFalse((root / "project").exists())
             self.assertIn("attach-target-conflict", output.getvalue())
 
     def test_attach_apply_refuses_generated_projection_boundary_conflict_without_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".mylittleharness").write_text("not a directory\n", encoding="utf-8")
+            (root / ".mylittleharness").mkdir()
+            (root / ".mylittleharness/generated").write_text("not a directory\n", encoding="utf-8")
             before = snapshot_tree(root)
             output = io.StringIO()
             with redirect_stdout(output):
@@ -25944,21 +25947,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("projection-index-fts5-unavailable", rendered)
             self.assertNotIn("attach-generated-projection-recovery", rendered)
 
-    def test_attach_apply_reports_recovery_when_hook_apply_fails_after_scaffold_writes(self) -> None:
+    def test_attach_apply_does_not_run_codex_hook_adapter_by_default_after_scaffold_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = io.StringIO()
-            with patch("mylittleharness.hooks.codex_hook_adapter_apply_findings", side_effect=RuntimeError("hook boom")), redirect_stdout(output):
+            with patch("mylittleharness.hooks.codex_hook_adapter_apply_findings", side_effect=RuntimeError("hook boom")) as hook_apply, redirect_stdout(output):
                 code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             rendered = output.getvalue()
-            self.assertEqual(code, 2)
-            self.assertTrue((root / ".codex/project-workflow.toml").is_file())
+            self.assertEqual(code, 0)
+            hook_apply.assert_not_called()
+            self.assertTrue((root / ".mylittleharness/project-workflow.toml").is_file())
             self.assertTrue((root / "project/project-state.md").is_file())
+            self.assertFalse((root / ".codex").exists())
             self.assertFalse((root / ".codex/hooks.json").exists())
-            self.assertIn("attach-codex-hooks-failed-after-scaffold", rendered)
-            self.assertIn("attach-codex-hooks-recovery", rendered)
-            self.assertIn("mylittleharness --root <root> check", rendered)
-            self.assertIn("hooks adapter --client codex --apply --scope project", rendered)
+            self.assertIn("attach-client-adapters-explicit", rendered)
+            self.assertNotIn("attach-codex-hooks-failed-after-scaffold", rendered)
+            self.assertNotIn("attach-codex-hooks-recovery", rendered)
 
     def test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -25968,9 +25972,9 @@ class CliTests(unittest.TestCase):
                 code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             rendered = output.getvalue()
             self.assertEqual(code, 2)
-            self.assertTrue((root / ".codex/project-workflow.toml").is_file())
+            self.assertTrue((root / ".mylittleharness/project-workflow.toml").is_file())
             self.assertTrue((root / "project/project-state.md").is_file())
-            self.assertTrue((root / ".codex/hooks.json").is_file())
+            self.assertFalse((root / ".codex").exists())
             self.assertFalse((root / ARTIFACT_DIR_REL / "manifest.json").exists())
             self.assertIn("attach-generated-projection-failed-after-scaffold", rendered)
             self.assertIn("attach-generated-projection-recovery", rendered)
@@ -26179,7 +26183,7 @@ class CliTests(unittest.TestCase):
                     outside = base / "outside"
                     outside.mkdir()
                     try:
-                        os.symlink(outside, root / ".codex", target_is_directory=True)
+                        os.symlink(outside, root / ".mylittleharness", target_is_directory=True)
                     except (OSError, NotImplementedError) as exc:
                         self.skipTest(f"directory symlink unavailable: {exc}")
 

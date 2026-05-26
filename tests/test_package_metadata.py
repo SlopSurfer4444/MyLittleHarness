@@ -37,7 +37,7 @@ EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX = {
     },
     "attach late failures": {
         "tests/test_cli.py": (
-            "test_attach_apply_reports_recovery_when_hook_apply_fails_after_scaffold_writes",
+            "test_attach_apply_does_not_run_codex_hook_adapter_by_default_after_scaffold_writes",
             "test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes",
         ),
     },
@@ -449,7 +449,8 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "Any file-reading, shell-capable agent can operate",
             "installed skills, IDE rules, MCP clients, hooks, and CI are optional convenience layers only",
-            "Start by reading this `AGENTS.md`, `.codex/project-workflow.toml`, and `project/project-state.md`",
+            "Start by reading this `AGENTS.md`, `.mylittleharness/project-workflow.toml`, and `project/project-state.md`",
+            "use `.codex/project-workflow.toml` only as the legacy fallback manifest when the neutral manifest is absent",
             'Read `project/implementation-plan.md` only when `project/project-state.md` or the manifest says `plan_status = "active"`',
             'When `plan_status = "active"`, prefer first-class `active_phase` and `phase_status` values',
             "Use MLH lifecycle routes instead of ad hoc memory pockets",
@@ -460,6 +461,8 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn(expected, template)
         for expected in (
             "Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible files plus CLI reports",
+            "Start with `AGENTS.md`, `.mylittleharness/project-workflow.toml`, and `project/project-state.md`",
+            "use `.codex/project-workflow.toml` only as the legacy fallback manifest when the neutral manifest is absent",
             "`project/implementation-plan.md` only when `plan_status = \"active\"`",
             "`active_phase` and `phase_status`",
             "`status`/`check` report a compact lifecycle route table for live roots",
@@ -1027,19 +1030,22 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn(expected, projection_spec)
         self.assertNotIn("accepts only an empty-object tool argument shape", cli_spec)
 
-    def test_default_codex_hooks_docs_keep_default_but_not_correctness_path(self) -> None:
+    def test_codex_hooks_docs_keep_explicit_adapter_outside_correctness_path(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
         product_boundary = (ROOT / "docs/specs/product-boundary.md").read_text(encoding="utf-8")
 
+        for doc in (readme, docs_readme):
+            self.assertIn("create `.codex` by default", doc)
+            self.assertIn("hooks adapter --client codex --dry-run|--apply --scope project", doc)
         for doc in (readme, docs_readme, cli_spec, product_boundary):
-            self.assertIn("project-local Codex native hooks", doc)
+            self.assertIn("Codex native hooks", doc)
             self.assertIn("optional non-authoritative sensors", doc)
         for doc in (readme, docs_readme, cli_spec):
             self.assertIn("not correctness prerequisites", doc)
-        self.assertIn("Successful `init --apply`/`attach --apply` may keep project-local Codex native hooks current by default", readme)
-        self.assertIn("Successful `init --apply` and compatibility `attach --apply` keep project-local Codex native hooks current by default", docs_readme)
+        self.assertIn("Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest", readme)
+        self.assertIn("Successful `init --apply` and compatibility `attach --apply` create the neutral `.mylittleharness/project-workflow.toml` manifest", docs_readme)
         self.assertIn("Those hooks are optional non-authoritative sensors, not correctness prerequisites", cli_spec)
         self.assertIn("cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions", cli_spec)
         self.assertIn("not correctness prerequisites", product_boundary)

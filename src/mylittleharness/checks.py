@@ -2406,7 +2406,6 @@ def doctor_findings(root: Path, inventory: Inventory) -> list[Finding]:
 
 WORKFLOW_ATTACH_DIRECTORIES = (
     ".agents",
-    ".codex",
     "project/specs/workflow",
     "project/research",
     "project/plan-incubation",
@@ -2842,7 +2841,6 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
         )
 
     preflight_errors = _attach_apply_preflight_errors(inventory, normalized_project)
-    preflight_errors.extend(_attach_codex_hook_preflight_errors(inventory))
     if preflight_errors:
         findings.extend(
             Finding(
@@ -2858,10 +2856,9 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
 
     findings.append(
         Finding(
-            "warn",
-            "attach-codex-hooks-plan",
-            "would ensure project-local Codex native hooks by default: .codex/hooks.json and .codex/hooks/mylittleharness_session_start.py; hooks are optional non-authoritative sensors, not correctness prerequisites",
-            ".codex/hooks.json",
+            "info",
+            "attach-client-adapters-explicit",
+            "client adapters are explicit opt-in steps; default init/attach will not create .codex hooks or client config",
         )
     )
 
@@ -2882,7 +2879,7 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
     return findings
 
 
-ATTACH_MANIFEST_REL_PATH = ".codex/project-workflow.toml"
+ATTACH_MANIFEST_REL_PATH = WORKFLOW_MANIFEST_REL
 ATTACH_STATE_REL_PATH = "project/project-state.md"
 ATTACH_RECOVERY_CHECK_COMMAND = "next_safe_command=mylittleharness --root <root> check"
 ATTACH_CODEX_HOOK_RECOVERY_COMMAND = "next_safe_command=mylittleharness --root <root> hooks adapter --client codex --apply --scope project"
@@ -2925,7 +2922,6 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
 
     errors = _attach_apply_preflight_errors(inventory, normalized_project)
     errors.extend(_attach_generated_projection_preflight_errors(inventory))
-    errors.extend(_attach_codex_hook_preflight_errors(inventory))
     if errors:
         return errors
 
@@ -2961,11 +2957,17 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         Finding(
             "info",
             "attach-apply-boundary",
-            "attach --apply wrote eager scaffold directories, absent manifest/state templates, project-local Codex native hooks as optional non-authoritative sensors, and attach-time disposable generated projection output; hooks are not correctness prerequisites",
+            "attach --apply wrote eager scaffold directories, absent manifest/state templates, and attach-time disposable generated projection output; client adapters and hooks are explicit opt-in steps and not correctness prerequisites",
+        )
+    )
+    findings.append(
+        Finding(
+            "info",
+            "attach-client-adapters-explicit",
+            "default init/attach did not create .codex hooks or client config; use an explicit adapter command when a client integration is desired",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
-    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory, after_scaffold_write=True))
     findings.extend(_attach_generated_projection_findings(refreshed_inventory, after_scaffold_write=True))
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
@@ -3145,16 +3147,15 @@ def _attach_already_attached_dry_run_findings(inventory: Inventory) -> list[Find
         Finding(
             "info",
             "attach-already-attached",
-            "already-attached live operating root: default workflow manifest and project-state authority are readable; first-run templates and generated projection setup are skipped",
+            "already-attached live operating root: workflow manifest and project-state authority are readable; first-run templates and generated projection setup are skipped",
             ATTACH_STATE_REL_PATH,
         ),
-        Finding("info", "attach-existing", f"existing workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
+        Finding("info", "attach-existing", f"existing workflow manifest authority: {_selected_manifest_rel(inventory)}", _selected_manifest_rel(inventory)),
         Finding("info", "attach-existing", f"existing project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
         Finding(
             "info",
-            "attach-codex-hooks-plan",
-            "attach --apply would still ensure project-local Codex native hooks by default as optional non-authoritative sensors, not correctness prerequisites",
-            ".codex/hooks.json",
+            "attach-client-adapters-explicit",
+            "default init/attach does not create client hooks; use an explicit adapter command when a client integration is desired",
         ),
     ]
     missing_dirs = [rel_path for rel_path in WORKFLOW_ATTACH_DIRECTORIES if not (inventory.root / rel_path).exists()]
@@ -3163,7 +3164,7 @@ def _attach_already_attached_dry_run_findings(inventory: Inventory) -> list[Find
             findings.append(Finding("warn", "attach-proposal", f"would create missing advertised scaffold directory: {rel_path}", rel_path))
     else:
         findings.append(Finding("info", "attach-proposal", "all advertised scaffold directories are already present"))
-    findings.append(Finding("info", "attach-proposal", "root is already attached; attach --apply may create only missing advertised scaffold directories and Codex hook files"))
+    findings.append(Finding("info", "attach-proposal", "root is already attached; attach --apply may create only missing advertised scaffold directories"))
     return findings
 
 
@@ -3172,15 +3173,12 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
         Finding(
             "info",
             "attach-already-attached",
-            "already-attached live operating root; attach --apply preserved authority files and ensured advertised scaffold directories plus project-local Codex native hooks",
+            "already-attached live operating root; attach --apply preserved authority files and ensured advertised scaffold directories",
             ATTACH_STATE_REL_PATH,
         ),
-        Finding("info", "attach-existing", f"preserved workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
+        Finding("info", "attach-existing", f"preserved workflow manifest authority: {_selected_manifest_rel(inventory)}", _selected_manifest_rel(inventory)),
         Finding("info", "attach-existing", f"preserved project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
     ]
-    hook_errors = _attach_codex_hook_preflight_errors(inventory)
-    if hook_errors:
-        return hook_errors
 
     created_paths: list[str] = []
     existing_paths: list[str] = []
@@ -3202,11 +3200,10 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
         Finding(
             "info",
             "attach-apply-boundary",
-            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories and keep project-local Codex native hooks current as optional non-authoritative sensors, not correctness prerequisites",
+            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories; client hooks remain explicit opt-in adapters",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
-    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory, after_scaffold_write=True))
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 
@@ -11928,6 +11925,8 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
         rel = root_rel
 
     if inventory.root_kind == "live_operating_root":
+        if rel == WORKFLOW_MANIFEST_REL and inventory.manifest_surface and inventory.manifest_surface.rel_path == LEGACY_WORKFLOW_MANIFEST_REL:
+            return f"{WORKFLOW_MANIFEST_REL} is absent on this legacy live root; {LEGACY_WORKFLOW_MANIFEST_REL} remains the selected fallback manifest"
         if rel == ".agents/docmap.yaml" and inventory.manifest.get("policy", {}).get("docmap_mode") == "lazy":
             return "docmap is lazy for this live operating root"
         if rel == "README.md":
