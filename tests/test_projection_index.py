@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -142,6 +143,48 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("expected SQLite index table is missing: path_fts", rendered)
             self.assertIn("expected SQLite index table is missing: path_rows", rendered)
+
+    def test_projection_index_inspect_rejects_symlinked_index_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp) / "root", active=False, mirrors=False)
+            outside = Path(tmp) / "outside.sqlite3"
+            outside.write_text("not authoritative\n", encoding="utf-8")
+            index_path = root / INDEX_REL_PATH
+            index_path.parent.mkdir(parents=True)
+            try:
+                os.symlink(outside, index_path)
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-boundary", rendered)
+            self.assertIn("symlink", rendered)
+            self.assertNotIn("projection-index-current", rendered)
+
+    def test_projection_index_inspect_reports_missing_required_metadata_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+
+            with closing(sqlite3.connect(root / INDEX_REL_PATH)) as connection:
+                connection.execute("DELETE FROM metadata WHERE key IN ('root', 'record_set_hash', 'query_capabilities')")
+                connection.commit()
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-malformed", rendered)
+            self.assertIn("SQLite index metadata is missing required key(s)", rendered)
+            self.assertNotIn("projection-index-current", rendered)
 
     def test_projection_index_inspect_reports_corrupt_database(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

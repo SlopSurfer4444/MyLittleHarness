@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .inventory import Inventory, Surface
 from .parsing import Frontmatter, extract_headings, extract_path_refs, parse_frontmatter
+from .root_boundary import source_path_boundary_violation
 from .routes import classify_memory_route
 
 
@@ -260,6 +261,21 @@ def _cold_memory_surfaces(inventory: Inventory) -> list[Surface]:
 
 
 def _read_projection_surface(root: Path, rel_path: str, role: str, path: Path) -> Surface:
+    boundary_violation = source_path_boundary_violation(root, path, label=f"{role} source")
+    if boundary_violation is not None:
+        route = classify_memory_route(rel_path, role)
+        return Surface(
+            root=root,
+            rel_path=rel_path,
+            role=role,
+            required=False,
+            path=path,
+            exists=path.exists() or path.is_symlink(),
+            read_error=boundary_violation.message,
+            memory_route=route.route_id,
+            memory_route_target=route.target,
+            memory_route_authority=route.authority,
+        )
     try:
         content = path.read_text(encoding="utf-8")
         read_error = None
@@ -316,7 +332,10 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
         patterns = _expand_brace_pattern(path_part)
         exists = False
         for pattern in patterns:
-            resolved_pattern = pattern if _is_absolute_path(pattern) else str(base / pattern)
+            candidate = Path(pattern) if _is_absolute_path(pattern) else base / pattern
+            if _path_escapes_root(root, candidate):
+                return LinkResolution("unsafe", False)
+            resolved_pattern = str(candidate)
             if glob.glob(resolved_pattern):
                 exists = True
                 break
@@ -330,6 +349,8 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
         candidate = Path(path_part)
     else:
         candidate = base / path_part
+    if _path_escapes_root(root, candidate):
+        return LinkResolution("unsafe", False)
     return LinkResolution("local", candidate.exists())
 
 
@@ -464,6 +485,8 @@ def _local_link_records(inventory: Inventory, surfaces: tuple[Surface, ...]) -> 
             historical_context_reason = historical_link_context_reason(surface, link.target, link.line)
             if resolution.kind == "unresolved":
                 status = "unresolved"
+            elif resolution.kind == "unsafe":
+                status = "unsafe"
             elif resolution.kind == "pattern":
                 if resolution.exists:
                     status = "pattern-present"
@@ -495,7 +518,9 @@ def _fan_in_records(surface_by_rel: dict[str, Surface], records: tuple[Projectio
     fan_in: list[ProjectionFanInRecord] = []
     for target, target_records in sorted(inbound.items(), key=lambda item: (-len(item[1]), item[0])):
         statuses = {record.status for record in target_records}
-        if "missing" in statuses or "unresolved" in statuses:
+        if "unsafe" in statuses:
+            status = "unsafe"
+        elif "missing" in statuses or "unresolved" in statuses:
             status = "missing"
         elif "missing-optional" in statuses or "pattern-missing" in statuses:
             status = "missing-optional"
@@ -655,10 +680,14 @@ def _relationship_target_status(
         rel_target = _root_relative_link_path(inventory, target)
         if rel_target is not None:
             target = rel_target
+        else:
+            return "unsafe"
     if relation == "target_artifacts" and _is_product_target_artifact_rel(target):
         return "product-target"
     if target in surface_by_rel:
         return "present" if surface_by_rel[target].exists else "missing"
+    if _path_escapes_root(inventory.root, inventory.root / target):
+        return "unsafe"
     if (inventory.root / target).exists():
         return "present"
     return "missing"
@@ -979,6 +1008,14 @@ def _root_relative_link_path(inventory: Inventory, rel: str) -> str | None:
     if rel.casefold().startswith(prefix.casefold()):
         return rel[len(prefix) :]
     return None
+
+
+def _path_escapes_root(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return False
+    except (OSError, RuntimeError, ValueError):
+        return True
 
 
 def _unique_sorted(values) -> list[str]:

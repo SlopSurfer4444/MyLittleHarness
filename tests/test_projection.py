@@ -45,6 +45,35 @@ class ProjectionTests(unittest.TestCase):
             self.assertEqual(2, docmap_fan_in[0].inbound_count)
             self.assertEqual(("AGENTS.md", "README.md"), docmap_fan_in[0].sources)
 
+    def test_projection_marks_absolute_and_traversal_local_links_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp) / "root", active=False, mirrors=False)
+            outside = Path(tmp) / "outside.md"
+            outside.write_text("# Outside\n", encoding="utf-8")
+            outside_link = str(outside).replace("\\", "/")
+            (root / "README.md").write_text(
+                "# Sample\n\n"
+                f"[absolute]({outside_link})\n"
+                "[traversal](../outside.md)\n",
+                encoding="utf-8",
+            )
+
+            projection = build_projection(load_inventory(root))
+
+            statuses = {
+                record.target: record.status
+                for record in projection.links
+                if record.source == "README.md" and record.target in {outside_link, "../outside.md"}
+            }
+            self.assertEqual({outside_link: "unsafe", "../outside.md": "unsafe"}, statuses)
+
+            fan_in_statuses = {
+                record.target: record.status
+                for record in projection.fan_in
+                if record.target in {outside_link, "../outside.md"}
+            }
+            self.assertEqual({outside_link: "unsafe", "../outside.md": "unsafe"}, fan_in_statuses)
+
     def test_projection_records_lifecycle_relationship_graph(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=True, mirrors=False)

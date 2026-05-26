@@ -74,7 +74,7 @@ from .projection_artifacts import (
 )
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, warm_projection_index
 from .reporting import RouteWriteEvidence, route_write_findings
-from .root_boundary import PRODUCT_SOURCE_FIXTURE
+from .root_boundary import PRODUCT_SOURCE_FIXTURE, source_path_boundary_violation
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
     deep_research_rubric_recovery_target_label,
@@ -7467,7 +7467,10 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
         patterns = _expand_brace_pattern(path_part)
         exists = False
         for pattern in patterns:
-            resolved_pattern = pattern if _is_absolute_path(pattern) else str(base / pattern)
+            candidate = Path(pattern) if _is_absolute_path(pattern) else base / pattern
+            if not _path_stays_within_root(root, candidate):
+                return LinkResolution("unsafe", False)
+            resolved_pattern = str(candidate)
             if glob.glob(resolved_pattern):
                 exists = True
                 break
@@ -7481,6 +7484,8 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
         candidate = Path(path_part)
     else:
         candidate = base / path_part
+    if not _path_stays_within_root(root, candidate):
+        return LinkResolution("unsafe", False)
     return LinkResolution("local", candidate.exists())
 
 
@@ -10087,6 +10092,8 @@ def route_reference_inventory_findings(inventory: Inventory) -> list[Finding]:
         ]
 
     records = _route_reference_records(inventory)
+    known_sources = {surface.rel_path for surface in inventory.present_surfaces}
+    extra_boundary_findings = _route_reference_extra_route_boundary_findings(inventory, known_sources)
     counts = {
         "present": 0,
         "present_product_source": 0,
@@ -10120,6 +10127,7 @@ def route_reference_inventory_findings(inventory: Inventory) -> list[Finding]:
             ),
         )
     ]
+    findings.extend(extra_boundary_findings)
     for target, target_records in sorted(unsafe_records.items()):
         unsafe_class = _route_reference_unsafe_class(target_records)
         if unsafe_class == "unsafe-historical-context":
@@ -10288,10 +10296,10 @@ def _route_reference_extra_route_texts(inventory: Inventory, known_sources: set[
     rows: list[tuple[str, str, str]] = []
     for pattern in ROUTE_REFERENCE_SCAN_EXTRA_GLOBS:
         for path in sorted(inventory.root.glob(pattern)):
-            if not path.is_file():
-                continue
             rel_path = path.relative_to(inventory.root).as_posix()
             if rel_path in known_sources:
+                continue
+            if _route_reference_extra_route_skip_finding(inventory, path, rel_path) is not None:
                 continue
             try:
                 text = path.read_text(encoding="utf-8")
@@ -10299,6 +10307,38 @@ def _route_reference_extra_route_texts(inventory: Inventory, known_sources: set[
                 continue
             rows.append((rel_path, text, classify_memory_route(rel_path).route_id))
     return rows
+
+
+def _route_reference_extra_route_boundary_findings(inventory: Inventory, known_sources: set[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for pattern in ROUTE_REFERENCE_SCAN_EXTRA_GLOBS:
+        for path in sorted(inventory.root.glob(pattern)):
+            rel_path = path.relative_to(inventory.root).as_posix()
+            if rel_path in known_sources:
+                continue
+            finding = _route_reference_extra_route_skip_finding(inventory, path, rel_path)
+            if finding is not None:
+                findings.append(finding)
+    return findings
+
+
+def _route_reference_extra_route_skip_finding(inventory: Inventory, path: Path, rel_path: str) -> Finding | None:
+    boundary_violation = source_path_boundary_violation(inventory.root, path, label="route-reference extra source")
+    if boundary_violation is not None:
+        return Finding(
+            "warn",
+            "route-reference-extra-source-boundary",
+            f"skipped route-reference extra source outside the target-root boundary: {boundary_violation.message}",
+            rel_path,
+        )
+    if path.is_symlink() or not path.is_file():
+        return Finding(
+            "warn",
+            "route-reference-extra-source-boundary",
+            "skipped route-reference extra source because it is not a regular in-root file",
+            rel_path,
+        )
+    return None
 
 
 def _route_reference_text_refs(text: str, links: list[LinkRef]) -> list[tuple[str, int, str]]:

@@ -16,7 +16,7 @@ from .models import Finding
 from .projection import Projection, build_projection
 from .projection_artifacts import inspect_projection_artifacts, projection_cache_posture_payload
 from .projection_index import inspect_projection_index, source_verified_full_text_results
-from .root_boundary import PRODUCT_SOURCE_FIXTURE
+from .root_boundary import PRODUCT_SOURCE_FIXTURE, source_path_boundary_violation
 
 
 MCP_READ_PROJECTION_TARGET = "mcp-read-projection"
@@ -145,6 +145,10 @@ def _approval_relay_packets(inventory: Inventory, approval_packet_refs: tuple[st
             findings.append(Finding("warn", "approval-relay-packet-ref-invalid", f"--approval-packet-ref {conflict}", rel_path))
             continue
         target = inventory.root / rel_path
+        boundary_violation = source_path_boundary_violation(inventory.root, target, label="approval relay packet")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", "approval-relay-packet-boundary", boundary_violation.message, rel_path))
+            continue
         if not target.exists():
             findings.append(Finding("warn", "approval-relay-packet-missing", f"approval packet ref is missing: {rel_path}", rel_path))
             continue

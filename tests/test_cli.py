@@ -35,6 +35,7 @@ from mylittleharness.checks import (
     validation_findings,
 )
 from mylittleharness.cli import main
+from mylittleharness.context_memory import build_context_memory_capsule
 from mylittleharness.inventory import EXPECTED_SPEC_NAMES, Surface, load_inventory
 from mylittleharness.models import Finding
 from mylittleharness.parsing import parse_frontmatter
@@ -3123,6 +3124,31 @@ class CliTests(unittest.TestCase):
             self.assertIn("route-reference-unsafe-historical-context", rendered)
             self.assertIn("historical/generated context", rendered)
             self.assertNotIn("route-reference-unsafe-target", rendered)
+
+    def test_check_focus_route_references_reports_symlinked_extra_source_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "root")
+            outside = Path(tmp) / "outside-generated.json"
+            outside.write_text('{"target": "project/archive/plans/outside.md"}\n', encoding="utf-8")
+            projection_dir = root / ".mylittleharness/generated/projection"
+            projection_dir.mkdir(parents=True)
+            try:
+                os.symlink(outside, projection_dir / "escaped.json")
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "route-references"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-reference-extra-source-boundary", rendered)
+            self.assertIn(".mylittleharness/generated/projection/escaped.json", rendered)
+            self.assertIn("symlink", rendered)
+            self.assertNotIn("outside.md", rendered)
 
     def test_roadmap_apply_refuses_new_missing_required_archive_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6234,6 +6260,70 @@ class CliTests(unittest.TestCase):
             dashboard_payload = json.loads(dashboard_json.getvalue())
             self.assertEqual("current", dashboard_payload["contextMemory"]["status"])
             self.assertEqual([], dashboard_payload["contextMemory"]["stale_or_unknown"])
+
+    def test_context_memory_marks_absolute_or_traversal_source_refs_unsafe_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "root")
+            outside_plan = Path(tmp) / "outside-plan.md"
+            outside_plan.write_text("# Outside\n", encoding="utf-8")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: "project/implementation-plan.md"',
+                    f'active_plan: "{outside_plan}"',
+                ),
+                encoding="utf-8",
+            )
+
+            capsule = build_context_memory_capsule(load_inventory(root), trigger="unit-test")
+            refs = {row["rel_path"]: row for row in capsule["source_refs"]}
+            unsafe_rel = str(outside_plan).replace("\\", "/")
+            self.assertEqual("unsafe", refs[unsafe_rel]["status"])
+            self.assertEqual("", refs[unsafe_rel]["sha256"])
+
+    def test_context_memory_refresh_refuses_symlinked_generated_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "root")
+            outside = Path(tmp) / "outside-context"
+            outside.mkdir()
+            context_parent = root / ".mylittleharness/generated"
+            context_parent.mkdir(parents=True)
+            context_dir = context_parent / "context-memory"
+            try:
+                os.symlink(outside, context_dir, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "mlhd", "run-once", "--apply", "--quiet-period-seconds", "0"])
+
+            rendered = output.getvalue()
+            self.assertNotEqual(0, code)
+            self.assertIn("context-memory-boundary", rendered)
+            self.assertFalse((outside / "latest.json").exists())
+
+    def test_mlhd_apply_refuses_symlinked_runtime_child_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "root")
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            runtime_dir.mkdir(parents=True)
+            outside_state = Path(tmp) / "outside-state.json"
+            outside_state.write_text('{"outside": true}\n', encoding="utf-8")
+            try:
+                os.symlink(outside_state, runtime_dir / "state.json")
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "mlhd", "run-once", "--apply", "--quiet-period-seconds", "0"])
+
+            rendered = output.getvalue()
+            self.assertNotEqual(0, code)
+            self.assertIn("mlhd-runtime-boundary", rendered)
+            self.assertIn("state.json", rendered)
+            self.assertEqual('{"outside": true}\n', outside_state.read_text(encoding="utf-8"))
 
     def test_mlhd_start_worker_refreshes_dirty_projection_cache_without_manual_warm_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

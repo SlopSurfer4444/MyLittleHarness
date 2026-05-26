@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .context_memory import CONTEXT_MEMORY_DIR_REL
 from .inventory import Inventory
 from .models import Finding
 from .projection import Projection, build_projection
@@ -223,6 +224,7 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
 
     payloads: dict[str, Any] = {}
     findings.extend(_unexpected_artifact_findings(inventory.root))
+    findings.extend(_expected_artifact_boundary_findings(inventory.root))
     findings.extend(
         projection_cache_dirty_marker_findings(
             inventory.root,
@@ -231,7 +233,7 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
             f"generated projection artifacts were marked dirty by a mutating workflow command; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
         )
     )
-    missing = [name for name in ARTIFACT_NAMES if not (projection_dir / name).is_file()]
+    missing = [name for name in ARTIFACT_NAMES if (projection_dir / name).is_symlink() or not (projection_dir / name).is_file()]
     for name in missing:
         findings.append(
             Finding(
@@ -244,7 +246,7 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
 
     for name in ARTIFACT_NAMES:
         path = projection_dir / name
-        if not path.exists() or not path.is_file():
+        if path.is_symlink() or not path.exists() or not path.is_file():
             continue
         try:
             payloads[name] = json.loads(path.read_text(encoding="utf-8"))
@@ -297,6 +299,7 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
         )
 
     findings.extend(_integrity_findings(payloads))
+    findings.extend(_current_payload_findings(inventory, projection, payloads))
     findings.extend(_stale_findings(projection, payloads))
     if not any(finding.severity == "warn" for finding in findings):
         findings.append(Finding("info", "projection-artifact-current", "generated projection artifacts match current source hashes and record counts"))
@@ -558,11 +561,7 @@ def projection_cache_posture_payload(
         "self_healable_by_command": True,
         "generated_cache_mutation_boundary": ARTIFACT_DIR_REL,
         "manual_recovery_write_class": "disposable-generated-cache-only",
-        "refresh_policy": (
-            "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd in live operating roots; "
-            "product-source roots use explicit projection warm-cache/rebuild recovery without mlhd runtime writes; "
-            "read-only surfaces display recovery commands only and never execute them"
-        ),
+        "refresh_policy": _cache_refresh_policy(runtime_refresh_allowed=runtime_refresh_allowed),
         "command_boundary": _cache_command_boundary(runtime_refresh_allowed=runtime_refresh_allowed),
         "components": {
             "artifacts": artifact,
@@ -570,6 +569,7 @@ def projection_cache_posture_payload(
         },
         "source_refs": [
             ARTIFACT_DIR_REL,
+            CONTEXT_MEMORY_DIR_REL,
             f"{ARTIFACT_DIR_REL}/manifest.json",
             f"{ARTIFACT_DIR_REL}/search-index.sqlite3",
             f"{ARTIFACT_DIR_REL}/{ARTIFACT_DIRTY_MARKER_NAME}",
@@ -594,7 +594,7 @@ def _cache_command_boundary(*, runtime_refresh_allowed: bool = True) -> dict[str
             "requiresExplicitCommand": True,
             "invokedByReadOnlySurfaces": False,
             "writeClass": "runtime-and-disposable-generated-cache" if runtime_refresh_allowed else "disposable-generated-cache-only",
-            "writeBoundary": ".mylittleharness/runtime/mlhd and .mylittleharness/generated/projection" if runtime_refresh_allowed else ARTIFACT_DIR_REL,
+            "writeBoundary": f".mylittleharness/runtime/mlhd, {ARTIFACT_DIR_REL}, and {CONTEXT_MEMORY_DIR_REL}" if runtime_refresh_allowed else ARTIFACT_DIR_REL,
             "cannotApprove": list(PROJECTION_CACHE_CANNOT_APPROVE),
         },
         "manualRecoveryCommand": {
@@ -608,17 +608,33 @@ def _cache_command_boundary(*, runtime_refresh_allowed: bool = True) -> dict[str
     }
 
 
+def _cache_refresh_policy(*, runtime_refresh_allowed: bool) -> str:
+    if runtime_refresh_allowed:
+        return (
+            "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd in live operating roots; "
+            f"`mlhd run-once --apply` also refreshes generated context capsules under {CONTEXT_MEMORY_DIR_REL}; "
+            "read-only surfaces display recovery commands only and never execute them"
+        )
+    return (
+        "missing, dirty, stale, corrupt, or malformed generated cache in product-source roots uses explicit projection "
+        "warm-cache/rebuild recovery without mlhd runtime writes; read-only surfaces display recovery commands only and never execute them"
+    )
+
+
 def _cache_refresh_actions(commands: list[str]) -> list[dict[str, object]]:
     actions: list[dict[str, object]] = []
     for command in commands:
         if " mlhd run-once --apply" in command:
             write_class = "runtime-and-disposable-generated-cache"
+            write_boundary = f".mylittleharness/runtime/mlhd, {ARTIFACT_DIR_REL}, and {CONTEXT_MEMORY_DIR_REL}"
             requires_explicit_apply = True
         elif " projection --inspect " in command:
             write_class = "read-only-inspect"
+            write_boundary = ""
             requires_explicit_apply = False
         else:
             write_class = "disposable-generated-cache-only"
+            write_boundary = ARTIFACT_DIR_REL
             requires_explicit_apply = False
         actions.append(
             {
@@ -626,7 +642,7 @@ def _cache_refresh_actions(commands: list[str]) -> list[dict[str, object]]:
                 "displayOnly": True,
                 "invokedByReadOnlySurfaces": False,
                 "writeClass": write_class,
-                "writeBoundary": ARTIFACT_DIR_REL if write_class != "read-only-inspect" else "",
+                "writeBoundary": write_boundary,
                 "requiresExplicitApply": requires_explicit_apply,
                 "requiresExplicitCommand": True,
             }
@@ -936,6 +952,24 @@ def _unexpected_artifact_findings(root: Path) -> list[Finding]:
     return findings
 
 
+def _expected_artifact_boundary_findings(root: Path) -> list[Finding]:
+    projection_dir = artifact_dir(root)
+    findings: list[Finding] = []
+    for name in ARTIFACT_NAMES:
+        path = projection_dir / name
+        if not path.is_symlink():
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "projection-artifact-boundary",
+                f"expected generated artifact path is a symlink and was not read: {name}; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+                f"{ARTIFACT_DIR_REL}/{name}",
+            )
+        )
+    return findings
+
+
 def _payload_shape_findings(payloads: dict[str, Any]) -> list[Finding]:
     findings: list[Finding] = []
     expected_collections: dict[str, tuple[str, type]] = {
@@ -1050,11 +1084,32 @@ def _integrity_findings(payloads: dict[str, Any]) -> list[Finding]:
     return findings
 
 
+def _current_payload_findings(inventory: Inventory, projection: Projection, payloads: dict[str, Any]) -> list[Finding]:
+    expected = artifact_payloads(inventory, projection)
+    findings: list[Finding] = []
+    for name in (*SOURCE_SET_ARTIFACT_NAMES, *RECORD_SET_ARTIFACT_NAMES):
+        if name not in payloads:
+            continue
+        if payloads.get(name) == expected.get(name):
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "projection-artifact-stale",
+                f"{name} differs from the current in-memory projection payload; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+                f"{ARTIFACT_DIR_REL}/{name}",
+            )
+        )
+    return findings
+
+
 def _load_existing_payloads(root: Path) -> dict[str, Any]:
     projection_dir = artifact_dir(root)
     payloads: dict[str, Any] = {}
     for name in ARTIFACT_NAMES:
         path = projection_dir / name
+        if path.is_symlink():
+            raise OSError(f"projection artifact path is a symlink: {ARTIFACT_DIR_REL}/{name}")
         if path.is_file():
             payloads[name] = json.loads(path.read_text(encoding="utf-8"))
     return payloads

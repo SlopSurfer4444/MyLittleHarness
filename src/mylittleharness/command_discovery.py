@@ -72,7 +72,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
             "mylittleharness --root <root> check",
         ),
         "any readable MLH root",
-        "read-only report only; authority cards are navigation guidance and do not repair, write files, close out, archive, stage, commit, or change lifecycle state",
+        "source/lifecycle read-only report only; authority cards are navigation guidance and do not repair, mutate source files, close out, archive, stage, commit, or change lifecycle state; search-oriented intelligence may refresh only disposable generated projection cache",
     ),
     CommandIntent(
         "operator-audit-loop",
@@ -566,7 +566,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
             "mylittleharness --root <root> suggest --intent \"<operator-action>\"",
         ),
         "readable MLH root; start with check when lifecycle posture is unknown, then verify exact paths or symbols with rg/direct file reads",
-        "navigation reflexes are read-only budget guidance; they cannot replace source verification, approve lifecycle movement, archive, repair, stage, commit, or create hidden runtime state",
+        "navigation reflexes are source/lifecycle read-only budget guidance; search-oriented intelligence may refresh only disposable generated projection cache under .mylittleharness/generated/projection, and cannot replace source verification, approve lifecycle movement, archive, repair, stage, commit, or create hidden runtime state",
     ),
     CommandIntent(
         "inspect-mcp-read-projection-adapter",

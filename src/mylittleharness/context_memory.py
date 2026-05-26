@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .atomic_files import AtomicFileWrite, apply_file_transaction
+from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory, Surface
 from .models import Finding
-from .root_boundary import PRODUCT_SOURCE_FIXTURE
+from .root_boundary import PRODUCT_SOURCE_FIXTURE, source_path_boundary_violation
 
 
 CONTEXT_MEMORY_SCHEMA = "mylittleharness.source-bound-context-memory-capsule.v1"
@@ -102,7 +103,21 @@ def refresh_context_memory_capsule(
     capsule_id = str(capsule["capsule_id"])
     latest_path = inventory.root / CONTEXT_MEMORY_LATEST_REL
     history_path = inventory.root / CONTEXT_MEMORY_DIR_REL / CONTEXT_MEMORY_HISTORY_DIR_NAME / f"{capsule_id}.json"
-    cleanup_warnings = apply_file_transaction([_atomic_write(latest_path, rendered), _atomic_write(history_path, rendered)])
+    try:
+        cleanup_warnings = apply_file_transaction(
+            [_atomic_write(latest_path, rendered), _atomic_write(history_path, rendered)],
+            root=inventory.root,
+        )
+    except FileTransactionError as exc:
+        capsule["status"] = "write-refused"
+        return [
+            Finding(
+                "error",
+                "context-memory-boundary",
+                f"refused generated context-memory capsule write outside the target-root boundary: {exc}",
+                CONTEXT_MEMORY_LATEST_REL,
+            )
+        ], capsule
     findings = [
         Finding(
             "info",
@@ -223,8 +238,14 @@ def _source_ref_rows(inventory: Inventory) -> list[dict[str, object]]:
 
 
 def _source_ref_row(inventory: Inventory, rel: str) -> dict[str, object]:
+    conflict = _source_ref_conflict(rel)
+    if conflict:
+        return {"rel_path": rel, "status": "unsafe", "error": conflict, "sha256": "", "line_count": 0}
     surface = inventory.surface_by_rel.get(rel)
     path = inventory.root / rel
+    boundary_violation = source_path_boundary_violation(inventory.root, path, label="context-memory source ref")
+    if boundary_violation is not None:
+        return {"rel_path": rel, "status": "unsafe", "error": boundary_violation.message, "sha256": "", "line_count": 0}
     if surface is not None and surface.exists and not surface.read_error:
         return _surface_ref_row(surface)
     if path.is_file() and not path.is_symlink():
@@ -326,7 +347,19 @@ def _normalize_rel(value: str) -> str:
     rel = str(value or "").strip().replace("\\", "/")
     while rel.startswith("./"):
         rel = rel[2:]
-    return rel.strip("/")
+    return rel.rstrip("/")
+
+
+def _source_ref_conflict(rel: str) -> str:
+    if not rel:
+        return "empty source ref"
+    if rel.startswith(("/", "//")) or re.match(r"^[A-Za-z]:/", rel):
+        return f"source ref is not root-relative: {rel}"
+    if "\n" in rel or "\r" in rel or ":" in rel:
+        return f"source ref contains unsafe path syntax: {rel}"
+    if any(part == ".." for part in rel.split("/")):
+        return f"source ref contains parent traversal: {rel}"
+    return ""
 
 
 def _utc_now() -> str:

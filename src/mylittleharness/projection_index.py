@@ -33,6 +33,24 @@ from .projection_artifacts import (
 INDEX_SCHEMA_VERSION = 1
 INDEX_NAME = "search-index.sqlite3"
 INDEX_REL_PATH = f"{ARTIFACT_DIR_REL}/{INDEX_NAME}"
+REQUIRED_METADATA_KEYS = (
+    "schema_version",
+    "product_version",
+    "index_kind",
+    "root",
+    "root_kind",
+    "storage_boundary",
+    "source_set_hash",
+    "record_set_hash",
+    "source_count",
+    "readable_source_count",
+    "indexed_row_count",
+    "path_row_count",
+    "fts5_available",
+    "bm25_available",
+    "query_capabilities",
+    "boundary_note",
+)
 INDEX_SIDECAR_NAMES = (
     INDEX_NAME,
     f"{INDEX_NAME}-journal",
@@ -187,6 +205,16 @@ def inspect_projection_index(inventory: Inventory, projection: Projection | None
                 "info",
                 "projection-index-missing",
                 "SQLite projection index is missing; direct source reads and in-memory projection remain authoritative",
+                INDEX_REL_PATH,
+            )
+        )
+        return findings
+    if path.is_symlink():
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-boundary",
+                f"SQLite projection index path is a symlink and was not read; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                 INDEX_REL_PATH,
             )
         )
@@ -431,6 +459,7 @@ def _incremental_or_rebuild_projection_index(
         changed_paths
         and reason.code in {"projection-index-dirty", "projection-index-hash", "projection-index-stale", "projection-index-count"}
         and index_path(inventory.root).is_file()
+        and not index_path(inventory.root).is_symlink()
         and not has_corrupt_or_malformed
     )
     if can_try_incremental:
@@ -501,6 +530,15 @@ def incremental_projection_index(
     if _has_errors(findings):
         return findings
     path = index_path(inventory.root)
+    if path.is_symlink():
+        return [
+            Finding(
+                "warn",
+                "projection-index-incremental-skipped",
+                "incremental SQLite refresh skipped because the old-good index path is a symlink; full rebuild fallback is required",
+                INDEX_REL_PATH,
+            )
+        ]
     if not path.is_file():
         return [
             Finding(
@@ -1131,7 +1169,7 @@ def _schema_findings(connection: sqlite3.Connection, tables: set[str]) -> list[F
 
 
 def _metadata_findings(inventory: Inventory, projection: Projection, metadata: dict[str, str]) -> list[Finding]:
-    findings: list[Finding] = []
+    findings: list[Finding] = _required_metadata_findings(metadata)
     if metadata.get("schema_version") != str(INDEX_SCHEMA_VERSION):
         findings.append(
             Finding(
@@ -1173,7 +1211,7 @@ def _metadata_findings(inventory: Inventory, projection: Projection, metadata: d
 
 
 def _metadata_identity_findings(inventory: Inventory, metadata: dict[str, str]) -> list[Finding]:
-    findings: list[Finding] = []
+    findings: list[Finding] = _required_metadata_findings(metadata)
     if metadata.get("schema_version") != str(INDEX_SCHEMA_VERSION):
         findings.append(
             Finding(
@@ -1193,6 +1231,20 @@ def _metadata_identity_findings(inventory: Inventory, metadata: dict[str, str]) 
             )
         )
     return findings
+
+
+def _required_metadata_findings(metadata: dict[str, str]) -> list[Finding]:
+    missing = [key for key in REQUIRED_METADATA_KEYS if key not in metadata]
+    if not missing:
+        return []
+    return [
+        Finding(
+            "warn",
+            "projection-index-malformed",
+            f"SQLite index metadata is missing required key(s): {', '.join(missing)}; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+            INDEX_REL_PATH,
+        )
+    ]
 
 
 def _metadata_row_hash_findings(connection: sqlite3.Connection, metadata: dict[str, str]) -> list[Finding]:

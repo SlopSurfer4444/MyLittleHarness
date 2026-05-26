@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,9 @@ from mylittleharness.projection_artifacts import (
     ARTIFACT_SCHEMA_VERSION,
     CACHE_OPERATION_MARKER_NAME,
     INDEX_DIRTY_MARKER_NAME,
+    RECORD_SET_ARTIFACT_NAMES,
+    _combined_hash,
+    _payload_hash,
 )
 from mylittleharness.projection_index import INDEX_REL_PATH
 from tests.test_cli import make_root, snapshot_tree, snapshot_tree_bytes
@@ -152,6 +156,59 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertIn("projection-artifact-malformed", rendered)
             self.assertIn("projection-artifact-hash", rendered)
             self.assertIn("next_safe_command=mylittleharness --root <root> projection --rebuild --target all", rendered)
+
+    def test_projection_inspect_rejects_symlinked_expected_artifact_without_reading_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp) / "root", active=False, mirrors=False)
+            outside = Path(tmp) / "outside.json"
+            outside.write_text(json.dumps({"schema_version": ARTIFACT_SCHEMA_VERSION, "links": []}), encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build"]), 0)
+
+            artifact_path = root / ARTIFACT_DIR_REL / "links.json"
+            artifact_path.unlink()
+            try:
+                os.symlink(outside, artifact_path)
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-artifact-boundary", rendered)
+            self.assertIn("projection-artifact-incomplete", rendered)
+            self.assertIn("symlink", rendered)
+
+    def test_projection_inspect_detects_rehashed_record_payload_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build"]), 0)
+
+            artifact_dir = root / ARTIFACT_DIR_REL
+            links_path = artifact_dir / "links.json"
+            links = json.loads(links_path.read_text(encoding="utf-8"))
+            links["links"][0]["target"] = "project/verification/tampered.md"
+            links_path.write_text(json.dumps(links), encoding="utf-8")
+            manifest_path = artifact_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload_hashes = dict(manifest["payload_hashes"])
+            payload_hashes["links.json"] = _payload_hash(links)
+            manifest["payload_hashes"] = payload_hashes
+            manifest["record_set_hash"] = _combined_hash(payload_hashes, RECORD_SET_ARTIFACT_NAMES)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("links.json differs from the current in-memory projection payload", rendered)
+            self.assertIn("projection-artifact-stale", rendered)
 
     def test_projection_delete_and_rebuild_are_idempotent_and_bound_to_projection_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,9 +392,10 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertTrue(pulse["dirty"])
             self.assertEqual("2026-05-12T01:02:03Z", pulse["dirty_since_utc"])
             self.assertEqual(2, pulse["dirty_marker_count"])
-            self.assertEqual("mylittleharness --root <root> mlhd run-once --apply", pulse["owner_command"])
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", pulse["owner_command"])
             self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", pulse["warm_cache_command"])
             self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", pulse["manual_recovery_command"])
+            self.assertFalse(pulse["runtime_refresh_allowed"])
             self.assertIn("lifecycle routes remain authoritative", pulse["authority"])
 
             operation_payload = {

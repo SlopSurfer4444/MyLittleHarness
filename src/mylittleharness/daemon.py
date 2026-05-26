@@ -42,6 +42,16 @@ MLHD_LAST_RUN_ONCE_FILE_NAME = "last-run-once.json"
 MLHD_PROJECTION_REFRESH_FILE_NAME = "projection-refresh.json"
 MLHD_AUTOSTART_SCHEMA = "mylittleharness.mlhd-autostart.v1"
 MLHD_AUTOSTART_FILE_NAME = "autostart.json"
+MLHD_MANAGED_RUNTIME_FILE_NAMES = (
+    MLHD_PID_FILE_NAME,
+    MLHD_LOCK_FILE_NAME,
+    MLHD_HEARTBEAT_FILE_NAME,
+    MLHD_STATE_FILE_NAME,
+    MLHD_EVENTS_FILE_NAME,
+    MLHD_LAST_RUN_ONCE_FILE_NAME,
+    MLHD_PROJECTION_REFRESH_FILE_NAME,
+    MLHD_AUTOSTART_FILE_NAME,
+)
 MLHD_PROJECTION_QUIET_PERIOD_SECONDS = 1.0
 MLHD_WORKER_INTERVAL_SECONDS = 2.0
 MLHD_PRODUCT_SOURCE_REFUSED_ACTIONS = {"install", "run-once", "start", "stop", "uninstall"}
@@ -197,7 +207,7 @@ def mlhd_control_boundary_findings() -> list[Finding]:
 def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
     root = inventory.root
     runtime_dir = root / MLHD_RUNTIME_DIR_REL
-    runtime_status = _runtime_cache_status(runtime_dir)
+    runtime_status = _runtime_cache_status(root)
     pid_payload = _read_runtime_json(root, MLHD_PID_FILE_NAME)
     lock_payload = _read_runtime_json(root, MLHD_LOCK_FILE_NAME)
     heartbeat_payload = _read_runtime_json(root, MLHD_HEARTBEAT_FILE_NAME)
@@ -344,7 +354,7 @@ def mlhd_runtime_findings(inventory: Inventory, code_prefix: str = "dashboard-ml
 
 def mlhd_runtime_payload(inventory: Inventory) -> dict[str, object]:
     runtime_dir = inventory.root / MLHD_RUNTIME_DIR_REL
-    status = _runtime_cache_status(runtime_dir)
+    status = _runtime_cache_status(inventory.root)
     cache_files = _runtime_cache_files(inventory.root, runtime_dir) if status == "present" else []
     state = inspect_mlhd_control_state(inventory)
     return {
@@ -431,10 +441,61 @@ def projection_pulse_payload(
     }
 
 
-def _runtime_cache_status(runtime_dir: Path) -> str:
-    if runtime_dir.is_symlink() or (runtime_dir.exists() and not runtime_dir.is_dir()):
+def _runtime_cache_status(root: Path) -> str:
+    if _runtime_boundary_findings(root, create=False):
         return "invalid"
+    if _runtime_child_conflict_findings(root, MLHD_MANAGED_RUNTIME_FILE_NAMES):
+        return "invalid"
+    runtime_dir = root / MLHD_RUNTIME_DIR_REL
     return "present" if runtime_dir.exists() else "absent"
+
+
+def _runtime_boundary_findings(root: Path, *, create: bool) -> list[Finding]:
+    findings: list[Finding] = []
+    current = root
+    for part in MLHD_RUNTIME_DIR_REL.split("/"):
+        current = current / part
+        rel_path = current.relative_to(root).as_posix()
+        if current.is_symlink():
+            return [Finding("error", "mlhd-runtime-boundary", f"refused symlink in mlhd runtime boundary: {rel_path}", rel_path)]
+        if current.exists():
+            if not current.is_dir():
+                return [Finding("error", "mlhd-runtime-boundary", f"mlhd runtime boundary path is not a directory: {rel_path}", rel_path)]
+            continue
+        if create:
+            current.mkdir()
+    return findings
+
+
+def _runtime_child_conflict_findings(root: Path, names: tuple[str, ...]) -> list[Finding]:
+    runtime_dir = root / MLHD_RUNTIME_DIR_REL
+    findings: list[Finding] = []
+    for name in names:
+        path = runtime_dir / name
+        rel_path = f"{MLHD_RUNTIME_DIR_REL}/{name}"
+        if path.is_symlink():
+            findings.append(Finding("error", "mlhd-runtime-boundary", f"refused symlinked mlhd runtime file target: {rel_path}", rel_path))
+        elif path.exists() and not path.is_file():
+            findings.append(Finding("error", "mlhd-runtime-boundary", f"mlhd runtime file target is not a regular file: {rel_path}", rel_path))
+    return findings
+
+
+def _managed_runtime_file_names_for_action(action: str) -> tuple[str, ...]:
+    if action == "start":
+        return (MLHD_PID_FILE_NAME, MLHD_LOCK_FILE_NAME, MLHD_HEARTBEAT_FILE_NAME, MLHD_STATE_FILE_NAME, MLHD_EVENTS_FILE_NAME)
+    if action == "stop":
+        return (MLHD_PID_FILE_NAME, MLHD_LOCK_FILE_NAME, MLHD_HEARTBEAT_FILE_NAME, MLHD_STATE_FILE_NAME, MLHD_EVENTS_FILE_NAME)
+    if action == "run-once":
+        return (
+            MLHD_LAST_RUN_ONCE_FILE_NAME,
+            MLHD_PROJECTION_REFRESH_FILE_NAME,
+            MLHD_HEARTBEAT_FILE_NAME,
+            MLHD_STATE_FILE_NAME,
+            MLHD_EVENTS_FILE_NAME,
+        )
+    if action in {"install", "uninstall"}:
+        return (MLHD_AUTOSTART_FILE_NAME,)
+    return ()
 
 
 def _runtime_cache_files(root: Path, runtime_dir: Path) -> list[str]:
@@ -600,8 +661,13 @@ def _mlhd_apply_findings(
 ) -> list[Finding]:
     if _mlhd_product_source_refuses_action(inventory, action):
         return [_mlhd_product_source_refusal_finding(action, dry_run=False)]
-    runtime_dir = inventory.root / MLHD_RUNTIME_DIR_REL
-    if _runtime_cache_status(runtime_dir) == "invalid":
+    runtime_boundary_findings = _runtime_boundary_findings(inventory.root, create=False)
+    if runtime_boundary_findings:
+        return runtime_boundary_findings
+    child_conflicts = _runtime_child_conflict_findings(inventory.root, _managed_runtime_file_names_for_action(action))
+    if child_conflicts:
+        return child_conflicts
+    if _runtime_cache_status(inventory.root) == "invalid":
         return [_invalid_runtime_finding(action)]
     if action == "start":
         return _apply_mlhd_start(inventory, quiet_period_seconds=quiet_period_seconds)
@@ -985,7 +1051,7 @@ def _invalid_runtime_finding(action: str) -> Finding:
     return Finding(
         "error",
         f"mlhd-{action}-runtime-invalid",
-        "mlhd runtime path is a symlink or non-directory; refusing to write disposable control-plane state",
+        "mlhd runtime boundary or managed runtime file target is a symlink/non-directory/non-regular path; refusing to write disposable control-plane state",
         MLHD_RUNTIME_DIR_REL,
     )
 
@@ -1047,18 +1113,27 @@ def _autostart_status(runtime_status: str, payload: dict[str, object]) -> str:
 
 
 def _ensure_runtime_dir(root: Path) -> Path:
+    boundary_findings = _runtime_boundary_findings(root, create=True)
+    if boundary_findings:
+        raise OSError(boundary_findings[0].message)
     runtime_dir = root / MLHD_RUNTIME_DIR_REL
-    runtime_dir.mkdir(parents=True, exist_ok=True)
     return runtime_dir
 
 
 def _write_runtime_json(root: Path, name: str, payload: dict[str, object]) -> None:
+    conflicts = _runtime_child_conflict_findings(root, (name,))
+    if conflicts:
+        raise OSError(conflicts[0].message)
     path = root / MLHD_RUNTIME_DIR_REL / name
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_runtime_dir(root)
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _append_event(runtime_dir: Path, event: str, status: str, pid: int, now: str) -> None:
+    root = runtime_dir.parents[2]
+    conflicts = _runtime_child_conflict_findings(root, (MLHD_EVENTS_FILE_NAME,))
+    if conflicts:
+        raise OSError(conflicts[0].message)
     payload = {"schema": MLHD_CONTROL_SCHEMA, "event": event, "status": status, "pid": pid, "created_at_utc": now}
     with (runtime_dir / MLHD_EVENTS_FILE_NAME).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")

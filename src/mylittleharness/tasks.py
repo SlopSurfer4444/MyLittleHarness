@@ -32,7 +32,7 @@ def _operator_task_findings() -> list[Finding]:
             "search/inspect: intelligence; semantic --inspect; semantic --evaluate; adapter --inspect --target mcp-read-projection; snapshot --inspect; projection --inspect",
         ),
         Finding("info", "tasks-evidence-closeout", "evidence/closeout: evidence; closeout"),
-        Finding("info", "tasks-generated-projection", "generated projection: projection --build|--inspect|--delete|--rebuild"),
+        Finding("info", "tasks-generated-projection", "generated projection: projection --inspect|--warm-cache|--build|--delete|--rebuild"),
         Finding("info", "tasks-bootstrap-readiness", "package/bootstrap readiness: bootstrap --inspect; bootstrap --package-smoke"),
         Finding("info", "tasks-attach-repair", "attach/repair: attach --dry-run|--apply; repair --dry-run|--apply"),
     ]
