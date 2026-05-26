@@ -16,6 +16,7 @@ from .parsing import parse_frontmatter
 from .preflight import preflight_sections
 from .routes import classify_memory_route
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
+from .safe_commands import mlh_command, safe_double_quoted, safe_intent_text, shell_arg
 
 
 HOOK_PRE_COMMIT = "git-pre-commit"
@@ -114,7 +115,7 @@ READ_ONLY_SOURCE_DISCOVERY_PREFIX_TOKENS = {
     "while",
 }
 READ_ONLY_GIT_INSPECTION_COMMANDS = {"diff", "show", "status", "log"}
-GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push"}
+GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push", "reset", "checkout", "clean", "restore", "rm", "mv"}
 GIT_OPTIONS_WITH_VALUES = {
     "-c",
     "--config-env",
@@ -155,22 +156,32 @@ WRITING_COMMAND_TOKENS = (
     "cp ",
 )
 WRITING_COMMAND_NAMES = {
+    "ac",
     "add-content",
+    "copy",
     "copy-item",
     "cp",
+    "cpi",
     "del",
     "erase",
+    "mi",
     "move-item",
     "mv",
+    "new",
     "new-item",
+    "ni",
     "out-file",
     "remove-item",
+    "ri",
     "rm",
+    "sc",
     "set-content",
+    "tee",
+    "tee-object",
 }
-SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "{", "}", "then", "do", "else", "elseif"}
-SINGLE_TARGET_WRITING_COMMAND_NAMES = WRITING_COMMAND_NAMES - {"copy-item", "cp", "move-item", "mv"}
-PAIRED_TARGET_WRITING_COMMAND_NAMES = {"copy-item", "cp", "move-item", "mv"}
+SHELL_COMMAND_SEPARATORS = {";", "&", "&&", "||", "|", "{", "}", "then", "do", "else", "elseif"}
+SINGLE_TARGET_WRITING_COMMAND_NAMES = WRITING_COMMAND_NAMES - {"copy", "copy-item", "cp", "cpi", "mi", "move-item", "mv"}
+PAIRED_TARGET_WRITING_COMMAND_NAMES = {"copy", "copy-item", "cp", "cpi", "mi", "move-item", "mv"}
 WRITING_COMMAND_PATH_OPTIONS = {"-path", "-literalpath", "-filepath", "-destination"}
 WRITING_COMMAND_NON_TARGET_OPTIONS_WITH_VALUES = {
     "-encoding",
@@ -1300,6 +1311,17 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         allow_active_plan_spec_doc_patch=allow_active_plan_spec_doc_patch,
     ):
         findings.append(finding)
+    if _looks_like_opaque_shell_payload(command):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-opaque-shell-command",
+                (
+                    "blocked opaque shell payload such as PowerShell -EncodedCommand; use a visible reviewed "
+                    "command or a first-class MLH dry-run route instead"
+                ),
+            )
+        )
     if _looks_like_generated_cache_write(paths, write_command):
         findings.append(
             Finding(
@@ -1700,12 +1722,18 @@ def _hook_write_target_paths(data: dict[str, object], command: str) -> list[str]
     apply_patch_targets = _hook_apply_patch_target_paths(data)
     if apply_patch_targets:
         return _dedupe_normalized_hook_paths(apply_patch_targets)
-    return _dedupe_normalized_hook_paths(_shell_write_target_paths(command))
+    targets = _shell_write_target_paths(command)
+    targets.extend(_workdir_relative_write_targets(data, targets))
+    return _dedupe_normalized_hook_paths(targets)
 
 
-def _shell_write_target_paths(command: str) -> list[str]:
+def _shell_write_target_paths(command: str, *, depth: int = 0) -> list[str]:
+    if depth > 2:
+        return []
     tokens = _shell_tokens(command)
     targets: list[str] = []
+    targets.extend(_git_output_target_paths(tokens))
+    targets.extend(_runtime_code_write_target_paths(command))
     expect_command = True
     index = 0
     while index < len(tokens):
@@ -1742,7 +1770,44 @@ def _shell_write_target_paths(command: str) -> list[str]:
         if raw.endswith(";"):
             expect_command = True
         index += 1
+    for nested in _nested_shell_commands_from_tokens(tokens):
+        targets.extend(_shell_write_target_paths(nested, depth=depth + 1))
     return targets
+
+
+def _workdir_relative_write_targets(data: dict[str, object], targets: list[str]) -> list[str]:
+    workdir = _hook_workdir_value(data)
+    if not workdir:
+        return []
+    workdir_rel = _path_argument_value(workdir) or str(workdir or "").strip()
+    if not workdir_rel:
+        return []
+    normalized_workdir = _normalize_hook_path(workdir_rel).rstrip("/")
+    if not normalized_workdir or re.match(r"^[a-z]:/", normalized_workdir):
+        return []
+    resolved: list[str] = []
+    for target in targets:
+        normalized = _normalize_hook_path(target)
+        if (
+            normalized
+            and not re.match(r"^[a-z]:/", normalized)
+            and not normalized.startswith(("../", "./", "project/", "src/", "tests/", "docs/", ".mylittleharness/"))
+        ):
+            resolved.append(f"{normalized_workdir}/{normalized}")
+    return resolved
+
+
+def _hook_workdir_value(data: dict[str, object]) -> str:
+    for key in ("cwd", "workdir", "working_directory", "workingDirectory"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for value in data.values():
+        if isinstance(value, dict):
+            nested = _hook_workdir_value(value)
+            if nested:
+                return nested
+    return ""
 
 
 def _write_command_target_paths(tokens: list[str], command_index: int) -> tuple[list[str], int]:
@@ -1792,19 +1857,19 @@ def _write_command_target_paths(tokens: list[str], command_index: int) -> tuple[
 
 def _write_path_option_value(raw: str, clean: str) -> str:
     for option in WRITING_COMMAND_PATH_OPTIONS:
-        prefix = f"{option}="
-        if clean.startswith(prefix):
-            value = raw.split("=", 1)[1]
-            return _path_argument_value(value)
+        for separator in ("=", ":"):
+            prefix = f"{option}{separator}"
+            if clean.startswith(prefix):
+                value = raw.split(separator, 1)[1]
+                return _path_argument_value(value)
     return ""
 
 
 def _inline_redirection_target(raw: str) -> str:
     stripped = str(raw or "").strip(" \t\r\n\"'`")
-    if stripped.startswith(">>") and len(stripped) > 2:
-        return _path_argument_value(stripped[2:])
-    if stripped.startswith(">") and len(stripped) > 1:
-        return _path_argument_value(stripped[1:])
+    match = re.match(r"^(?:\d+|\*)?(>>?)(.+)$", stripped)
+    if match:
+        return _path_argument_value(match.group(2))
     return ""
 
 
@@ -1817,8 +1882,100 @@ def _path_argument_value(token: str) -> str:
         ("../", "./", "project/", "src/", "tests/", "docs/", ".mylittleharness/")
     ):
         return value
+    if re.match(r"^[A-Za-z0-9_.-]+\.(?:md|py|json|toml|ya?ml|txt)$", normalized):
+        return value
     extracted = _extract_paths(value)
     return extracted[0] if extracted else ""
+
+
+def _git_output_target_paths(tokens: list[str]) -> list[str]:
+    targets: list[str] = []
+    for index, token in enumerate(tokens):
+        clean = _clean_token(token)
+        if clean == "--output" and index + 1 < len(tokens):
+            target = _path_argument_value(tokens[index + 1])
+            if target:
+                targets.append(target)
+        elif clean.startswith("--output="):
+            target = _path_argument_value(str(token).split("=", 1)[1])
+            if target:
+                targets.append(target)
+    return targets
+
+
+def _runtime_code_write_target_paths(command: str) -> list[str]:
+    if not _runtime_code_payload_looks_like_write(command):
+        return []
+    return _extract_paths(command)
+
+
+def _runtime_code_payload_looks_like_write(command: str) -> bool:
+    lowered = str(command or "").casefold()
+    if not re.search(r"\b(?:python|python\.exe|py|py\.exe|node|node\.exe)\b", lowered):
+        return False
+    if not any(marker in lowered for marker in ("write_text(", "write_bytes(", "open(", "writefilesync", "appendfilesync", "createwritestream")):
+        return False
+    if "open(" in lowered and not re.search(r"open\([^)]*,\s*['\"][wa+x]", lowered):
+        return False
+    return bool(_extract_paths(command))
+
+
+def _nested_shell_commands_from_tokens(tokens: list[str]) -> list[str]:
+    nested: list[str] = []
+    index = 0
+    while index < len(tokens):
+        raw = str(tokens[index] or "")
+        clean = _clean_token(raw)
+        name = Path(clean).name
+        if name in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            payload, next_index = _powershell_payload(tokens, index + 1)
+            if payload:
+                nested.append(payload)
+            index = next_index
+            continue
+        if name in {"cmd", "cmd.exe"}:
+            payload, next_index = _shell_payload_after_option(tokens, index + 1, {"/c", "/k"})
+            if payload:
+                nested.append(payload)
+            index = next_index
+            continue
+        if name in {"sh", "bash", "zsh", "fish"}:
+            payload, next_index = _shell_payload_after_option(tokens, index + 1, {"-c"})
+            if payload:
+                nested.append(payload)
+            index = next_index
+            continue
+        if clean == "eval" and index + 1 < len(tokens):
+            nested.append(_strip_shell_payload_token(" ".join(tokens[index + 1 :])))
+            break
+        index += 1
+    return nested
+
+
+def _powershell_payload(tokens: list[str], start: int) -> tuple[str, int]:
+    index = start
+    while index < len(tokens):
+        clean = _clean_token(tokens[index])
+        if clean in {"-encodedcommand", "-enc", "-e"}:
+            return "<MLH_ENCODED_COMMAND>", index + 2
+        if clean in {"-command", "-c"} and index + 1 < len(tokens):
+            return _strip_shell_payload_token(tokens[index + 1]), index + 2
+        index += 1
+    return "", index
+
+
+def _shell_payload_after_option(tokens: list[str], start: int, options: set[str]) -> tuple[str, int]:
+    index = start
+    while index < len(tokens):
+        clean = _clean_token(tokens[index])
+        if clean in options and index + 1 < len(tokens):
+            return _strip_shell_payload_token(" ".join(tokens[index + 1 :])), len(tokens)
+        index += 1
+    return "", index
+
+
+def _strip_shell_payload_token(value: object) -> str:
+    return str(value or "").strip(" \t\r\n\"'")
 
 
 def _dedupe_normalized_hook_paths(paths: list[str]) -> list[str]:
@@ -2203,7 +2360,7 @@ def _git_subcommand(command: str) -> str:
     tokens = [_clean_token(token) for token in _shell_tokens(command)]
     tokens = [token for token in tokens if token]
     for index, token in enumerate(tokens):
-        if token != "git":
+        if not _is_git_executable_token(token):
             continue
         return _git_subcommand_after_options(tokens, index + 1)
     return ""
@@ -2230,6 +2387,11 @@ def _git_subcommand_after_options(tokens: list[str], start: int) -> str:
             continue
         return token
     return ""
+
+
+def _is_git_executable_token(token: str) -> bool:
+    clean = _clean_token(token)
+    return clean in {"git", "git.exe"} or Path(clean).name in {"git", "git.exe"}
 
 
 def _is_read_only_roadmap_direct_read_command(command: str, paths: list[str]) -> bool:
@@ -2319,24 +2481,24 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     route_id = classify_memory_route(rel).route_id
     topic = _route_topic_from_path(rel)
     if _is_roadmap_path(rel) or route_id == "roadmap":
-        return "mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> [fields]"
+        return mlh_command("roadmap", "--dry-run", "--action", "update", "--item-id", "<id>")
     if route_id == "state":
-        return "mylittleharness --root <root> writeback --dry-run --phase-status <pending|complete> --docs-decision <updated|not-needed|uncertain>"
+        return mlh_command("writeback", "--dry-run", "--phase-status", "<phase-status>", "--docs-decision", "<docs-decision>")
     if route_id == "active-plan":
-        return "mylittleharness --root <root> plan --dry-run --roadmap-item <id> or writeback --dry-run --phase-status <status>"
+        return mlh_command("plan", "--dry-run", "--roadmap-item", "<id>")
     if route_id == "incubation":
-        return f'mylittleharness --root <root> incubate --dry-run --topic "{topic}" --note-file -'
+        return mlh_command("incubate", "--dry-run", "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--note-file", "-")
     if route_id == "research":
-        return f'mylittleharness --root <root> research-import --dry-run --title "<title>" --topic "{topic}" --text-file -'
+        return mlh_command("research-import", "--dry-run", "--title", '"<title>"', "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--text-file", "-")
     if route_id in {"adrs", "decisions", "product-docs"}:
-        return f"mylittleharness --root <root> intake --dry-run --text-file - --target {rel}"
+        return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
     if route_id == "verification":
-        return f"mylittleharness --root <root> intake --dry-run --text-file - --target {rel}"
+        return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
     if route_id == "stable-specs":
-        return "mylittleharness --root <root> check --focus route-references; then repair --dry-run or plan --dry-run --roadmap-item <id>"
+        return mlh_command("check", "--focus", "route-references")
     if route_id == "archive":
-        return "mylittleharness --root <root> writeback --dry-run --archive-active-plan or memory-hygiene --dry-run --scan"
-    return f'mylittleharness --root <root> suggest --intent "route owner for {rel or path}"'
+        return mlh_command("memory-hygiene", "--dry-run", "--scan")
+    return mlh_command("suggest", "--intent", safe_double_quoted(f"route owner for {safe_intent_text(rel or path, placeholder='<path>')}"))
 
 
 def _generated_cache_recovery_command(inventory: Inventory) -> str:
@@ -2363,8 +2525,16 @@ def _dedupe_nonempty(values: list[str]) -> list[str]:
 
 
 def _looks_like_write_command(command: str) -> bool:
+    if _looks_like_opaque_shell_payload(command) or _runtime_code_payload_looks_like_write(command):
+        return True
     expect_command = True
-    for token in _shell_tokens(command):
+    tokens = _shell_tokens(command)
+    if _git_output_target_paths(tokens):
+        return True
+    for nested in _nested_shell_commands_from_tokens(tokens):
+        if nested == "<MLH_ENCODED_COMMAND>" or _looks_like_write_command(nested):
+            return True
+    for token in tokens:
         raw = str(token or "").strip()
         clean = _clean_token(raw)
         if _is_shell_redirection_token(raw, clean):
@@ -2386,7 +2556,11 @@ def _looks_like_write_command(command: str) -> bool:
 
 def _is_shell_redirection_token(raw: str, clean: str) -> bool:
     stripped = raw.strip(" \t\r\n\"'`")
-    return clean in {">", ">>"} or stripped in {">", ">>"} or stripped.startswith((">", ">>"))
+    return (
+        clean in {">", ">>"}
+        or stripped in {">", ">>"}
+        or bool(re.match(r"^(?:\d+|\*)?>>?", stripped))
+    )
 
 
 def _is_shell_command_separator(raw: str, clean: str) -> bool:
@@ -2397,6 +2571,11 @@ def _is_shell_command_separator(raw: str, clean: str) -> bool:
 def _looks_like_git_stage_or_commit(lowered_command: str) -> bool:
     padded = f" {lowered_command} "
     return any(token in padded for token in GIT_WRITE_COMMANDS) or _git_subcommand(lowered_command) in GIT_MUTATION_COMMANDS
+
+
+def _looks_like_opaque_shell_payload(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    return any(nested == "<MLH_ENCODED_COMMAND>" for nested in _nested_shell_commands_from_tokens(tokens))
 
 
 def _looks_like_next_plan_apply(lowered_command: str) -> bool:
@@ -3005,21 +3184,10 @@ def _hook_policy_source_hash(source: Path) -> str:
 
 
 def _hook_adapter_review_command(request: CodexHookAdapterRequest, mode: str) -> str:
-    parts = [
-        "mylittleharness",
-        "--root",
-        "<root>",
-        "hooks",
-        "adapter",
-        "--client",
-        request.client,
-        mode,
-        "--scope",
-        request.scope,
-    ]
+    parts = ["hooks", "adapter", "--client", request.client, mode, "--scope", request.scope]
     if request.config_path:
-        parts.extend(["--config-path", shlex.quote(request.config_path)])
-    return " ".join(parts)
+        parts.extend(["--config-path", request.config_path])
+    return mlh_command(*parts)
 
 
 def _component_status(components: object, key: str) -> str:

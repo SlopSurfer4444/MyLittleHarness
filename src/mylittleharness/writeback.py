@@ -27,6 +27,7 @@ from .reporting import (
     work_result_capsule_from_closeout_values,
 )
 from .route_reference_guards import route_reference_transaction_guard_findings
+from .safe_commands import mlh_command, safe_double_quoted
 from .roadmap import (
     ROADMAP_STATUS_VALUES,
     TERMINAL_RELATED_PLAN_RETARGET_FIELD,
@@ -3457,20 +3458,24 @@ def _writeback_incubation_archive_retry_findings(plan: RelationshipUpdatePlan) -
 
 
 def _writeback_incubation_archive_retry_command(plan: RelationshipUpdatePlan, report) -> str:
-    command = (
-        f"mylittleharness --root <root> memory-hygiene --dry-run --source {plan.source_rel} "
-        "--archive-covered --repair-links"
-    )
+    parts: list[object] = [
+        "memory-hygiene",
+        "--dry-run",
+        "--source",
+        plan.source_rel,
+        "--archive-covered",
+        "--repair-links",
+    ]
     entry_ids = tuple(entry.entry_id for entry in report.entries)
     if not entry_ids:
-        return command
+        return mlh_command(*parts)
     covered_ids = {record.entry_id for record in report.coverage}
     destination = _writeback_incubation_retry_destination(plan)
     for entry_id in entry_ids:
         if entry_id in covered_ids:
             continue
-        command += f' --entry-coverage "{entry_id}: implemented via {destination}"'
-    return command
+        parts.extend(("--entry-coverage", safe_double_quoted(f"{entry_id}: implemented via {destination}")))
+    return mlh_command(*parts)
 
 
 def _writeback_incubation_retry_destination(plan: RelationshipUpdatePlan) -> str:

@@ -22,6 +22,7 @@ from .projection_artifacts import (
 from .projection_index import inspect_projection_index
 from .roadmap import roadmap_items_for_diagnostics
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
+from .safe_commands import safe_item_id
 from .vcs import worktree_coordination_findings
 
 
@@ -683,7 +684,7 @@ def _roadmap_authority_next_safe_command(inventory: Inventory, plan_status: str)
     queue = _roadmap_payload(inventory).get("active_or_accepted_queue", [])
     item_id = str(queue[0]).split(" ", 1)[0] if queue else ""
     if item_id:
-        return f"mylittleharness --root <root> plan --dry-run --roadmap-item {item_id}"
+        return f"mylittleharness --root <root> plan --dry-run --roadmap-item {safe_item_id(item_id, placeholder='<item-id>')}"
     return "mylittleharness --root <root> check"
 
 
@@ -991,7 +992,7 @@ def _next_legal_dry_run_payload(inventory: Inventory) -> dict[str, object]:
         item_id = str(queue[0]).split(" ", 1)[0] if queue else ""
         if item_id:
             source_refs.append("project/roadmap.md")
-            command = f"mylittleharness --root <root> plan --dry-run --roadmap-item {item_id}"
+            command = f"mylittleharness --root <root> plan --dry-run --roadmap-item {safe_item_id(item_id, placeholder='<item-id>')}"
             reason = "accepted roadmap work must be previewed before opening an active plan"
         else:
             command = "mylittleharness --root <root> check"

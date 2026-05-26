@@ -75,6 +75,7 @@ from .projection_artifacts import (
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, warm_projection_index
 from .reporting import RouteWriteEvidence, route_write_findings
 from .root_boundary import PRODUCT_SOURCE_FIXTURE, source_path_boundary_violation
+from .safe_commands import shell_arg
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
     deep_research_rubric_recovery_target_label,
@@ -7762,7 +7763,7 @@ def _live_product_command_surface_findings(inventory: Inventory, state: Surface)
             missing.append(command)
 
     findings: list[Finding] = []
-    product_src = product_root / "src"
+    source_fallback_command = _source_pythonpath_fallback_command(product_root)
     if missing:
         findings.append(
             Finding(
@@ -7770,7 +7771,7 @@ def _live_product_command_surface_findings(inventory: Inventory, state: Surface)
                 "installed-cli-command-surface-lag",
                 (
                     f"installed mylittleharness console script at {console_script} is missing product_source_root command(s): "
-                    f"{', '.join(missing)}; use `PYTHONPATH={product_src} python -m mylittleharness --root <root> ...` "
+                    f"{', '.join(missing)}; use `{source_fallback_command}` "
                     "or explicitly install/mirror the updated CLI after review; diagnostic only, with no automatic install, mirror, lifecycle movement, closeout, archive, staging, or commit"
                 ),
                 state.rel_path,
@@ -7783,7 +7784,7 @@ def _live_product_command_surface_findings(inventory: Inventory, state: Surface)
                 "installed-cli-command-surface-probe",
                 (
                     f"could not fully probe installed mylittleharness command surface at {console_script}: "
-                    f"{'; '.join(probe_errors)}; use `PYTHONPATH={product_src} python -m mylittleharness --root <root> ...` "
+                    f"{'; '.join(probe_errors)}; use `{source_fallback_command}` "
                     "or explicitly install/mirror the updated CLI after review; command-surface diagnostics are read-only and advisory"
                 ),
                 state.rel_path,
@@ -7818,6 +7819,10 @@ def _product_source_command_names(product_root: Path) -> set[str]:
             continue
         return _literal_string_collection(node.value)
     return set()
+
+
+def _source_pythonpath_fallback_command(product_root: Path) -> str:
+    return f"PYTHONPATH={shell_arg(product_root / 'src')} python -m mylittleharness --root <root> ..."
 
 
 def _literal_string_collection(node: ast.AST) -> set[str]:

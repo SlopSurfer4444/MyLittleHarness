@@ -29,7 +29,19 @@ CYRILLIC_INTENT_TERMS: tuple[tuple[str, str], ...] = (
 RETIRED_COMMAND_SURFACES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "mirror-product-files",
-        ("mirror product files", "mirror product", "mirror files", "mirror rail", "mirror command", "mirror dry run", "mirror apply"),
+        (
+            "mirror product files",
+            "mirror product",
+            "mirror files",
+            "mirror rail",
+            "mirror command",
+            "mirror dry run",
+            "mirror apply",
+            "cross repository parity copy",
+            "cross-repository parity copy",
+            "parity copy rail",
+            "parity copy",
+        ),
         (
             "the cross-repository parity copy rail is retired; MyLittleHarness now operates directly "
             "against the explicit target repository, so start with `mylittleharness --root <root> check` "
@@ -644,7 +656,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         "mylittleharness --root <root> intake --dry-run --text-file - --target project/verification/<evidence-id>.md",
         (
             "mylittleharness --root <root> intake --apply --text-file - --target project/verification/<evidence-id>.md",
-            "mylittleharness --root <root> evidence --record --dry-run --record-id <id> --role verifier --status succeeded --task \"<task>\"",
+            "mylittleharness --root <root> evidence --record --dry-run --record-id <id> --role verifier --actor <actor> --task \"<task>\" --status succeeded --stop-reason \"<reason>\" --attempt-budget <budget> --input-ref <rel> --output-ref <project/verification/evidence-id.md> --claimed-path <rel> --command \"<command>\"",
         ),
         "live operating root when reusable verification proof is worth a repo-visible artifact",
         "verification evidence routes are evidence only; intake/evidence reports cannot approve closeout, archive, roadmap status, staging, commit, push, or lifecycle movement",
@@ -760,7 +772,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
             "worker packet",
             "handoff evidence packet",
         ),
-        "mylittleharness --root <root> handoff --dry-run --handoff-id <id> --worker-id <actor> --role-id <role> --execution-slice <slice> --allowed-route <route-id> --write-scope <rel> --stop-condition \"<condition>\" --required-output <field>",
+        "mylittleharness --root <root> handoff --dry-run --handoff-id <id> --worker-id <actor> --role-id <role> --execution-slice <slice> --allowed-route <route-id> --write-scope <rel> --stop-condition \"<condition>\" --required-output <field> --evidence-ref <project/verification/agent-runs/id.md> --claim-ref <project/verification/work-claims/id.json>",
         (
             "mylittleharness --root <root> handoff --apply <same reviewed fields>",
             "mylittleharness --root <root> review-token --operation-id <id> --route <route-id> --claim-ref <project/verification/work-claims/id.json> --evidence-ref <project/verification/agent-runs/id.md>",

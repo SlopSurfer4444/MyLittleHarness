@@ -18,6 +18,7 @@ from .models import Finding
 from .reporting import RouteWriteEvidence, route_write_findings
 from .research_distill import research_distill_quality_problem
 from .route_reference_guards import route_reference_transaction_guard_findings
+from .safe_commands import safe_item_id
 
 
 ROADMAP_REL = "project/roadmap.md"
@@ -983,7 +984,7 @@ def roadmap_plan_scope_blockers(
 
 
 def roadmap_plan_scope_next_safe_command(item_id: str) -> str:
-    return IMPLEMENTATION_SCOPE_NEXT_SAFE_TEMPLATE.format(item_id=_normalized_item_id(item_id) or "<item-id>")
+    return IMPLEMENTATION_SCOPE_NEXT_SAFE_TEMPLATE.format(item_id=safe_item_id(_normalized_item_id(item_id), placeholder="<item-id>"))
 
 
 def roadmap_plan_deliverable_class_blockers(
@@ -1024,7 +1025,7 @@ def roadmap_plan_deliverable_class_blockers(
 
 
 def roadmap_plan_deliverable_class_next_safe_command(item_id: str) -> str:
-    return DELIVERABLE_CLASS_PROMOTION_NEXT_SAFE_TEMPLATE.format(item_id=_normalized_item_id(item_id) or "<item-id>")
+    return DELIVERABLE_CLASS_PROMOTION_NEXT_SAFE_TEMPLATE.format(item_id=safe_item_id(_normalized_item_id(item_id), placeholder="<item-id>"))
 
 
 def roadmap_slice_result_gate_blockers(
@@ -1055,10 +1056,10 @@ def roadmap_slice_result_gate_blockers(
 
 
 def roadmap_slice_result_gate_next_safe_command(item_id: str) -> str:
-    normalized = _normalized_item_id(item_id) or "<item-id>"
+    normalized = safe_item_id(_normalized_item_id(item_id), placeholder="<item-id>")
     return (
         "review the upstream decision packet, then run "
-        f"`mylittleharness --root <root> roadmap --dry-run --action update --item-id {normalized} [fields]`"
+        f"`mylittleharness --root <root> roadmap --dry-run --action update --item-id {normalized}`"
     )
 
 
@@ -4332,11 +4333,11 @@ def _roadmap_readiness_state(
             if any("target_artifacts" in blocker for blocker in blockers):
                 return "blocked-before-plan", roadmap_plan_scope_next_safe_command(item_id)
             return "blocked-before-plan", "mylittleharness --root <root> check"
-        return "ready-to-plan", f"mylittleharness --root <root> plan --dry-run --roadmap-item {item_id}"
+        return "ready-to-plan", f"mylittleharness --root <root> plan --dry-run --roadmap-item {safe_item_id(item_id, placeholder='<item-id>')}"
     if status == "proposed":
-        return "proposal-only", f"mylittleharness --root <root> roadmap --dry-run --action update --item-id {item_id} --status accepted"
+        return "proposal-only", f"mylittleharness --root <root> roadmap --dry-run --action update --item-id {safe_item_id(item_id, placeholder='<item-id>')} --status accepted"
     if status == "blocked":
-        return "blocked", f"mylittleharness --root <root> roadmap --dry-run --action update --item-id {item_id} [fields]"
+        return "blocked", f"mylittleharness --root <root> roadmap --dry-run --action update --item-id {safe_item_id(item_id, placeholder='<item-id>')}"
     return "not-queued", "mylittleharness --root <root> check"
 
 

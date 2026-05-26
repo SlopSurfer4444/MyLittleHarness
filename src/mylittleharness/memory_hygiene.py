@@ -15,6 +15,7 @@ from .models import Finding
 from .parsing import parse_frontmatter
 from .research_recovery import deep_research_rubric_recovery_findings
 from .roadmap_semantics import roadmap_item_is_terminal_history_stub
+from .safe_commands import mlh_command
 
 
 RESEARCH_DIR_REL = "project/research"
@@ -1475,7 +1476,11 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
                 Finding(
                     "info",
                     "relationship-auto-archive-candidate",
-                    f"single-entry incubation note is structurally covered by roadmap item {item_id!r}; safe cleanup command: mylittleharness memory-hygiene --dry-run --source {surface.rel_path} --status implemented --archive-to {archive_rel} --repair-links",
+                    (
+                        f"single-entry incubation note is structurally covered by roadmap item {item_id!r}; "
+                        "safe cleanup command: "
+                        f"{mlh_command('memory-hygiene', '--dry-run', '--source', surface.rel_path, '--status', 'implemented', '--archive-to', archive_rel, '--repair-links')}"
+                    ),
                     surface.rel_path,
                 )
             )
@@ -1588,10 +1593,16 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
             continue
         if not blockers and (structurally_covered or status in ALLOWED_STATUS_VALUES):
             counts["archive"] += 1
-            status_flag = "" if archive_status == "archived" else f" --status {archive_status}"
-            dry_run_command = (
-                f"mylittleharness --root <root> memory-hygiene --dry-run --source {surface.rel_path}"
-                f"{status_flag} --archive-to {archive_rel} --repair-links"
+            status_parts = () if archive_status == "archived" else ("--status", archive_status)
+            dry_run_command = mlh_command(
+                "memory-hygiene",
+                "--dry-run",
+                "--source",
+                surface.rel_path,
+                *status_parts,
+                "--archive-to",
+                archive_rel,
+                "--repair-links",
             )
             apply_command = dry_run_command.replace("--dry-run", "--apply", 1)
             candidate = MemoryHygieneBatchCandidate(
@@ -1689,10 +1700,16 @@ def _incubation_cleanup_batch_candidates(inventory: Inventory) -> tuple[MemoryHy
         archive_status = _archive_candidate_status(status, structurally_covered)
         archive_rel = _default_incubation_archive_rel(surface.rel_path)
         link_repairs = _planned_link_repairs(inventory, surface.rel_path, archive_rel)
-        status_flag = "" if archive_status == "archived" else f" --status {archive_status}"
-        dry_run_command = (
-            f"mylittleharness --root <root> memory-hygiene --dry-run --source {surface.rel_path}"
-            f"{status_flag} --archive-to {archive_rel} --repair-links"
+        status_parts = () if archive_status == "archived" else ("--status", archive_status)
+        dry_run_command = mlh_command(
+            "memory-hygiene",
+            "--dry-run",
+            "--source",
+            surface.rel_path,
+            *status_parts,
+            "--archive-to",
+            archive_rel,
+            "--repair-links",
         )
         apply_command = dry_run_command.replace("--dry-run", "--apply", 1)
         candidates.append(
@@ -1713,7 +1730,7 @@ def _incubation_cleanup_batch_candidates(inventory: Inventory) -> tuple[MemoryHy
 def _batch_proposal_findings(candidates: tuple[MemoryHygieneBatchCandidate, ...]) -> list[Finding]:
     token = _batch_proposal_token(candidates)
     candidate_ids = ", ".join(candidate.candidate_id for candidate in candidates)
-    batch_apply_command = f"mylittleharness --root <root> memory-hygiene --apply --scan --proposal-token {token}"
+    batch_apply_command = mlh_command("memory-hygiene", "--apply", "--scan", "--proposal-token", token)
     findings = [
         Finding(
             "info",

@@ -2415,10 +2415,10 @@ def _suggestions(command: str, findings) -> list[str]:
             return [f"{focus_finding.message}."]
         if any(finding.code == "state-compaction-section-boundary-missing" for finding in warnings):
             return [
-                "check completed with compact-only hygiene warnings; restore missing project-state section boundaries, then preview/apply `mylittleharness writeback --dry-run --compact-only` and `writeback --apply --compact-only --source-hash <sha256-from-dry-run>`; no manual trimming, lifecycle closeout, archive, staging, commit, or next-plan opening is approved."
+                "check completed with compact-only hygiene warnings; restore missing project-state section boundaries, then preview/apply `mylittleharness --root <root> writeback --dry-run --compact-only` and `mylittleharness --root <root> writeback --apply --compact-only --source-hash <sha256-from-dry-run>`; no manual trimming, lifecycle closeout, archive, staging, commit, or next-plan opening is approved."
             ]
         if any(finding.code == "rule-context-surface-large" and finding.source == "project/project-state.md" for finding in warnings):
-            return ["check completed as a read-only report; preview whole-state history compaction with `mylittleharness writeback --dry-run --compact-only`."]
+            return ["check completed as a read-only report; preview whole-state history compaction with `mylittleharness --root <root> writeback --dry-run --compact-only`."]
         if warnings:
             return ["check completed as a read-only report with advisory findings; use advanced diagnostics only when needed."]
         return ["check completed as a read-only status plus validation report."]

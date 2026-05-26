@@ -234,6 +234,46 @@ class PlanningTests(unittest.TestCase):
         self.assertIn("### phase-1-implementation", rendered)
         self.assertNotIn("### phase-2-verification-and-docs", rendered)
 
+    def test_renderer_quotes_test_targets_in_verification_gate(self) -> None:
+        request = make_plan_request(
+            "Quoted Test Gate",
+            "Render safe verification command text.",
+            None,
+            roadmap_item="quoted-test-gate",
+        )
+        contract = RoadmapSliceContract(
+            primary_roadmap_item="quoted-test-gate",
+            execution_slice="quoted-test-gate",
+            slice_goal="Quote test target paths.",
+            covered_roadmap_items=("quoted-test-gate",),
+            domain_context="Quote test target paths.",
+            target_artifacts=("src/mylittleharness/planning.py", "tests/test command.py"),
+            execution_policy="current-phase-only",
+            closeout_boundary="explicit closeout/writeback only",
+            source_incubation="",
+            source_research="",
+            related_specs=(),
+        )
+        report = RoadmapSynthesisReport(
+            primary_roadmap_item="quoted-test-gate",
+            execution_slice="quoted-test-gate",
+            covered_roadmap_items=("quoted-test-gate",),
+            domain_contexts=("Quote test target paths.",),
+            target_artifacts=contract.target_artifacts,
+            related_specs=(),
+            source_inputs=(),
+            bundle_signals=("only requested roadmap item was selected; roadmap slice siblings are not batched",),
+            split_signals=("bundle/split output is advisory and cannot approve lifecycle movement",),
+            in_slice_dependencies=(),
+            verification_summary_count=0,
+            target_artifact_pressure="2 target artifacts across 1 roadmap item; report-only sizing signal, not a hard gate",
+            phase_pressure="1 domain context and 0 verification summaries; candidate plan outline: 2 phases or explicit one-shot rationale",
+        )
+
+        rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
+
+        self.assertIn("pytest -q 'tests/test command.py'", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

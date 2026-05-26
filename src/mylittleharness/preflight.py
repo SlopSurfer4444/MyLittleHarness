@@ -14,6 +14,7 @@ from .checks import (
 from .closeout import closeout_sections
 from .inventory import Inventory
 from .models import Finding
+from .safe_commands import shell_arg
 
 
 def render_git_pre_commit_template(root: Path) -> str:
@@ -230,7 +231,7 @@ def _tool_findings() -> list[Finding]:
 
 
 def _orchestrator_command_findings(workspace: Path) -> list[Finding]:
-    root_literal = str(workspace)
+    root_literal = shell_arg(str(workspace))
     return [
         Finding("info", "orchestrator-preflight-command", f"shell preflight: cd {root_literal}"),
         Finding("info", "orchestrator-preflight-command", "git preflight: git status --short --branch"),

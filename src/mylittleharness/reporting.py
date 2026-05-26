@@ -812,11 +812,16 @@ def _first_next_safe_route(findings: list[Finding], severities: set[str] | None 
 
 
 _NEXT_SAFE_COMMAND_RE = re.compile(r"\bnext_safe_command=([^;\n]+)")
+_NEXT_SAFE_COMMAND_PROSE_RE = re.compile(r"\bnext safe command:\s*(?:[^`\n]*?)`([^`\n]+)`", re.IGNORECASE)
 
 
 def _next_safe_commands_from_message(message: str) -> tuple[str, ...]:
     commands: list[str] = []
     for match in _NEXT_SAFE_COMMAND_RE.finditer(str(message or "")):
+        command = _plain_text(match.group(1)).strip()
+        if command:
+            commands.append(command)
+    for match in _NEXT_SAFE_COMMAND_PROSE_RE.finditer(str(message or "")):
         command = _plain_text(match.group(1)).strip()
         if command:
             commands.append(command)

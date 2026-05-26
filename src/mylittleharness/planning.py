@@ -51,6 +51,7 @@ from .roadmap import (
 from .reporting import RouteWriteEvidence, route_write_findings
 from .route_reference_guards import route_reference_transaction_guard_findings
 from .routes import doc_target_exists, existing_doc_target_candidates, is_exact_doc_target, normalize_route_path
+from .safe_commands import is_single_safe_command, shell_arg
 from .writeback import state_compaction_apply_findings, state_compaction_dry_run_findings
 
 
@@ -1110,9 +1111,10 @@ def _focused_verification_gate(
     verification_profile: VerificationGateProfile | None = None,
 ) -> str:
     if test_scope:
+        quoted_tests = " ".join(shell_arg(target) for target in test_scope)
         return (
             "`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q "
-            f"{' '.join(test_scope)}` exits 0"
+            f"{quoted_tests}` exits 0"
         )
     if verification_profile and verification_profile.status == "candidate" and verification_profile.command:
         return (
@@ -1431,6 +1433,8 @@ def _python_test_command(target_root: Path, target_artifacts: tuple[str, ...]) -
 def _clean_command_candidate(candidate: str) -> str:
     command = re.sub(r"\s+", " ", str(candidate or "").strip())
     if not command or "\n" in command:
+        return ""
+    if not is_single_safe_command(command):
         return ""
     lowered = command.casefold()
     command_markers = (

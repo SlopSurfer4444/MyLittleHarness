@@ -47,7 +47,7 @@ from mylittleharness.projection_artifacts import (
     mark_projection_cache_dirty,
 )
 from mylittleharness.projection_index import INDEX_REL_PATH
-from mylittleharness.reporting import render_report
+from mylittleharness.reporting import next_safe_routes_for_report, render_report
 from mylittleharness.root_boundary import first_symlink_prefix, path_resolves_within_root, source_path_boundary_violation
 from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrailerParseResult
 
@@ -731,6 +731,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("verification-evidence-record", rendered)
             self.assertIn("intake --dry-run --text-file - --target project/verification/<evidence-id>.md", rendered)
             self.assertIn("evidence --record --dry-run", rendered)
+            self.assertIn("--actor <actor>", rendered)
+            self.assertIn("--stop-reason", rendered)
             self.assertIn("cannot approve closeout, archive, roadmap status", rendered)
 
     def test_suggest_json_reports_machine_readable_command_advice(self) -> None:
@@ -804,19 +806,21 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
             before = snapshot_tree(root)
-            output = io.StringIO()
-            with redirect_stdout(output):
-                code = main(["--root", str(root), "suggest", "--intent", "mirror product files across retired boundary"])
+            for intent in ("mirror product files across retired boundary", "cross repository parity copy"):
+                with self.subTest(intent=intent):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "suggest", "--intent", intent])
 
-            rendered = output.getvalue()
-            self.assertEqual(code, 0)
-            self.assertEqual(before, snapshot_tree(root))
-            self.assertIn("command-suggest-retired-surface", rendered)
-            self.assertNotIn("mirror-product-files", rendered)
-            self.assertNotIn("mirror --dry-run", rendered)
-            self.assertNotIn("mirror --apply", rendered)
-            self.assertNotIn("research-human-review-gate", rendered)
-            self.assertNotIn("agent-navigation-reflex", rendered)
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("command-suggest-retired-surface", rendered)
+                    self.assertNotIn("mirror-product-files", rendered)
+                    self.assertNotIn("mirror --dry-run", rendered)
+                    self.assertNotIn("mirror --apply", rendered)
+                    self.assertNotIn("research-human-review-gate", rendered)
+                    self.assertNotIn("agent-navigation-reflex", rendered)
 
     def test_suggest_intent_routes_route_reference_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -977,6 +981,8 @@ class CliTests(unittest.TestCase):
                     self.assertIn(command, rendered)
                     if intent_id == "create-handoff-packet":
                         self.assertIn('--stop-condition "<condition>"', rendered)
+                        self.assertIn("--evidence-ref <project/verification/agent-runs/id.md>", rendered)
+                        self.assertIn("--claim-ref <project/verification/work-claims/id.json>", rendered)
                     self.assertIn(boundary, rendered)
                     self.assertNotIn("phase-closeout-handoff", rendered)
                     self.assertNotIn("open-active-plan", rendered)
@@ -1718,6 +1724,45 @@ class CliTests(unittest.TestCase):
             self.assertIn("PYTHONPATH=", rendered)
             self.assertIn("no automatic install, mirror", rendered)
 
+    def test_installed_console_fallback_quotes_product_source_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operating")
+            product_root = base / "Product Source; echo BAD"
+            product_src = product_root / "src"
+            (product_src / "mylittleharness").mkdir(parents=True)
+            (product_src / "mylittleharness/cli.py").write_text(
+                'COMMANDS = ("init", "check", "transition")\n',
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            def stale_console_probe(args, **_kwargs):
+                return subprocess.CompletedProcess(args, 2, stdout="", stderr="invalid choice")
+
+            output = io.StringIO()
+            with (
+                patch("mylittleharness.checks.shutil.which", return_value=str(base / "bin/mylittleharness")),
+                patch("mylittleharness.checks.subprocess.run", side_effect=stale_console_probe),
+                redirect_stdout(output),
+            ):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("installed-cli-command-surface-lag", rendered)
+            self.assertIn("PYTHONPATH='", rendered)
+            self.assertIn(str(product_src), rendered)
+            self.assertNotIn(f"PYTHONPATH={product_src} python", rendered)
+
     def test_check_warns_on_operating_doc_copy_retired_command_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -2410,7 +2455,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("writeback --apply --compact-only --source-hash <sha256-from-dry-run> after review", rendered)
             self.assertIn("agents-compaction-contract-missing", rendered)
             self.assertIn("preview/apply writeback --compact-only instead of manually trimming only the newest note", rendered)
-            self.assertIn("mylittleharness writeback --dry-run --compact-only", rendered)
+            self.assertIn("mylittleharness --root <root> writeback --dry-run --compact-only", rendered)
             self.assertIn(
                 "Next safe command: run the first reported next_safe_command after review: "
                 "`mylittleharness --root <root> writeback --dry-run --compact-only`",
@@ -2445,6 +2490,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual("warn", routes[0]["severity"])
             self.assertEqual("not affected", routes[0]["docs_decision"])
             self.assertIn("matching dry-run", routes[0]["authority_boundary"])
+
+    def test_json_next_safe_routes_include_prose_next_safe_command(self) -> None:
+        findings = [
+            Finding(
+                "warn",
+                "route-reference-recovery",
+                'route references need review; next safe command: `mylittleharness --root <root> check --focus route-references`',
+                "project/roadmap.md",
+            )
+        ]
+
+        routes = next_safe_routes_for_report(findings)
+
+        self.assertEqual(1, len(routes))
+        self.assertEqual("mylittleharness --root <root> check --focus route-references", routes[0].command)
+        self.assertEqual("route-reference-recovery", routes[0].source_code)
 
     def test_check_large_live_state_with_missing_role_map_reports_compaction_hygiene_owner_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18905,6 +18966,41 @@ class CliTests(unittest.TestCase):
             self.assertIn("next_safe_command=mylittleharness --root <root>", rendered)
             self.assertIn("roadmap-acceptance-readiness-boundary", rendered)
 
+    def test_roadmap_and_dashboard_sanitize_invalid_item_ids_in_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Suspicious Accepted Item\n\n"
+                "- `id`: `bad;echo BAD`\n"
+                "- `status`: `accepted`\n"
+                "- `execution_slice`: `bad-slice`\n"
+                "- `slice_goal`: `Exercise command rendering.`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/checks.py\"]`\n"
+                "- `verification_summary`: `Covered by command rendering regression.`\n"
+                "- `docs_decision`: `not-needed`\n",
+                encoding="utf-8",
+            )
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertIn("plan --dry-run --roadmap-item <item-id>", check_rendered)
+            self.assertNotIn("plan --dry-run --roadmap-item bad;echo BAD", check_rendered)
+
+            dashboard_output = io.StringIO()
+            with redirect_stdout(dashboard_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect"]), 0)
+            dashboard_rendered = dashboard_output.getvalue()
+            self.assertIn("plan --dry-run --roadmap-item <item-id>", dashboard_rendered)
+            self.assertNotIn("plan --dry-run --roadmap-item bad;echo BAD", dashboard_rendered)
+
     def test_check_blocks_next_roadmap_item_while_other_active_plan_is_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="pending")
@@ -22976,6 +23072,33 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-product-root-path", rogue_codes)
             self.assertIn("hooks-policy-block-product-root-direct-edit", rogue_codes)
             self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
+
+    def test_hooks_pre_tool_blocks_wrapped_alias_and_runtime_write_forms(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            cases = (
+                ({"command": "Set-Content -Path:src/rogue.py -Value x"}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": "Write-Output x 3> src/rogue.py"}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": "Write-Output x | Tee-Object -FilePath src/rogue.py"}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": "Set-Content rogue.py x", "cwd": "src"}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": "git.exe reset --hard"}, "hooks-policy-block-git-before-lifecycle-closeout"),
+                ({"command": "C:/Git/cmd/git.exe clean -fd"}, "hooks-policy-block-git-before-lifecycle-closeout"),
+                ({"command": "git diff --output=src/rogue.py"}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": 'powershell -Command "Set-Content src/rogue.py x"'}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": 'cmd /c "echo x > src/rogue.py"'}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": 'eval "Set-Content src/rogue.py x"'}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": "powershell -EncodedCommand SQBtAHAAbwByAHQALQBNAG8AZAB1AGwAZQA="}, "hooks-policy-block-opaque-shell-command"),
+                ({"command": 'python -c "from pathlib import Path; Path(\'src/rogue.py\').write_text(\'x\')"'}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": 'node -e "require(\'fs\').writeFileSync(\'src/rogue.py\',\'x\')"'}, "hooks-policy-block-code-write-outside-plan-scope"),
+            )
+            for hook_data, expected_code in cases:
+                with self.subTest(command=hook_data["command"]):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps({"toolName": "shell_command", **hook_data}))
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn(expected_code, codes)
 
     def test_hooks_pre_tool_allows_mlh_owner_route_stdin_payload_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -27392,7 +27515,7 @@ class CliTests(unittest.TestCase):
     def test_preflight_orchestrator_workspace_excludes_live_and_product_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp) / "coordination")
-            disposable = Path(tmp) / "worker"
+            disposable = Path(tmp) / "worker space"
             output = io.StringIO()
             with redirect_stdout(output):
                 code = main(
@@ -27410,6 +27533,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("orchestrator-preflight-live-root-excluded", rendered)
+            self.assertIn(f"shell preflight: cd '{disposable}'", rendered)
             self.assertIn("git preflight", rendered)
             self.assertIn("Linear/Symphony status alone is not MLH closeout", rendered)
 

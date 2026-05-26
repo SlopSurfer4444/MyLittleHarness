@@ -575,6 +575,29 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("relationship-semantic-split-suggestion", rendered)
             self.assertIn("heuristic no-write suggestion", rendered)
 
+    def test_scan_quotes_cleanup_candidate_source_and_archive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/plan-incubation/covered note.md"
+            source.write_text(
+                "---\n"
+                'status: "implemented"\n'
+                "---\n"
+                "# Covered Note\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("--source 'project/plan-incubation/covered note.md'", rendered)
+            self.assertIn("--archive-to 'project/archive/reference/incubation/2026-05-26-covered note.md'", rendered)
+
     def test_scan_classifies_keep_active_followups_and_ambiguous_notes_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
