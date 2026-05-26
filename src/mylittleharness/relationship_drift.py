@@ -186,7 +186,7 @@ def relationship_drift_apply_findings(inventory: Inventory, request: Relationshi
         return operation_errors
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "relationship-drift-refused", f"relationship drift apply failed before all target writes completed: {exc}", ROADMAP_REL)]
 
@@ -855,7 +855,7 @@ def _normalized_item_id(value: object) -> str:
 def _normalize_rel(value: object) -> str:
     normalized = str(value or "").strip().strip("`\"'").strip("<>").replace("\\", "/")
     normalized = normalized.split("#", 1)[0]
-    return re.sub(r"/+", "/", normalized).strip().rstrip(".,;:)]").strip("/")
+    return re.sub(r"/+", "/", normalized).strip().rstrip(".,;:)]")
 
 
 def _rel_has_absolute_or_parent_parts(rel_path: str) -> bool:

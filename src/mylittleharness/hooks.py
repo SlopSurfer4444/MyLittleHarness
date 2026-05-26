@@ -8,6 +8,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .context_memory import context_memory_hook_context
 from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness_payload
 from .inventory import Inventory
@@ -454,10 +455,35 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
     config_text = render_native_hooks_json(inventory.root, request)
     script_text = render_native_hook_script(request.client)
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(script_text, encoding="utf-8")
-    config_path.write_text(config_text, encoding="utf-8")
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (
+                AtomicFileWrite(
+                    config_path,
+                    config_path.with_name(f".{config_path.name}.tmp"),
+                    config_text,
+                    config_path.with_name(f".{config_path.name}.bak"),
+                ),
+                AtomicFileWrite(
+                    script_path,
+                    script_path.with_name(f".{script_path.name}.tmp"),
+                    script_text,
+                    script_path.with_name(f".{script_path.name}.bak"),
+                ),
+            ),
+            root=inventory.root,
+        )
+    except (OSError, FileTransactionError) as exc:
+        findings.append(
+            Finding(
+                "error",
+                f"{prefix}-apply-refused",
+                f"{label} native hook adapter apply failed before all target writes completed: {exc}",
+                _rel_path(inventory.root, config_path),
+            )
+        )
+        findings.extend(_hook_boundary_findings())
+        return findings
 
     if before_config == config_text and before_script == script_text:
         findings.append(
@@ -481,6 +507,8 @@ def codex_hook_adapter_apply_findings(inventory: Inventory, request: CodexHookAd
             )
         )
     findings.extend(_hook_boundary_findings())
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", f"{prefix}-backup-cleanup", warning, _rel_path(inventory.root, config_path)))
     return findings
 
 
@@ -2809,14 +2837,20 @@ def _is_active_plan_target_artifact(inventory: Inventory, path: str) -> bool:
         return False
     for artifact in artifacts:
         candidate = _normalize_hook_path(str(artifact or "")).casefold()
-        if candidate and normalized == candidate:
+        prefix = candidate.rstrip("/")
+        if prefix and (normalized == prefix or normalized.startswith(f"{prefix}/")):
             return True
     return False
 
 
 def _active_phase_write_scope_allows_path(inventory: Inventory, rel: str) -> bool:
     scope = _active_phase_write_scope_paths(inventory)
-    return bool(scope) and _normalize_hook_path(rel).casefold() in scope
+    normalized = _normalize_hook_path(rel).casefold()
+    return bool(scope) and any(
+        normalized == item.rstrip("/") or normalized.startswith(f"{item.rstrip('/')}/")
+        for item in scope
+        if item.rstrip("/")
+    )
 
 
 def _active_phase_write_scope_paths(inventory: Inventory) -> set[str]:

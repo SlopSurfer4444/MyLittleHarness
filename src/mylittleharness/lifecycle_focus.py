@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .inventory import Inventory
 from .models import Finding, SessionActiveWorkRecord
+from .root_boundary import source_path_boundary_violation
 
 
 CURRENT_FOCUS_BEGIN = "<!-- BEGIN mylittleharness-current-focus v1 -->"
@@ -74,6 +75,9 @@ def session_active_work_findings(inventory: Inventory, code_prefix: str = "sessi
 
 def _load_session_active_work_records(root: Path) -> tuple[list[SessionActiveWorkRecord], list[Finding]]:
     directory = root / SESSION_ACTIVE_WORK_DIR_REL
+    boundary_violation = source_path_boundary_violation(root, directory, label="session active work directory")
+    if boundary_violation is not None:
+        return [], [Finding("warn", "session-active-work-malformed", boundary_violation.message, SESSION_ACTIVE_WORK_DIR_REL)]
     if not directory.exists() or not directory.is_dir():
         return [], []
     records: list[SessionActiveWorkRecord] = []

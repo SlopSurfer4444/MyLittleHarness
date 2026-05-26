@@ -15,6 +15,7 @@ from .evidence import AGENT_RUN_SCHEMA, AGENT_RUNS_DIR_REL
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
+from .root_boundary import source_path_boundary_violation
 
 
 HANDOFF_PACKET_SCHEMA = "mylittleharness.handoff-packet.v1"
@@ -158,7 +159,8 @@ def handoff_packet_apply_findings(inventory: Inventory, request: HandoffPacketRe
                     text=text,
                     backup_path=target.with_name(f".{target.name}.bak"),
                 ),
-            )
+            ),
+            root=inventory.root,
         )
     except FileTransactionError as exc:
         findings.append(Finding("error", "handoff-packet-refused", f"failed to write handoff packet before apply completed: {exc}", rel_path))
@@ -492,6 +494,11 @@ def _dispatcher_evidence_findings(root: Path, data: dict[str, object], rel_path:
             blockers.append(f"unsafe evidence ref {normalized}")
             continue
         target = root / normalized
+        boundary_violation = source_path_boundary_violation(root, target, label="dispatcher evidence ref")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", f"{code_prefix}-evidence-ref-invalid", boundary_violation.message, normalized))
+            blockers.append(f"unsafe evidence ref {normalized}")
+            continue
         if not target.exists():
             findings.append(Finding("info", f"{code_prefix}-evidence-planned", f"planned agent-run evidence path is available for dispatcher tracking: {normalized}", normalized))
             continue
@@ -908,7 +915,7 @@ def _root_relative_path_conflict(rel_path: str) -> str:
 
 
 def _normalize_ref(value: str) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()
 
 
 def _paths_overlap(left: str, right: str) -> bool:

@@ -324,7 +324,7 @@ def memory_hygiene_apply_findings(inventory: Inventory, request: MemoryHygieneRe
         operations.append(AtomicFileWrite(path, link_tmp, text, link_backup))
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "memory-hygiene-refused", f"memory hygiene apply failed before all target writes completed: {exc}", plan.source_rel)]
 
@@ -430,7 +430,7 @@ def _memory_hygiene_batch_apply_findings(inventory: Inventory, request: MemoryHy
         operations.append(AtomicFileWrite(path, link_tmp, text, link_backup))
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [
             Finding(
@@ -532,7 +532,7 @@ def verification_ledger_rotate_apply_findings(inventory: Inventory, request: Mem
         ),
     ]
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "verification-ledger-rotate-refused", f"verification ledger rotation failed before all target writes completed: {exc}", plan.source_rel)]
 
@@ -776,7 +776,7 @@ def _memory_hygiene_plan(inventory: Inventory, request: MemoryHygieneRequest) ->
             return None, [Finding("error", "memory-hygiene-refused", coverage_error, request.source)]
 
     if request.archive_covered:
-        blockers = incubation_archive_blockers(source_text)
+        blockers = incubation_archive_blockers(source_text, require_entry_coverage=True)
         if blockers:
             return None, [
                 Finding(
@@ -1104,7 +1104,12 @@ def incubation_closeout_plan(
     )
 
 
-def incubation_archive_blockers(text: str, *, ignore_stale_implementation_tail: bool = False) -> tuple[str, ...]:
+def incubation_archive_blockers(
+    text: str,
+    *,
+    ignore_stale_implementation_tail: bool = False,
+    require_entry_coverage: bool = False,
+) -> tuple[str, ...]:
     blockers: list[str] = []
     frontmatter = parse_frontmatter(text)
     for key in OPEN_THREAD_FRONTMATTER_FIELDS:
@@ -1117,7 +1122,9 @@ def incubation_archive_blockers(text: str, *, ignore_stale_implementation_tail: 
     coverage_report = incubation_entry_coverage_report(text)
     if not ignore_stale_implementation_tail:
         blockers.extend(_active_implementation_tail_blockers(frontmatter.data, coverage_report))
-    if len(coverage_report.entries) > 1:
+    if require_entry_coverage:
+        blockers.extend(_entry_coverage_archive_blockers(coverage_report))
+    elif len(coverage_report.entries) > 1:
         blockers.extend(_entry_coverage_archive_blockers(coverage_report))
     else:
         blockers.extend(_explicit_open_entry_coverage_blockers(coverage_report))
@@ -1175,9 +1182,10 @@ def _planned_link_repairs(inventory: Inventory, source_rel: str, archive_rel: st
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if source_rel not in text:
+        updated = _replace_exact_route_ref(text, source_rel, archive_rel)
+        if updated == text:
             continue
-        repairs.append((rel_path, path, text.replace(source_rel, archive_rel)))
+        repairs.append((rel_path, path, updated))
     return repairs
 
 
@@ -2054,7 +2062,7 @@ def _entry_coverage_archive_blockers(report: EntryCoverageReport) -> list[str]:
     if report.errors:
         blockers.append("entry coverage metadata is malformed")
     if not report.coverage:
-        blockers.append("multiple dated incubation entries without entry coverage")
+        blockers.append("dated incubation entries without entry coverage")
         return blockers
     for entry in report.entries:
         record = coverage_by_id.get(entry.entry_id)
@@ -2090,7 +2098,25 @@ def _entry_coverage_record_blockers(record: EntryCoverage) -> list[str]:
 def _entry_coverage_has_destination(record: EntryCoverage) -> bool:
     if record.status == "rejected":
         return bool(record.detail)
-    return bool(record.detail)
+    if not record.detail:
+        return False
+    return bool(_entry_coverage_destination_ref(record.detail))
+
+
+def _entry_coverage_destination_ref(detail: str) -> str:
+    normalized = detail.replace("\\", "/").strip()
+    normalized = re.sub(r"^(via|to|as|in)\s+", "", normalized, flags=re.IGNORECASE).strip()
+    normalized = normalized.strip("`\"'.,;:)]}")
+    match = re.search(
+        r"(?<![\w:/.-])((?:project|docs|src|tests|specs|\.agents|\.codex)/[A-Za-z0-9_./{}*\-]+|README\.md|AGENTS\.md|pyproject\.toml)(?![\w/.-])",
+        normalized,
+    )
+    return match.group(1) if match else ""
+
+
+def _replace_exact_route_ref(text: str, source_rel: str, archive_rel: str) -> str:
+    pattern = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(source_rel)}(?![A-Za-z0-9_./-])")
+    return pattern.sub(archive_rel, text)
 
 
 def _incubation_entry_coverage_findings(rel_path: str, text: str) -> list[Finding]:

@@ -11,6 +11,7 @@ from pathlib import Path
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
 from .models import Finding
+from .root_boundary import source_path_boundary_violation
 
 
 WORK_CLAIM_SCHEMA = "mylittleharness.work-claim.v1"
@@ -483,7 +484,11 @@ def _target_findings(root: Path, target_rel: str, severity: str) -> list[Finding
         return [Finding(severity, "work-claim-refused", f"claim target {conflict}", target_rel)]
     if not target_rel.startswith(f"{WORK_CLAIMS_DIR_REL}/") or not target_rel.endswith(".json"):
         return [Finding(severity, "work-claim-refused", f"claim target must be under {WORK_CLAIMS_DIR_REL}/*.json", target_rel)]
-    target = (root / target_rel).resolve(strict=False)
+    target = root / target_rel
+    boundary_violation = source_path_boundary_violation(root, target, label="work claim target")
+    if boundary_violation is not None:
+        return [Finding(severity, "work-claim-refused", boundary_violation.message, target_rel)]
+    target = target.resolve(strict=False)
     try:
         target.relative_to(root.resolve(strict=False))
     except ValueError:
@@ -850,7 +855,7 @@ def _root_relative_path_conflict(rel_path: str) -> str:
 
 
 def _normalize_ref(value: str) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()
 
 
 def _to_rel_path(root: Path, path: Path) -> str:

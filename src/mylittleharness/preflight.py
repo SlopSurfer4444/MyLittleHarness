@@ -69,9 +69,20 @@ def orchestrator_workspace_preflight_sections(
         Finding("info", "orchestrator-preflight-workspace", f"candidate disposable workspace: {workspace_path}"),
     ]
     findings.extend(_workspace_exclusion_findings(inventory.root, workspace_path, product_path))
-    findings.extend(_workspace_shape_findings(workspace_path))
-    findings.extend(_tool_findings())
-    findings.extend(_orchestrator_command_findings(workspace_path))
+    shape_findings = _workspace_shape_findings(workspace_path)
+    findings.extend(shape_findings)
+    if any(finding.severity == "warn" for finding in shape_findings):
+        findings.append(
+            Finding(
+                "warn",
+                "orchestrator-preflight-refused",
+                "workspace command hints are withheld until the candidate workspace is a normal directory",
+                str(workspace_path),
+            )
+        )
+    else:
+        findings.extend(_tool_findings())
+        findings.extend(_orchestrator_command_findings(workspace_path))
     return [
         ("Orchestrator Workspace", findings),
         (

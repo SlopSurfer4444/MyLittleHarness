@@ -633,7 +633,7 @@ def intake_apply_findings(inventory: Inventory, request: IntakeRequest) -> list[
         backup_path=target_path.with_name(f".{target_path.name}.intake.backup"),
     )
     try:
-        cleanup_warnings = apply_file_transaction([operation])
+        cleanup_warnings = apply_file_transaction([operation], root=inventory.root)
     except FileTransactionError as exc:
         return [Finding("error", "intake-refused", f"intake apply failed before the target write completed: {exc}", request.target)]
 
@@ -5760,7 +5760,7 @@ def _lifecycle_markdown_frontmatter_apply_findings(
     operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [
             Finding(
@@ -5892,7 +5892,7 @@ def _lifecycle_source_provenance_apply_findings(inventory: Inventory) -> tuple[l
     operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [
             Finding(
@@ -6015,7 +6015,7 @@ def _spec_posture_frontmatter_apply_findings(
     operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
 
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except FileTransactionError as exc:
         return [
             Finding(
@@ -9495,6 +9495,16 @@ def archive_context_findings(inventory: Inventory) -> list[Finding]:
         ]
 
     archive_dir = inventory.root / ARCHIVE_CONTEXT_ARCHIVE_DIR_REL
+    archive_dir_violation = source_path_boundary_violation(inventory.root, archive_dir, label="archive context archive directory")
+    if archive_dir_violation is not None:
+        return [
+            Finding(
+                "warn",
+                "archive-context-archive-dir",
+                archive_dir_violation.message,
+                ARCHIVE_CONTEXT_ARCHIVE_DIR_REL,
+            )
+        ]
     if archive_dir.exists() and not archive_dir.is_dir():
         return [
             Finding(
@@ -9704,7 +9714,7 @@ def archive_context_findings(inventory: Inventory) -> list[Finding]:
 def _archive_context_present_archive_paths(archive_dir: Path) -> list[Path]:
     if not archive_dir.is_dir():
         return []
-    return sorted(path for path in archive_dir.glob("*.md") if path.is_file())
+    return sorted(path for path in archive_dir.glob("*.md") if path.is_file() and not path.is_symlink())
 
 
 def _archive_context_archive_refs_from_text(text: str) -> tuple[str, ...]:
@@ -9968,7 +9978,8 @@ def _archive_context_classification(
     existing_source_texts = []
     for rel in sorted(expanded_source_refs):
         path = inventory.root / rel
-        if not path.is_file():
+        boundary_violation = source_path_boundary_violation(inventory.root, path, label="archive context source ref")
+        if boundary_violation is not None or not path.is_file() or path.is_symlink():
             continue
         try:
             existing_source_texts.append(path.read_text(encoding="utf-8"))
@@ -10020,7 +10031,9 @@ def _archive_context_resolve_source_refs(
     missing: list[str] = []
     archived_replacements: list[str] = []
     for rel in sorted(source_refs):
-        if (inventory.root / rel).is_file():
+        path = inventory.root / rel
+        boundary_violation = source_path_boundary_violation(inventory.root, path, label="archive context source ref")
+        if boundary_violation is None and path.is_file() and not path.is_symlink():
             continue
         replacements = _archive_context_archived_source_replacements(inventory, rel)
         if replacements:
@@ -10037,10 +10050,11 @@ def _archive_context_archived_source_replacements(inventory: Inventory, rel_path
             continue
         source_name = Path(rel_path).name
         archive_dir = inventory.root / archive_prefix
-        if not archive_dir.is_dir():
+        boundary_violation = source_path_boundary_violation(inventory.root, archive_dir, label="archive context archived-source directory")
+        if boundary_violation is not None or not archive_dir.is_dir():
             return ()
         matches = []
-        for candidate in sorted(path for path in archive_dir.glob("*.md") if path.is_file()):
+        for candidate in sorted(path for path in archive_dir.glob("*.md") if path.is_file() and not path.is_symlink()):
             if candidate.name == source_name or candidate.name.endswith(f"-{source_name}"):
                 matches.append(candidate.relative_to(inventory.root).as_posix())
         return tuple(matches)
@@ -10461,6 +10475,9 @@ def _route_reference_target_state(inventory: Inventory, record: RouteReferenceRe
         return ("present", rel_path) if _route_reference_pattern_exists(inventory, rel_path) else ("optional_pattern", rel_path)
     target_path = inventory.root / rel_path
     if target_path.exists():
+        boundary_violation = source_path_boundary_violation(inventory.root, target_path, label="route-reference target")
+        if boundary_violation is not None or target_path.is_symlink() or not target_path.is_file():
+            return "unsafe", rel_path
         return "present", rel_path
     product_root = _route_reference_product_source_root(inventory)
     if product_root and _route_reference_is_product_target(record, rel_path) and (product_root / rel_path).exists():
@@ -11265,9 +11282,12 @@ def _budget_label(lines: int, chars: int) -> str:
 
 
 def _git_findings(root: Path) -> list[Finding]:
+    git = shutil.which("git")
+    if not git:
+        return [Finding("warn", "git-status", "git executable unavailable: git")]
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain"],
+            [git, "-c", "core.quotePath=false", "-C", str(root), "status", "--untracked-files=all", "--porcelain=v1"],
             check=False,
             capture_output=True,
             text=True,
@@ -11307,10 +11327,13 @@ def external_orchestrator_shell_preflight_findings(
         ),
     ]
     findings.extend(_external_orchestrator_live_product_findings(workspace_path, inventory.root, product_path))
-    findings.extend(_external_orchestrator_shell_probe_findings(workspace_path))
-    findings.extend(_external_orchestrator_git_probe_findings(workspace_path))
-    findings.extend(_external_orchestrator_mlh_probe_findings(workspace_path))
-    findings.extend(_external_orchestrator_mcp_probe_findings(workspace_path))
+    probe_gate_findings = _external_orchestrator_probe_gate_findings(workspace_path)
+    findings.extend(probe_gate_findings)
+    if not any(finding.severity == "warn" for finding in probe_gate_findings):
+        findings.extend(_external_orchestrator_shell_probe_findings(workspace_path))
+        findings.extend(_external_orchestrator_git_probe_findings(workspace_path))
+        findings.extend(_external_orchestrator_mlh_probe_findings(workspace_path))
+        findings.extend(_external_orchestrator_mcp_probe_findings(workspace_path))
     findings.append(
         Finding(
             "info",
@@ -11384,6 +11407,19 @@ def _external_orchestrator_shell_probe_findings(workspace: Path) -> list[Finding
     if result.returncode != 0:
         return [Finding("warn", "orchestrator-shell-capability-refused", f"process spawn exited {result.returncode}: {_probe_output(result)}", str(workspace))]
     return [Finding("info", "orchestrator-shell-capability-ok", f"process spawn succeeded in candidate workspace: {_probe_output(result)}", str(workspace))]
+
+
+def _external_orchestrator_probe_gate_findings(workspace: Path) -> list[Finding]:
+    if workspace.exists() and workspace.is_symlink():
+        return [
+            Finding(
+                "warn",
+                "orchestrator-shell-capability-refused",
+                "capability probes were skipped because the candidate workspace is a symlink; choose a normal disposable directory",
+                str(workspace),
+            )
+        ]
+    return []
 
 
 def _external_orchestrator_git_probe_findings(workspace: Path) -> list[Finding]:

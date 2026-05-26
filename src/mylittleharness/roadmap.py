@@ -477,21 +477,37 @@ def _load_roadmap_batch_manifest(manifest_text: str, source_label: str) -> tuple
 
 
 def _load_roadmap_batch_json(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
+    duplicate_keys: list[str] = []
+
+    def no_duplicate_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        obj: dict[str, object] = {}
+        seen: set[str] = set()
+        for key, value in pairs:
+            key_text = str(key)
+            if key_text in seen:
+                duplicate_keys.append(key_text)
+            seen.add(key_text)
+            obj[key_text] = value
+        return obj
+
     try:
-        return json.loads(manifest_text), []
+        parsed = json.loads(manifest_text, object_pairs_hook=no_duplicate_object)
     except json.JSONDecodeError as exc:
         return None, [Finding("error", "roadmap-batch-refused", f"batch JSON manifest is malformed: {exc}", source_label)]
+    if duplicate_keys:
+        return None, [
+            Finding(
+                "error",
+                "roadmap-batch-refused",
+                f"batch JSON manifest contains duplicate field(s): {', '.join(_dedupe_nonempty(duplicate_keys))}",
+                source_label,
+            )
+        ]
+    return parsed, []
 
 
 def _load_roadmap_batch_yaml(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
-    try:
-        import yaml  # type: ignore[import-not-found]
-    except Exception:
-        return _load_simple_roadmap_batch_yaml(manifest_text, source_label)
-    try:
-        return yaml.safe_load(manifest_text), []
-    except Exception as exc:
-        return None, [Finding("error", "roadmap-batch-refused", f"batch YAML manifest is malformed: {exc}", source_label)]
+    return _load_simple_roadmap_batch_yaml(manifest_text, source_label)
 
 
 def _load_simple_roadmap_batch_yaml(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
@@ -538,7 +554,9 @@ def _load_simple_roadmap_batch_yaml(manifest_text: str, source_label: str) -> tu
             key, value, error = _split_simple_yaml_key_value(remainder, source_label)
             if error:
                 return None, [error]
-            item[key] = value
+            duplicate_error = _assign_simple_yaml_item_field(item, key, value, index + 1, source_label)
+            if duplicate_error:
+                return None, [duplicate_error]
         index += 1
         while index < len(lines) and lines[index][0] > indent:
             child_indent, child = lines[index]
@@ -564,12 +582,29 @@ def _load_simple_roadmap_batch_yaml(manifest_text: str, source_label: str) -> tu
                         return None, [scalar_error]
                     values.append(parsed)
                     index += 1
-                item[key] = values
+                duplicate_error = _assign_simple_yaml_item_field(item, key, values, index + 1, source_label)
+                if duplicate_error:
+                    return None, [duplicate_error]
                 continue
-            item[key] = value
+            duplicate_error = _assign_simple_yaml_item_field(item, key, value, index + 1, source_label)
+            if duplicate_error:
+                return None, [duplicate_error]
             index += 1
         root_items.append(item)
     return {"items": root_items}, []
+
+
+def _assign_simple_yaml_item_field(item: dict[str, object], key: str, value: object, line: int, source_label: str) -> Finding | None:
+    normalized = _batch_key(key)
+    if normalized in {_batch_key(existing) for existing in item}:
+        return Finding(
+            "error",
+            "roadmap-batch-refused",
+            f"duplicate YAML field in batch item near line {line}: {key}",
+            source_label,
+        )
+    item[key] = value
+    return None
 
 
 def _split_simple_yaml_key_value(text: str, source_label: str) -> tuple[str, object, Finding | None]:
@@ -606,7 +641,26 @@ def _parse_simple_yaml_scalar(text: str, source_label: str) -> tuple[object, Fin
 def _roadmap_request_from_batch_item(item: object, index: int, source_label: str) -> tuple[RoadmapRequest | None, list[Finding]]:
     if not isinstance(item, dict):
         return None, [Finding("error", "roadmap-batch-refused", f"items[{index}] must be an object", source_label)]
-    normalized = {_batch_key(str(key)): value for key, value in item.items()}
+    normalized: dict[str, object] = {}
+    duplicate_normalized_keys: list[str] = []
+    for key, value in item.items():
+        normalized_key = _batch_key(str(key))
+        if normalized_key in normalized:
+            duplicate_normalized_keys.append(normalized_key)
+            continue
+        normalized[normalized_key] = value
+    if duplicate_normalized_keys:
+        return None, [
+            Finding(
+                "error",
+                "roadmap-batch-refused",
+                f"items[{index}] has duplicate field(s) after normalization: {', '.join(_dedupe_nonempty(duplicate_normalized_keys))}",
+                source_label,
+            )
+        ]
+    alias_errors = _batch_alias_collision_errors(normalized, index, source_label)
+    if alias_errors:
+        return None, alias_errors
     action = _batch_scalar(normalized.pop("action", "add"))
     if action and str(action).strip().casefold().replace("_", "-") != "add":
         return None, [Finding("error", "roadmap-batch-refused", f"items[{index}].action must be 'add' for add-many", source_label)]
@@ -687,6 +741,33 @@ def _roadmap_request_from_batch_item(item: object, index: int, source_label: str
         ),
         [],
     )
+
+
+def _batch_alias_collision_errors(normalized: dict[str, object], index: int, source_label: str) -> list[Finding]:
+    alias_groups = (
+        ("item_id", ("id",)),
+        ("dependencies", ("dependency",)),
+        ("slice_members", ("slice_member",)),
+        ("slice_dependencies", ("slice_dependency",)),
+        ("related_specs", ("related_spec",)),
+        ("target_artifacts", ("target_artifact",)),
+        ("source_members", ("source_member",)),
+        ("clear_fields", ("clear_field",)),
+        ("custom_fields", ("field",)),
+    )
+    findings: list[Finding] = []
+    for canonical, aliases in alias_groups:
+        present = [field for field in (canonical, *aliases) if field in normalized]
+        if len(present) > 1:
+            findings.append(
+                Finding(
+                    "error",
+                    "roadmap-batch-refused",
+                    f"items[{index}] has ambiguous alias fields for {canonical}: {', '.join(present)}",
+                    source_label,
+                )
+            )
+    return findings
 
 
 def _batch_key(value: str) -> str:
@@ -5133,7 +5214,7 @@ def _normalized_item_id(value: object) -> str:
 
 
 def _normalize_rel(value: object) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()
 
 
 def _frontmatter_list_values(value: object) -> tuple[str, ...]:

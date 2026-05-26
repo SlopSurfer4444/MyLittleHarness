@@ -100,7 +100,8 @@ def approval_packet_apply_findings(inventory: Inventory, request: ApprovalPacket
                     text=text,
                     backup_path=target.with_name(f".{target.name}.bak"),
                 ),
-            )
+            ),
+            root=inventory.root,
         )
     except FileTransactionError as exc:
         findings.append(Finding("error", "approval-packet-refused", f"failed to write approval packet before apply completed: {exc}", rel_path))
@@ -282,7 +283,7 @@ def _root_relative_path_conflict(rel_path: str) -> str:
 
 
 def _normalize_ref(value: str) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()
 
 
 def _short_hash(text: str) -> str:

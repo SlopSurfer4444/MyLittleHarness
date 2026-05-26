@@ -9,6 +9,7 @@ from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
 from .reporting import RouteWriteEvidence
+from .root_boundary import source_path_boundary_violation
 
 
 DEFAULT_STATE_REL = "project/project-state.md"
@@ -93,23 +94,13 @@ def _route_reference_transaction_guard_issues(
         return []
 
     final_texts = {_normalize_rel(write.rel_path): write.after_text for write in changed_writes}
-    deleted_rels = {rel_path for rel_path, text in final_texts.items() if text is None}
-    present_after_rels = {rel_path for rel_path, text in final_texts.items() if text is not None}
     issues: list[RouteReferenceGuardIssue] = []
 
     for write in changed_writes:
         source_rel = _normalize_rel(write.rel_path)
-        before_required = {
-            reference.identity
-            for reference in _required_route_references_for_text(source_rel, write.before_text or "")
-        }
         after_required = _required_route_references_for_text(source_rel, write.after_text or "")
         for reference in after_required:
             target_rel, reason = _required_target_resolution(inventory, reference.target)
-            is_new_required_reference = reference.identity not in before_required
-            target_deleted_in_transaction = bool(target_rel and target_rel in deleted_rels and target_rel not in present_after_rels)
-            if not is_new_required_reference and not target_deleted_in_transaction:
-                continue
             if reason:
                 issues.append(RouteReferenceGuardIssue(reference, reason))
                 continue
@@ -287,7 +278,11 @@ def _required_target_exists_after_transaction(
 ) -> bool:
     if target_rel in final_texts:
         return final_texts[target_rel] is not None
-    return (inventory.root / target_rel).exists()
+    target = inventory.root / target_rel
+    violation = source_path_boundary_violation(inventory.root, target, label="required route reference target")
+    if violation is not None:
+        return False
+    return target.is_file() and not target.is_symlink()
 
 
 def _normalize_reference_target(value: object) -> str:

@@ -111,6 +111,7 @@ def research_import_dry_run_findings(inventory: Inventory, request: ResearchImpo
     errors = _research_import_preflight_errors(inventory, request, target)
     if target:
         findings.extend(_target_findings(target, apply=False))
+    if target and not errors:
         rendered, render_findings = _render_research_import(inventory.root, target)
         findings.extend(render_findings)
         findings.extend(route_write_findings("research-import-route-write", (_route_write(inventory.root, target.rel_path, rendered),), apply=False))
@@ -148,7 +149,10 @@ def research_import_apply_findings(inventory: Inventory, request: ResearchImport
     tmp_path = target.path.with_name(f".{target.path.name}.research-import.tmp")
     backup_path = target.path.with_name(f".{target.path.name}.research-import.backup")
     try:
-        cleanup_warnings = apply_file_transaction((AtomicFileWrite(target.path, tmp_path, rendered, backup_path),))
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target.path, tmp_path, rendered, backup_path),),
+            root=inventory.root,
+        )
     except OSError as exc:
         return [Finding("error", "research-import-refused", f"research import apply failed before all target writes completed: {exc}", target.rel_path)]
 

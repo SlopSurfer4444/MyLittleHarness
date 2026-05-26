@@ -15,6 +15,7 @@ from .models import Finding
 from .parsing import extract_path_refs, parse_frontmatter
 from .reporting import RouteWriteEvidence, route_write_findings
 from .research_distill import distill_research_text
+from .root_boundary import source_path_boundary_violation
 
 
 RESEARCH_DIR_REL = "project/research"
@@ -111,6 +112,7 @@ def research_compare_dry_run_findings(inventory: Inventory, request: ResearchCom
     errors = _research_compare_preflight_errors(inventory, request, target)
     if target:
         findings.extend(_target_findings(target, apply=False))
+    if target and not errors:
         if not any(source.read_error for source in target.sources):
             rendered, render_findings = _render_research_compare(inventory.root, target)
             findings.extend(render_findings)
@@ -158,7 +160,7 @@ def research_compare_apply_findings(inventory: Inventory, request: ResearchCompa
         if source.archive_path:
             operations.append(AtomicFileDelete(source.path, _backup_path(source.path)))
     try:
-        cleanup_warnings = apply_file_transaction(operations)
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
     except (OSError, FileTransactionError) as exc:
         return [Finding("error", "research-compare-refused", f"research compare apply failed before all target writes completed: {exc}", target.rel_path)]
 
@@ -239,7 +241,15 @@ def _research_compare_target(inventory: Inventory, request: ResearchCompareReque
 
 def _research_compare_source(root: Path, rel_path: str, archive_rel: str = "") -> ResearchCompareSource:
     path = root / rel_path
-    text, source_hash, read_error = _source_snapshot(path)
+    text = ""
+    source_hash = ""
+    read_error = ""
+    conflict = _root_relative_path_conflict(rel_path)
+    boundary_violation = None if conflict else source_path_boundary_violation(root, path, label="research compare source")
+    if boundary_violation is not None:
+        read_error = boundary_violation.message
+    elif not conflict:
+        text, source_hash, read_error = _source_snapshot(path)
     frontmatter = parse_frontmatter(text) if text else None
     title = _title_from_source(text, rel_path)
     status = ""
@@ -703,7 +713,7 @@ def _planned_link_repairs(inventory: Inventory, replacements: dict[str, str]) ->
             continue
         updated = text
         for source_rel, archive_rel in replacements.items():
-            updated = updated.replace(source_rel, archive_rel)
+            updated = _replace_exact_route_ref(updated, source_rel, archive_rel)
         if updated != text:
             repairs.append((rel_path, path, updated))
     return tuple(repairs)
@@ -721,6 +731,11 @@ def _iter_lifecycle_markdown_files(root: Path) -> tuple[Path, ...]:
             continue
         candidates.extend(path for path in base.rglob("*.md") if path.is_file() and not path.is_symlink())
     return tuple(sorted(dict.fromkeys(candidates)))
+
+
+def _replace_exact_route_ref(text: str, source_rel: str, archive_rel: str) -> str:
+    pattern = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(source_rel)}(?![A-Za-z0-9_./-])")
+    return pattern.sub(archive_rel, text)
 
 
 def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> str:

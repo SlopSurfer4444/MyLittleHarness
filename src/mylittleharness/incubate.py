@@ -220,7 +220,8 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
     backup_path = target.path.with_name(f".{target.path.name}.incubate.backup")
     try:
         cleanup_warnings = apply_file_transaction(
-            (AtomicFileWrite(target.path, tmp_path, write_plan.text, backup_path),)
+            (AtomicFileWrite(target.path, tmp_path, write_plan.text, backup_path),),
+            root=inventory.root,
         )
     except OSError as exc:
         return [Finding("error", "incubate-refused", f"incubate apply failed before all target writes completed: {exc}", target.rel_path)]
@@ -300,7 +301,7 @@ def incubation_reconcile_apply_findings(
     cleanup_warnings: tuple[str, ...] = ()
     if operations:
         try:
-            cleanup_warnings = apply_file_transaction(operations)
+            cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
         except FileTransactionError as exc:
             return [
                 Finding(
@@ -1151,7 +1152,7 @@ def _frontmatter_list_values(value: object) -> tuple[str, ...]:
 
 
 def _normalize_rel(value: object) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()
 
 
 def _yaml_double_quoted_value(value: str) -> str:

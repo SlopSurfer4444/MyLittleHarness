@@ -13,6 +13,7 @@ from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
 from .parsing import Frontmatter, parse_frontmatter
+from .root_boundary import source_path_boundary_violation
 from .writeback import (
     WritebackFact,
     acceptance_evidence_findings,
@@ -224,7 +225,10 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
         tmp_path = target.with_name(f".{target.name}.tmp")
         backup_path = target.with_name(f".{target.name}.bak")
         try:
-            cleanup_warnings = apply_file_transaction((AtomicFileWrite(target, tmp_path, refresh_plan.updated_text, backup_path),))
+            cleanup_warnings = apply_file_transaction(
+                (AtomicFileWrite(target, tmp_path, refresh_plan.updated_text, backup_path),),
+                root=inventory.root,
+            )
         except FileTransactionError as exc:
             findings.append(Finding("error", "agent-run-record-refused", f"failed to refresh agent run record before apply completed: {exc}", target_rel))
             findings.extend(_agent_run_record_boundary_findings())
@@ -240,7 +244,10 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
     tmp_path = target.with_name(f".{target.name}.tmp")
     backup_path = target.with_name(f".{target.name}.bak")
     try:
-        cleanup_warnings = apply_file_transaction((AtomicFileWrite(target, tmp_path, text, backup_path),))
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target, tmp_path, text, backup_path),),
+            root=inventory.root,
+        )
     except FileTransactionError as exc:
         findings.append(Finding("error", "agent-run-record-refused", f"failed to write agent run record before apply completed: {exc}", target_rel))
         findings.extend(_agent_run_record_boundary_findings())
@@ -859,6 +866,11 @@ def _source_hash_entries_for_refs(root: Path, rel_paths: Iterable[str], code_pre
             findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{rel_path} was recorded as invalid-path: {conflict}", rel_path))
             continue
         path = root / rel_path
+        boundary_violation = source_path_boundary_violation(root, path, label="agent run source hash ref")
+        if boundary_violation is not None:
+            entries.append(f"{rel_path} invalid-path")
+            findings.append(Finding("warn", f"{code_prefix}-source-hash", boundary_violation.message, rel_path))
+            continue
         if not path.exists():
             entries.append(f"{rel_path} missing")
             findings.append(Finding("info", f"{code_prefix}-source-hash", f"{rel_path} recorded as missing source", rel_path))
@@ -973,6 +985,10 @@ def _agent_run_source_hash_findings(root: Path, rel_path: str, data: dict[str, o
             findings.append(Finding("warn", f"{code}-malformed", f"source hash path {conflict}: {source_rel}", rel_path))
             continue
         source_path = root / source_rel
+        boundary_violation = source_path_boundary_violation(root, source_path, label="agent run source hash target")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", f"{code}-stale", boundary_violation.message, rel_path))
+            continue
         if expected_missing:
             if source_path.exists():
                 findings.append(Finding("warn", f"{code}-stale", f"source hash recorded missing path now exists: {source_rel}", rel_path))

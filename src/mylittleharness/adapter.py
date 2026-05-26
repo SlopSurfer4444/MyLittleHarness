@@ -296,7 +296,7 @@ def _relay_ref_conflict(rel_path: str) -> str:
 
 
 def _normalize_relay_ref(value: object) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()
 
 
 def _clean_relay_label(value: object) -> str:

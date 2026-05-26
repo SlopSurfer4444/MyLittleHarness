@@ -4275,7 +4275,7 @@ def _manifest_memory_value(inventory: Inventory, key: str, default: str) -> str:
 
 
 def _normalize_rel(value: str) -> str:
-    return value.replace("\\", "/").strip("/")
+    return value.replace("\\", "/").strip()
 
 
 def _path_escapes_root(root: Path, path: Path) -> bool:

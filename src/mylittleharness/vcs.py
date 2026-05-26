@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -167,7 +168,7 @@ def probe_vcs(root: Path, runner: GitRunner | None = None) -> VcsPosture:
         return VcsPosture(root=root, git_available=True, is_worktree=False, state="non-git", detail="not inside a Git worktree")
 
     top_level = _git_top_level(root, runner)
-    status = _run_git(root, ("status", "--porcelain=v1"), runner)
+    status = _run_git(root, ("status", "--untracked-files=all", "--porcelain=v1"), runner)
     if isinstance(status, str):
         return VcsPosture(root=root, git_available=False, is_worktree=True, state="unknown", top_level=top_level, detail=status)
     if status.returncode != 0:
@@ -583,7 +584,10 @@ def _git_top_level(root: Path, runner: GitRunner | None) -> str | None:
 
 
 def _run_git(root: Path, args: Sequence[str], runner: GitRunner | None) -> subprocess.CompletedProcess[str] | str:
-    command = ("git", "-C", str(root), *args)
+    git = _git_executable()
+    if git is None:
+        return "git executable unavailable: git"
+    command = (git, "-c", "core.quotePath=false", "-C", str(root), *args)
     try:
         if runner:
             return runner(command)
@@ -603,7 +607,10 @@ def _run_git(root: Path, args: Sequence[str], runner: GitRunner | None) -> subpr
 
 
 def _run_git_with_input(root: Path, args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[str] | str:
-    command = ("git", "-C", str(root), *args)
+    git = _git_executable()
+    if git is None:
+        return "git executable unavailable: git"
+    command = (git, "-c", "core.quotePath=false", "-C", str(root), *args)
     try:
         return subprocess.run(
             list(command),
@@ -632,9 +639,52 @@ def _parse_porcelain(text: str) -> list[VcsChangedPath]:
         if not raw_line:
             continue
         status = raw_line[:2].strip() or "??"
-        path = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
+        path = _decode_git_path(raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip())
         entries.append(VcsChangedPath(status=status, path=path))
     return entries
+
+
+def _git_executable() -> str | None:
+    return shutil.which("git")
+
+
+def _decode_git_path(path: str) -> str:
+    if len(path) < 2 or not path.startswith('"') or not path.endswith('"'):
+        return path
+    body = path[1:-1]
+    output = bytearray()
+    escape_map = {
+        "a": b"\a",
+        "b": b"\b",
+        "f": b"\f",
+        "n": b"\n",
+        "r": b"\r",
+        "t": b"\t",
+        "v": b"\v",
+        "\\": b"\\",
+        '"': b'"',
+    }
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\" and index + 1 < len(body):
+            next_char = body[index + 1]
+            octal = body[index + 1 : index + 4]
+            if len(octal) == 3 and all(ch in "01234567" for ch in octal):
+                output.append(int(octal, 8))
+                index += 4
+                continue
+            mapped = escape_map.get(next_char)
+            if mapped is not None:
+                output.extend(mapped)
+                index += 2
+                continue
+            output.extend(next_char.encode("utf-8", errors="replace"))
+            index += 2
+            continue
+        output.extend(char.encode("utf-8", errors="replace"))
+        index += 1
+    return output.decode("utf-8", errors="replace")
 
 
 def _parse_trailer_lines(text: str) -> list[VcsTrailer]:

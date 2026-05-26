@@ -10,6 +10,7 @@ from .agent_roles import role_manifest
 from .claims import work_claim_record_hashes
 from .inventory import Inventory
 from .models import Finding
+from .root_boundary import source_path_boundary_violation
 from .routes import route_manifest
 
 
@@ -227,6 +228,11 @@ def _ref_hashes(root: Path, refs: tuple[str, ...], code: str) -> tuple[list[str]
             findings.append(Finding("warn", code, f"{ref} was recorded as invalid-path: {conflict}", ref))
             continue
         path = root / normalized
+        boundary_violation = source_path_boundary_violation(root, path, label="review token ref")
+        if boundary_violation is not None:
+            hashes.append(f"{normalized} invalid-path")
+            findings.append(Finding("warn", code, boundary_violation.message, normalized))
+            continue
         if not path.exists():
             hashes.append(f"{normalized} missing")
             findings.append(Finding("warn", code, f"{normalized} is missing", normalized))
@@ -284,4 +290,4 @@ def _root_relative_path_conflict(rel_path: str) -> str:
 
 
 def _normalize_ref(value: str) -> str:
-    return str(value or "").replace("\\", "/").strip().strip("/")
+    return str(value or "").replace("\\", "/").strip()

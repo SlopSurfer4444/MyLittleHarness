@@ -3384,6 +3384,65 @@ class CliTests(unittest.TestCase):
             self.assertIn("route-reference-transaction-guard-unresolved", apply_rendered)
             self.assertIn("writeback apply refused before writing files", apply_rendered)
 
+    def test_roadmap_apply_refuses_existing_missing_required_archive_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Already Done\n\n"
+                "- `id`: `already-done`\n"
+                "- `status`: `done`\n"
+                "- `order`: `1`\n"
+                "- `execution_slice`: `already-done`\n"
+                "- `slice_goal`: `Keep the item closed.`\n"
+                "- `slice_members`: `[\"already-done\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `explicit closeout/writeback only`\n"
+                "- `dependencies`: `[]`\n"
+                "- `source_incubation`: ``\n"
+                "- `source_research`: ``\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: ``\n"
+                "- `archived_plan`: `project/archive/plans/missing-existing.md`\n"
+                "- `target_artifacts`: `[]`\n"
+                "- `verification_summary`: `Existing guard regression.`\n"
+                "- `docs_decision`: `updated`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "already-done",
+                        "--docs-decision",
+                        "not-needed",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-reference-transaction-guard-unresolved", rendered)
+            self.assertIn(
+                "project/roadmap.md.already-done.archived_plan -> project/archive/plans/missing-existing.md",
+                rendered,
+            )
+            self.assertIn("roadmap apply refused before writing files", rendered)
+
     def test_check_focus_grain_reports_slice_diagnostics_and_calibration_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="in_progress")
@@ -12990,6 +13049,7 @@ class CliTests(unittest.TestCase):
                     ),
                     0,
                 )
+            (root / "project/archive/plans/done-1.md").unlink()
             before = snapshot_tree(root)
 
             output = io.StringIO()
@@ -13086,6 +13146,7 @@ class CliTests(unittest.TestCase):
                     ),
                     0,
                 )
+            (root / history_rel).unlink()
             before = snapshot_tree(root)
 
             output = io.StringIO()
@@ -13142,6 +13203,7 @@ class CliTests(unittest.TestCase):
                     ),
                     0,
                 )
+            (root / "project/archive/plans/done-1.md").unlink()
             before = snapshot_tree(root)
 
             output = io.StringIO()
@@ -28412,6 +28474,10 @@ def write_reconcile_incubation_notes(root: Path) -> None:
 
 
 def write_mixed_order_roadmap(root: Path) -> None:
+    archive_dir = root / "project/archive/plans"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "done-before.md").write_text("# Done Before Plan\n", encoding="utf-8")
+
     (root / "project/roadmap.md").write_text(
         "---\n"
         'id: "memory-routing-roadmap"\n'
@@ -28679,6 +28745,12 @@ def write_roadmap_with_done_tail(root: Path) -> None:
             "- `supersedes`: `[]`\n"
             "- `superseded_by`: `[]`\n\n"
         )
+
+    archive_dir = root / "project/archive/plans"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(1, 7):
+        item_id = f"done-{index}"
+        (archive_dir / f"{item_id}.md").write_text(f"# {item_id} Plan\n", encoding="utf-8")
 
     (root / "project/roadmap.md").write_text(
         "---\n"

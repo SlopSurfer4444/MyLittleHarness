@@ -12,6 +12,7 @@ from .handoff import handoff_packet_status_findings
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
+from .root_boundary import source_path_boundary_violation
 
 
 AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
@@ -372,6 +373,9 @@ def _observation_findings(observations: list[ReconcileObservation], code_prefix:
 
 def _load_agent_run_records(root: Path, code_prefix: str) -> tuple[list[dict[str, object]], list[Finding]]:
     directory = root / AGENT_RUNS_DIR_REL
+    boundary_violation = source_path_boundary_violation(root, directory, label="agent run record directory")
+    if boundary_violation is not None:
+        return [], [Finding("warn", f"{code_prefix}-agent-run-malformed", boundary_violation.message, AGENT_RUNS_DIR_REL)]
     if not directory.exists() or not directory.is_dir():
         return [], [
             Finding(
@@ -399,6 +403,9 @@ def _load_agent_run_records(root: Path, code_prefix: str) -> tuple[list[dict[str
 
 def _load_json_records(root: Path, directory_rel: str, id_field: str, code_prefix: str, label: str) -> tuple[list[dict[str, object]], list[Finding]]:
     directory = root / directory_rel
+    boundary_violation = source_path_boundary_violation(root, directory, label=f"{label} record directory")
+    if boundary_violation is not None:
+        return [], [Finding("warn", f"{code_prefix}-{label}-malformed", boundary_violation.message, directory_rel)]
     if not directory.exists() or not directory.is_dir():
         return [], [Finding("info", f"{code_prefix}-{label}s", f"no {label} records found at {directory_rel}/*.json", directory_rel)]
     records: list[dict[str, object]] = []

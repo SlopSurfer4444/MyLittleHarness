@@ -13,6 +13,7 @@ from .inventory import Inventory
 from .models import Finding
 from .parsing import extract_path_refs, parse_frontmatter
 from .reporting import RouteWriteEvidence, route_write_findings
+from .root_boundary import source_path_boundary_violation
 
 
 RESEARCH_DIR_REL = "project/research"
@@ -104,6 +105,7 @@ def research_distill_dry_run_findings(inventory: Inventory, request: ResearchDis
     errors = _research_distill_preflight_errors(inventory, request, target)
     if target:
         findings.extend(_target_findings(target, apply=False))
+    if target and not errors:
         if target.source_text and not target.source_read_error:
             rendered, render_findings = _render_research_distill(inventory.root, target)
             findings.extend(render_findings)
@@ -142,7 +144,10 @@ def research_distill_apply_findings(inventory: Inventory, request: ResearchDisti
     tmp_path = target.path.with_name(f".{target.path.name}.research-distill.tmp")
     backup_path = target.path.with_name(f".{target.path.name}.research-distill.backup")
     try:
-        cleanup_warnings = apply_file_transaction((AtomicFileWrite(target.path, tmp_path, rendered, backup_path),))
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target.path, tmp_path, rendered, backup_path),),
+            root=inventory.root,
+        )
     except OSError as exc:
         return [Finding("error", "research-distill-refused", f"research distill apply failed before all target writes completed: {exc}", target.rel_path)]
 
@@ -169,7 +174,15 @@ def research_distill_apply_findings(inventory: Inventory, request: ResearchDisti
 def _research_distill_target(inventory: Inventory, request: ResearchDistillRequest) -> ResearchDistillTarget | None:
     source_rel = request.source
     source_path = inventory.root / source_rel if source_rel else inventory.root
-    source_text, source_hash, source_read_error = _source_snapshot(source_path)
+    source_text = ""
+    source_hash = ""
+    source_read_error = ""
+    source_conflict = _root_relative_path_conflict(source_rel) if source_rel else "missing source"
+    boundary_violation = None if source_conflict else source_path_boundary_violation(inventory.root, source_path, label="research distill source")
+    if boundary_violation is not None:
+        source_read_error = boundary_violation.message
+    elif not source_conflict:
+        source_text, source_hash, source_read_error = _source_snapshot(source_path)
     title = request.title or _title_from_source(source_text, source_rel)
     rel_path = request.target or _default_distill_rel(title)
     if not rel_path:
