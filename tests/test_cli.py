@@ -23079,6 +23079,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-product-root-path", rogue_codes)
             self.assertIn("hooks-policy-block-product-root-direct-edit", rogue_codes)
             self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
+            rogue_messages = "\n".join(str(finding["message"]) for finding in rogue_payload["findings"])
+            self.assertIn(
+                "next_safe_command=mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> --target-artifact src/rogue.py",
+                rogue_messages,
+            )
+            self.assertNotIn("next_safe_command=mylittleharness --root <root> check", rogue_messages)
 
     def test_hooks_pre_tool_uses_apply_patch_targets_from_command_field(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -23286,6 +23292,11 @@ class CliTests(unittest.TestCase):
                 "hooks-policy-block-product-root-path",
                 {finding["code"] for finding in direct_write_payload["findings"]},
             )
+            direct_write_messages = "\n".join(str(finding["message"]) for finding in direct_write_payload["findings"])
+            self.assertIn(
+                "next_safe_command=mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> --target-artifact docs/out.md",
+                direct_write_messages,
+            )
             self.assertTrue(direct_archive_write_payload["block"])
             self.assertIn(
                 "hooks-policy-block-lifecycle-markdown-shortcut",
@@ -23326,6 +23337,44 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-product-root-path", rogue_codes)
             self.assertIn("hooks-policy-block-product-root-direct-edit", rogue_codes)
             self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
+            rogue_messages = "\n".join(str(finding["message"]) for finding in rogue_payload["findings"])
+            self.assertIn(
+                "next_safe_command=mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> --target-artifact src/rogue.py",
+                rogue_messages,
+            )
+
+    def test_hooks_pre_tool_product_root_write_without_active_plan_suggests_plan_route(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operator")
+            product_root = Path(tmp) / "product"
+            product_root.mkdir()
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            product_target = product_root / "src" / "rogue.py"
+            write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path '{product_target}' -Value 'x'",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], write_input)
+
+            self.assertTrue(payload["block"])
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertIn(
+                "next_safe_command=mylittleharness --root <root> plan --dry-run --roadmap-item <id>",
+                messages,
+            )
+            self.assertNotIn("next_safe_command=mylittleharness --root <root> check", messages)
 
     def test_hooks_pre_tool_blocks_wrapped_alias_and_runtime_write_forms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

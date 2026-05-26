@@ -1514,13 +1514,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
-    if _looks_like_product_root_direct_edit(inventory, paths, write_command):
+    product_root_direct_path = _product_root_direct_edit_path(inventory, paths, write_command)
+    if product_root_direct_path:
+        next_safe = _hook_product_root_write_next_safe_command(inventory, product_root_direct_path)
         findings.append(
             Finding(
                 "error",
                 "hooks-policy-block-product-root-direct-edit",
-                "blocked direct product-source edit from a serviced operating-root hook context; edit the configured product_source_root deliberately",
-                paths[0] if paths else None,
+                (
+                    "blocked direct product-source edit from a serviced operating-root hook context; "
+                    "declare the product path in active-plan target_artifacts before writing; "
+                    f"next_safe_command={next_safe}"
+                ),
+                product_root_direct_path,
             )
         )
     if len(findings) == 1:
@@ -2268,13 +2274,15 @@ def _path_policy_findings(
         if _is_under_configured_product_root(inventory, rel):
             if allow_read_only_source_paths or allow_mlh_owner_route_paths or _is_active_plan_product_artifact(inventory, rel):
                 continue
+            next_safe = _hook_product_root_write_next_safe_command(inventory, rel)
             findings.append(
                 Finding(
                     severity,
                     "hooks-policy-block-product-root-path",
                     (
                         "tool request names the configured product source root from an operating-root context; "
-                        "keep product edits deliberate and bounded; next_safe_command=mylittleharness --root <root> check"
+                        "keep product edits deliberate and bounded by active-plan target_artifacts; "
+                        f"next_safe_command={next_safe}"
                     ),
                     rel,
                 )
@@ -2473,10 +2481,13 @@ def _nonroute_project_markdown_write_path(paths: list[str], command: str) -> str
     return ""
 
 
-def _looks_like_product_root_direct_edit(inventory: Inventory, paths: list[str], command: str) -> bool:
+def _product_root_direct_edit_path(inventory: Inventory, paths: list[str], command: str) -> str:
     if not _looks_like_write_command(command):
-        return False
-    return any(_is_under_configured_product_root(inventory, path) and not _is_active_plan_product_artifact(inventory, path) for path in paths)
+        return ""
+    for path in paths:
+        if _is_under_configured_product_root(inventory, path) and not _is_active_plan_product_artifact(inventory, path):
+            return path
+    return ""
 
 
 def _hook_code_write_paths(inventory: Inventory, paths: list[str], command: str) -> list[str]:
@@ -2527,6 +2538,23 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if route_id == "archive":
         return mlh_command("memory-hygiene", "--dry-run", "--scan")
     return mlh_command("suggest", "--intent", safe_double_quoted(f"route owner for {safe_intent_text(rel or path, placeholder='<path>')}"))
+
+
+def _hook_product_root_write_next_safe_command(inventory: Inventory, path: str) -> str:
+    if not _has_active_plan(inventory):
+        return mlh_command("plan", "--dry-run", "--roadmap-item", "<id>")
+    product_rel = _product_relative_path(inventory, path)
+    target = _normalize_hook_path(product_rel) if product_rel else "<rel-path>"
+    return mlh_command(
+        "roadmap",
+        "--dry-run",
+        "--action",
+        "update",
+        "--item-id",
+        "<id>",
+        "--target-artifact",
+        target or "<rel-path>",
+    )
 
 
 def _generated_cache_recovery_command(inventory: Inventory) -> str:
