@@ -20,6 +20,7 @@ from .reporting import RouteWriteEvidence, route_write_findings
 RELEASE_BOUNDARY = "no automatic release removal, lifecycle movement, closeout, archive, staging, commit, or next-plan opening"
 CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
 META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
+META_FEEDBACK_ENABLE_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ENABLE"
 META_FEEDBACK_CI_ENABLE_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 AGENT_OPERABILITY_SIGNAL_TYPES = {"agent-operability", "agent-operability-micro-friction"}
@@ -174,6 +175,16 @@ def meta_feedback_env_destination_root(environ: Mapping[str, str] | None = None)
     if _env_truthy(env.get("GITHUB_ACTIONS")) and not _env_truthy(env.get(META_FEEDBACK_CI_ENABLE_ENV_VAR)):
         return None
     return env.get(META_FEEDBACK_ROOT_ENV_VAR)
+
+
+def meta_feedback_cli_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    explicit_enable = _env_truthy(env.get(META_FEEDBACK_ENABLE_ENV_VAR))
+    root_opt_in = bool(str(env.get(META_FEEDBACK_ROOT_ENV_VAR) or "").strip())
+    ci_enable = _env_truthy(env.get(META_FEEDBACK_CI_ENABLE_ENV_VAR))
+    if _env_truthy(env.get("GITHUB_ACTIONS")):
+        return explicit_enable or ci_enable
+    return explicit_enable or root_opt_in
 
 
 def _env_truthy(value: str | None) -> bool:

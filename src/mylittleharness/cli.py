@@ -107,9 +107,11 @@ from .hooks import (
 from .inventory import RootLoadError
 from .lifecycle_focus import session_active_work_findings
 from .meta_feedback import (
+    META_FEEDBACK_ENABLE_ENV_VAR,
     META_FEEDBACK_ROOT_ENV_VAR,
     is_central_meta_feedback_inventory,
     make_meta_feedback_request,
+    meta_feedback_cli_enabled,
     meta_feedback_env_destination_root,
     meta_feedback_apply_findings,
     meta_feedback_dry_run_findings,
@@ -340,6 +342,11 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("adapter --config-path is only supported for --target mcp-read-projection")
         if args.target != APPROVAL_RELAY_TARGET and (args.approval_packet_refs or args.relay_channel != "manual" or args.relay_recipient):
             parser.error("--approval-packet-ref and --relay-* are only valid with adapter --target approval-relay")
+    if args.command == "meta-feedback" and not meta_feedback_cli_enabled():
+        parser.error(
+            "meta-feedback is disabled by default for product users; set "
+            f"{META_FEEDBACK_ENABLE_ENV_VAR}=1 or {META_FEEDBACK_ROOT_ENV_VAR}=<central-root> for local developer use"
+        )
     if args.command == "hooks":
         hooks_adapter = bool(getattr(args, "adapter", False) or getattr(args, "client", None))
         if getattr(args, "json", False) and not getattr(args, "run", None):

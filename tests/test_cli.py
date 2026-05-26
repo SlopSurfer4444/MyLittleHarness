@@ -57,10 +57,16 @@ from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrail
 
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._ambient_meta_feedback_enable = os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ENABLE", None)
         self._ambient_meta_feedback_root = os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ROOT", None)
         self._ambient_meta_feedback_ci_enable = os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ENABLE_CI", None)
+        os.environ["MYLITTLEHARNESS_META_FEEDBACK_ENABLE"] = "1"
 
     def tearDown(self) -> None:
+        if self._ambient_meta_feedback_enable is None:
+            os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ENABLE", None)
+        else:
+            os.environ["MYLITTLEHARNESS_META_FEEDBACK_ENABLE"] = self._ambient_meta_feedback_enable
         if self._ambient_meta_feedback_root is None:
             os.environ.pop("MYLITTLEHARNESS_META_FEEDBACK_ROOT", None)
         else:
@@ -14848,6 +14854,24 @@ class CliTests(unittest.TestCase):
             self.assertIn("the dry-run refused before previewing a reliable apply target", rendered)
             self.assertNotIn("repo-visible authority is unchanged until an explicit apply succeeds", rendered)
             self.assertNotIn("rerun the same reviewed command with `--apply`", rendered)
+
+    def test_meta_feedback_cli_disabled_by_default_without_local_opt_in(self) -> None:
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "meta-feedback",
+                    "--dry-run",
+                    "--topic",
+                    "Default disabled",
+                    "--note",
+                    "Product users should not see or run internal meta-feedback by default.",
+                ]
+            )
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("meta-feedback is disabled by default for product users", stderr.getvalue())
+        self.assertIn("MYLITTLEHARNESS_META_FEEDBACK_ENABLE=1", stderr.getvalue())
 
     def test_meta_feedback_defaults_to_env_central_destination_from_product_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
