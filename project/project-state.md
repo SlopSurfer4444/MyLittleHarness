@@ -38,7 +38,7 @@ last_updated: "2026-04-29"
 
 ## Compatibility Fixtures
 
-- `.codex/project-workflow.toml`
+- `.mylittleharness/project-workflow.toml`
 - `.agents/docmap.yaml`
 - `project/project-state.md`
 - `project/specs/workflow/*.md`

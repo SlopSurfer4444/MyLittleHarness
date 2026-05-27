@@ -50,7 +50,7 @@ The implemented role-profile slice is read-only protocol data. `manifest --inspe
 
 Autonomous audit context stays tiered so the operator can inspect a root without turning every available file or report into hot prompt state:
 
-- Hot Authority: `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, the active plan when `plan_status = "active"`, accepted stable specs or decisions needed for the task, and current verification or closeout facts. These files are the default recovery surface and cannot be replaced by generated summaries.
+- Hot Authority: `AGENTS.md`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`, the active plan when `plan_status = "active"`, accepted stable specs or decisions needed for the task, and current verification or closeout facts. Legacy `.codex/project-workflow.toml` is a fallback only when the neutral manifest is absent. These files are the default recovery surface and cannot be replaced by generated summaries.
 - On-Demand Routes: `project/roadmap.md`, same-topic incubation or research, docs routing, route manifests, focused `check`, `intelligence`, `memory-hygiene`, and route-reference reports. These are read when the current question needs their lane; they route attention but do not approve writes.
 - Generated Projections: `.mylittleharness/generated/projection/**`, link/backlink/fan-in/relationship summaries, SQLite search indexes, generated manifests, and other rebuildable navigation caches. They can speed audit navigation and stale-reference discovery, but deletion or staleness must not change accepted truth.
 - Archive/Evidence: archived plans, archived reference material, `project/verification/*.md`, agent-run records, work claims, handoff packets, session-scoped active work records, approval packets, review-token inputs, and durable proof/evidence records. These are cold source-bound evidence recovered by pointer for audit, calibration, or closeout support; they are not default continuation state and cannot approve lifecycle movement by themselves.
@@ -86,7 +86,7 @@ The product source tree may contain:
 - product source under `src/mylittleharness/...`
 - tests under `tests/...`
 - `pyproject.toml` and package metadata
-- minimal compatibility fixtures under `.codex/`, `.agents/`, and `project/` while the CLI/tests need them
+- minimal compatibility fixtures under `.mylittleharness/`, `.agents/`, and `project/` while the CLI/tests need them
 
 ## Forbidden Product Memory
 
@@ -107,7 +107,7 @@ The product source tree must not contain:
 
 ## Compatibility Fixtures
 
-Files under `.codex`, `.agents`, and `project` in the product source checkout are compatibility fixtures unless a later explicit product plan changes their role. They support validation and tests; they do not outrank product docs or operating-root workflow authority.
+Files under `.mylittleharness`, `.agents`, and `project` in the product source checkout are compatibility fixtures unless a later explicit product plan changes their role. Legacy `.codex` manifests are target-root fallback/migration compatibility, not the product fixture path. They support validation and tests; they do not outrank product docs or operating-root workflow authority.
 
 Clean product specs belong under `docs/specs/...`.
 
@@ -117,7 +117,7 @@ An apply flag does not create authority by itself. Mutating CLI behavior may wri
 
 Multi-target apply rails must prepare all replacement bytes before changing live files, then apply bounded file transactions with temporary backups. If a late target replacement fails, completed target writes are rolled back when possible; if rollback cleanup itself fails, the command must report explicitly recoverable residue instead of treating partial mutation as lifecycle approval.
 
-`init --apply` is the primary implemented write gate for attach behavior, with `attach --apply` preserved as the compatibility spelling. Its allowed scope is create-only scaffold setup plus absent `.codex/project-workflow.toml` and `project/project-state.md` from explicit product templates, followed by attach-time disposable generated projection setup under `.mylittleharness/generated/projection/`. Creating `project/project-state.md` requires an operator-provided project name; the CLI must not infer authoritative project identity from a folder name. Attach apply refuses product-source compatibility fixtures, fallback/archive or generated-output roots, symlink path segments, non-directory scaffold conflicts, non-file template conflicts, template content mismatches, and generated-projection boundary conflicts before writing. SQLite FTS5 or index-build unavailability is degraded generated-output posture, not attach failure.
+`init --apply` is the primary implemented write gate for attach behavior, with `attach --apply` preserved as the compatibility spelling. Its allowed scope is create-only scaffold setup plus absent `.mylittleharness/project-workflow.toml` and `project/project-state.md` from explicit product templates, followed by attach-time disposable generated projection setup under `.mylittleharness/generated/projection/`. Creating `project/project-state.md` requires an operator-provided project name; the CLI must not infer authoritative project identity from a folder name. Attach apply refuses product-source compatibility fixtures, fallback/archive or generated-output roots, symlink path segments, non-directory scaffold conflicts, non-file template conflicts, template content mismatches, and generated-projection boundary conflicts before writing. SQLite FTS5 or index-build unavailability is degraded generated-output posture, not attach failure.
 
 `repair --apply` is the implemented limited repair write gate. Its allowed scope is snapshot-protected `project/project-state.md` frontmatter prepending for default-path prose operating state, absent eager scaffold directory creation, create-only `AGENTS.md` creation when validation reports a missing required operator contract, create-only `.agents/docmap.yaml` creation when validation reports a missing required docmap, create-only `project/specs/workflow/*.md` restoration when validation reports missing stable spec fixtures, and snapshot-protected `.agents/docmap.yaml` route repair in a live operating root that already has readable workflow-core manifest and strict workflow-core project-state frontmatter authority. Coarse root classification cannot upgrade malformed or partial state into repair authority. It does not create or rewrite manifest, active plans, existing AGENTS contracts, existing stable specs, archives, research files, generated reports, caches, local databases, broad docmap structure beyond the deterministic create template, malformed or partial state frontmatter, or workflow execution surfaces.
 

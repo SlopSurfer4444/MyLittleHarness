@@ -1536,7 +1536,7 @@ class CliTests(unittest.TestCase):
                 missing_code = main(["--root", str(root), "check"])
             self.assertEqual(missing_code, 0)
             self.assertEqual(before_missing, snapshot_tree_bytes(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             missing_rendered = missing_output.getvalue()
             self.assertIn("projection-cache-status", missing_rendered)
             self.assertIn("artifacts=missing", missing_rendered)
@@ -1620,7 +1620,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree_bytes(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("projection inspect reported generated cache posture without writing files", rendered)
             self.assertIn("Ceremony: cost=low; guarantee=read-only advisory output", rendered)
             self.assertIn("What changed: No repository files were changed", rendered)
@@ -3928,7 +3928,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness detach --dry-run", rendered)
             for heading in ("Root Posture", "Preservation", "Generated Projection", "Manual Recovery", "Boundary"):
                 self.assertIn(heading, rendered)
@@ -4141,7 +4141,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness tasks --inspect", rendered)
             for heading in ("Summary", "Operator Tasks", "Compatibility", "Boundary", "Future Power-Ups"):
                 self.assertIn(heading, rendered)
@@ -4170,7 +4170,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("root kind: live_operating_root", rendered)
             self.assertIn("tasks --inspect is terminal-only and read-only", rendered)
             self.assertIn("preflight --template git-pre-commit", rendered)
@@ -5267,7 +5267,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertFalse((root / "dist").exists())
             self.assertIn("MyLittleHarness bootstrap --inspect", rendered)
             self.assertIn("status: warn", rendered)
@@ -5313,7 +5313,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertFalse((root / ".git" / "hooks").exists())
             self.assertFalse((root / ".github" / "workflows").exists())
             self.assertIn("root kind: live_operating_root", rendered)
@@ -5352,7 +5352,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertEqual(len(calls), 3)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertFalse((root / "build").exists())
             self.assertFalse((root / "dist").exists())
             self.assertFalse(any(root.glob("*.egg-info")))
@@ -5518,7 +5518,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness evidence", rendered)
             self.assertIn("evidence-boundary", rendered)
             self.assertIn("evidence-root-kind", rendered)
@@ -5797,7 +5797,7 @@ class CliTests(unittest.TestCase):
             self.assertIn('provider: "openai"', record_text)
             self.assertIn('model_id: "gpt-test"', record_text)
             self.assertIn("src/changed.py sha256=", record_text)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
             duplicate_dry_run = io.StringIO()
             with redirect_stdout(duplicate_dry_run):
@@ -6620,7 +6620,7 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(main(["--root", str(root), "mlhd", action, "--dry-run"]), 0)
                 rendered = output.getvalue()
                 self.assertEqual(before, snapshot_tree_bytes(root))
-                self.assertFalse((root / ".mylittleharness").exists())
+                self.assertFalse((root / ".mylittleharness/generated").exists())
                 self.assertIn(f"mlhd-{action}-dry-run-refused", rendered)
                 self.assertIn("product-source compatibility fixtures", rendered)
                 self.assertNotIn("would update disposable mlhd runtime target", rendered)
@@ -6630,7 +6630,7 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(apply_output):
                 self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply"]), 1)
             self.assertEqual(before_apply, snapshot_tree_bytes(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("mlhd-run-once-refused", apply_output.getvalue())
 
     def test_mlhd_run_once_writes_source_bound_context_capsule_for_dashboard_and_hooks(self) -> None:
@@ -8347,7 +8347,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness closeout", rendered)
             for heading in ("Summary", "Worktree", "Closeout Fields", "Git Evidence", "Evidence Cues", "Quality Gates", "Projection", "Boundary"):
                 self.assertIn(heading, rendered)
@@ -9918,21 +9918,87 @@ class CliTests(unittest.TestCase):
             self.assertIn(specs_rel, rendered)
             self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
 
-    def test_check_keeps_product_source_project_state_out_of_scope(self) -> None:
+    def test_writeback_allows_explicit_product_source_fixture_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = root / "project/project-state.md"
+            fixture_rels = (
+                ".mylittleharness/project-workflow.toml",
+                ".codex/project-workflow.toml",
+                ".agents/docmap.yaml",
+                "project/project-state.md",
+            )
+            plan_path = root / "project/implementation-plan.md"
+            plan_text = plan_path.read_text(encoding="utf-8")
+            plan_text = plan_text.replace(
+                '  - "tests/test_cli.py"\n',
+                '  - "tests/test_cli.py"\n' + "".join(f'  - "{rel}"\n' for rel in fixture_rels),
+            )
+            plan_text = plan_text.replace(
+                "- write_scope: `src/allowed.py`, `tests/test_cli.py`\n",
+                "- write_scope: `src/allowed.py`, `tests/test_cli.py`, "
+                + ", ".join(f"`{rel}`" for rel in fixture_rels)
+                + "\n",
+            )
+            plan_path.write_text(plan_text, encoding="utf-8")
+            changed = tuple(VcsChangedPath("M", rel) for rel in fixture_rels)
+            posture = VcsPosture(
+                root=product_root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                top_level=str(product_root),
+                changed_count=len(changed),
+                changed_samples=changed,
+                changed_paths=changed,
+            )
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "Moved product-source compatibility fixtures to the neutral manifest path.",
+                        "--verification",
+                        "Focused fixture scope regression passed.",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "none known",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-product-diff-write-scope", rendered)
+            self.assertNotIn("writeback-product-diff-write-scope-blocked", rendered)
+            for rel in fixture_rels:
+                self.assertIn(rel, rendered)
+            self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
+
+    def test_check_keeps_product_source_operating_routes_out_of_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, product_root = make_product_diff_scope_fixture(Path(tmp))
             plan_path = root / "project/implementation-plan.md"
-            state_rel = "project/project-state.md"
+            operating_rel = "project/roadmap.md"
             plan_path.write_text(
                 plan_path.read_text(encoding="utf-8")
-                .replace('  - "tests/test_cli.py"\n', f'  - "tests/test_cli.py"\n  - "{state_rel}"\n')
+                .replace('  - "tests/test_cli.py"\n', f'  - "tests/test_cli.py"\n  - "{operating_rel}"\n')
                 .replace(
                     "- write_scope: `src/allowed.py`, `tests/test_cli.py`\n",
-                    f"- write_scope: `src/allowed.py`, `tests/test_cli.py`, `{state_rel}`\n",
+                    f"- write_scope: `src/allowed.py`, `tests/test_cli.py`, `{operating_rel}`\n",
                 ),
                 encoding="utf-8",
             )
-            changed = (VcsChangedPath("M", state_rel),)
+            changed = (VcsChangedPath("M", operating_rel),)
             posture = VcsPosture(
                 root=product_root,
                 git_available=True,
@@ -9951,7 +10017,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("active-plan-product-diff-write-scope", rendered)
-            self.assertIn(state_rel, rendered)
+            self.assertIn(operating_rel, rendered)
 
     def test_writeback_allows_disclosed_out_of_scope_product_diff_residual_risk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -21590,7 +21656,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness preflight", rendered)
             for heading in ("Summary", "Checks", "Closeout Readiness", "Boundary"):
                 self.assertIn(heading, rendered)
@@ -21613,7 +21679,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("root kind: live_operating_root", rendered)
             self.assertIn("[WARN] preflight-closeout", rendered)
             self.assertIn("preflight-closeout-cue", rendered)
@@ -21632,7 +21698,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertFalse((root / ".git" / "hooks").exists())
             self.assertFalse((root / ".github" / "workflows").exists())
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertTrue(rendered.startswith("#!/bin/sh\n"))
             self.assertIn(f"MLH_ROOT={shlex.quote(str(root.resolve()))}", rendered)
             self.assertIn('mylittleharness --root "$MLH_ROOT" preflight', rendered)
@@ -21654,7 +21720,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertFalse((root / ".git" / "hooks").exists())
             self.assertFalse((root / ".github" / "workflows").exists())
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn(f"MLH_ROOT={shlex.quote(str(root.resolve()))}", rendered)
             self.assertIn('mylittleharness --root "$MLH_ROOT" preflight', rendered)
             self.assertTrue(rendered.rstrip().endswith("exit 0"))
@@ -24176,7 +24242,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree_bytes(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness semantic --inspect", rendered)
             for heading in ("Summary", "Search Base", "Runtime", "Evaluation", "Boundary"):
                 self.assertIn(heading, rendered)
@@ -24196,7 +24262,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree_bytes(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("root kind: live_operating_root", rendered)
             self.assertIn("semantic-readiness", rendered)
             self.assertIn("semantic-exact-path-base", rendered)
@@ -24343,7 +24409,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness adapter --inspect --target mcp-read-projection", rendered)
             for heading in ("Adapter", "Projection", "Sources", "Generated Inputs", "Boundary"):
                 self.assertIn(heading, rendered)
@@ -24401,7 +24467,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("root kind: live_operating_root", rendered)
             self.assertIn("README.md; role=orientation; required=False; posture=missing", rendered)
             self.assertIn("adapter-generated-index", rendered)
@@ -24457,7 +24523,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("adapter --inspect --target approval-relay", rendered)
             self.assertIn("approval-relay-packet", rendered)
             self.assertIn("approved status remains evidence only", rendered)
@@ -24476,7 +24542,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             payload = json.loads(output.getvalue())
             expected_args = [
                 "adapter",
@@ -24939,7 +25005,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             responses = jsonrpc_lines(output.getvalue())
             self.assertEqual([1, 2, 3, 4, 5, 6], [response["id"] for response in responses])
             self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
@@ -25048,7 +25114,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             responses = jsonrpc_lines(output.getvalue())
             tool_names = [tool["name"] for tool in responses[0]["result"]["tools"]]
             self.assertEqual(
@@ -25140,8 +25206,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before_default, snapshot_tree(default_root))
             self.assertEqual(before_selected, snapshot_tree(selected_root))
-            self.assertFalse((default_root / ".mylittleharness").exists())
-            self.assertFalse((selected_root / ".mylittleharness").exists())
+            self.assertFalse((default_root / ".mylittleharness/generated").exists())
+            self.assertFalse((selected_root / ".mylittleharness/generated").exists())
             structured = jsonrpc_lines(output.getvalue())[0]["result"]["structuredContent"]
             self.assertEqual(str(selected_root), structured["root"]["path"])
             self.assertEqual("live_operating_root", structured["root"]["kind"])
@@ -25227,7 +25293,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             structured = jsonrpc_lines(output.getvalue())[0]["result"]["structuredContent"]
             self.assertIn("docs/root-aware-refresh.md [product-doc; optional; present]", structured["sources"])
             self.assertEqual(str(root), structured["rootSelection"]["selectedRoot"])
@@ -25316,10 +25382,10 @@ class CliTests(unittest.TestCase):
             root = make_root(Path(tmp), active=False, mirrors=False)
             exact_output = io.StringIO()
             with redirect_stdout(exact_output):
-                exact_code = main(["--root", str(root), "intelligence", "--search", "MyLittleHarness"])
+                exact_code = main(["--root", str(root), "intelligence", "--search", "Readme"])
             lower_output = io.StringIO()
             with redirect_stdout(lower_output):
-                lower_code = main(["--root", str(root), "intelligence", "--search", "mylittleharness"])
+                lower_code = main(["--root", str(root), "intelligence", "--search", "readme"])
             self.assertEqual(exact_code, 0)
             self.assertEqual(lower_code, 0)
             self.assertIn("search-match", exact_output.getvalue())
@@ -25873,7 +25939,6 @@ class CliTests(unittest.TestCase):
     def test_doctor_integration_mcp_reports_readonly_smoke_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
-            write_neutral_manifest_from_legacy(root)
             before = snapshot_tree_bytes(root)
 
             output = io.StringIO()
@@ -26551,7 +26616,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
             self.assertIn("MyLittleHarness snapshot --inspect", rendered)
             for heading in ("Root", "Result", "Sources", "Findings", "Suggestions"):
                 self.assertIn(heading, rendered)
@@ -26818,7 +26883,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("files/project/project-state.md", rendered)
             self.assertIn("planned frontmatter keys: project, workflow, operating_mode, plan_status, active_plan", rendered)
             self.assertIn("manual rollback only", rendered)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_dry_run_reports_lifecycle_frontmatter_plan_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -26848,7 +26913,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("project/specs/workflow/manual-spec.md", rendered)
             self.assertIn("planned frontmatter keys for project/research/deep-research.md: title, status, created, updated, source, authority", rendered)
             self.assertIn("lifecycle-frontmatter-route-write", rendered)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_snapshots_then_prepends_lifecycle_frontmatter_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -26961,7 +27026,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("lifecycle-source-provenance-plan", dry_rendered)
             self.assertIn("lifecycle-source-provenance-route-write", dry_rendered)
             self.assertIn("MyLittleHarness incubation route", dry_rendered)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
             apply_output = io.StringIO()
             with redirect_stdout(apply_output):
@@ -27178,7 +27243,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("planned route entries: AGENTS.md", rendered)
             self.assertIn("manual rollback only", rendered)
             self.assertIn("python -m mylittleharness --root <target-root> validate", rendered)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_dry_run_reports_clean_docmap_snapshot_plan_not_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27260,7 +27325,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("manual rollback only: remove .agents/docmap.yaml", rendered)
             self.assertIn("python -m mylittleharness --root <target-root> validate", rendered)
             self.assertFalse((root / ".agents/docmap.yaml").exists())
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_dry_run_skips_docmap_create_when_docmap_is_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27397,7 +27462,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("post-repair audit-link findings: 0 warnings", rendered)
             docmap = (root / ".agents/docmap.yaml").read_text(encoding="utf-8")
             self.assertEqual(expected_docmap_text(), docmap)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_docmap_create_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27447,7 +27512,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("docmap-create-skipped", output.getvalue())
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_refuses_docmap_create_path_conflict_without_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27485,7 +27550,7 @@ class CliTests(unittest.TestCase):
             self.assertIn(f"project/specs/workflow/{missing[1]}", rendered)
             self.assertIn("stable-spec-create-review-required", rendered)
             self.assertIn("manual rollback only", rendered)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_creates_missing_stable_specs_without_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27509,7 +27574,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("# Workflow Artifact Model Spec", created)
             self.assertIn("intentionally minimal bootstrap stub", created)
             self.assertIn("review-required", created)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_stable_spec_create_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27570,7 +27635,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("agents-contract-create-plan", rendered)
             self.assertIn("missing required surface: AGENTS.md", rendered)
             self.assertIn("manual rollback only", rendered)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_creates_missing_agents_contract_without_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -27597,7 +27662,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("Agent behavior defaults", agents_text)
             self.assertIn("prefer the simplest bounded fix", agents_text)
             self.assertIn("Chat output:", agents_text)
-            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertFalse((root / ".mylittleharness/generated").exists())
 
     def test_repair_apply_agents_contract_create_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -28640,10 +28705,10 @@ def workflow_spec_fixture_text(name: str) -> str:
 
 
 def make_root(root: Path, active: bool, mirrors: bool) -> Path:
-    (root / ".codex").mkdir(parents=True)
+    (root / ".mylittleharness").mkdir(parents=True)
     (root / ".agents").mkdir(parents=True)
     (root / "project/specs/workflow").mkdir(parents=True)
-    (root / ".codex/project-workflow.toml").write_text(
+    (root / WORKFLOW_MANIFEST_REL).write_text(
         'workflow = "workflow-core"\nversion = 1\n\n[memory]\nstate_file = "project/project-state.md"\nplan_file = "project/implementation-plan.md"\n',
         encoding="utf-8",
     )
@@ -28657,7 +28722,7 @@ def make_root(root: Path, active: bool, mirrors: bool) -> Path:
     (root / "README.md").write_text("# Readme\nSee `.agents/docmap.yaml`.\n", encoding="utf-8")
     (root / "AGENTS.md").write_text("# Agents\nUse `.agents/docmap.yaml`.\n", encoding="utf-8")
     (root / ".agents/docmap.yaml").write_text(
-        'version: 2\nrepo_summary:\n  product_docs_entrypoints:\n    - "README.md"\n    - "AGENTS.md"\n    - ".codex/project-workflow.toml"\n    - "project/project-state.md"\n    - "project/specs/workflow/"\n',
+        'version: 2\nrepo_summary:\n  product_docs_entrypoints:\n    - "README.md"\n    - "AGENTS.md"\n    - ".mylittleharness/project-workflow.toml"\n    - "project/project-state.md"\n    - "project/specs/workflow/"\n',
         encoding="utf-8",
     )
     if active:

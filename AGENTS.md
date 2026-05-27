@@ -6,7 +6,8 @@
 - Recover active task context from the repository named by the current task before non-trivial product work.
 - MyLittleHarness attaches to and inspects an explicit target repository supplied by the operator or CLI command.
 - Treat `workflow-core` as a compatibility label in fixture manifests and operator wording only. It is not the architectural baseline for MyLittleHarness.
-- Keep `.codex/project-workflow.toml`, `.agents/docmap.yaml`, `project/project-state.md`, and `project/specs/workflow/**` as product compatibility fixtures only while the CLI/tests need a workflow-shaped target root.
+- Keep `.mylittleharness/project-workflow.toml`, `.agents/docmap.yaml`, `project/project-state.md`, and `project/specs/workflow/**` as product compatibility fixtures only while the CLI/tests need a workflow-shaped target root.
+- Treat legacy `.codex/project-workflow.toml` as target-root fallback/migration compatibility only, not the product fixture path.
 - Do not change PATH, user config, installed skills, package archives, attach/install distribution, MCP, hooks, runtime helpers, or workstation state from this product tree.
 - Do not create or import active implementation plans, archived plans, research/history/raw intake, archive-under-study material, candidate source packs, old migration evidence, package zips, broad research corpus, runtime debris, reports, logs, caches, generated validation artifacts, local databases, or pycache into this product tree.
 
@@ -17,7 +18,7 @@ For non-trivial product work in this directory:
 1. Recover task context from the repository named by the current request.
 2. Read this `README.md` and `AGENTS.md`.
 3. Read the relevant `src/`, `tests/`, and product docs for the product change.
-4. Read `.agents/docmap.yaml`, `.codex/project-workflow.toml`, `project/project-state.md`, or `project/specs/workflow/*.md` only when changing CLI validation behavior or compatibility fixtures.
+4. Read `.agents/docmap.yaml`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`, or `project/specs/workflow/*.md` only when changing CLI validation behavior or compatibility fixtures; read legacy `.codex/project-workflow.toml` only when changing legacy fallback or migration behavior.
 5. When validating operating-root navigation behavior, prefer the shipped dashboard agent packet, intelligence query, and MCP read-projection paths before scattered manual route walking; keep `rg` for exact verification.
 
 There should be no active `project/implementation-plan.md` in this repository.

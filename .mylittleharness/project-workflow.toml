@@ -21,6 +21,3 @@ docmap_mode = "lazy"
 writeback = "meaningful_only"
 docs_check = "mutating_only"
 closeout_commit = "manual"
-
-
-

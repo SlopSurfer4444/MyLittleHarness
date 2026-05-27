@@ -125,7 +125,10 @@ def _should_descend_for_hygiene(path: Path, rel_path: str) -> bool:
 
 def _classify_product_hygiene_path(path: Path, rel_path: str) -> tuple[str, str] | None:
     normalized = rel_path.replace("\\", "/").lower()
-    if normalized in {".mylittleharness", ".mylittleharness/generated"} or normalized.startswith(".mylittleharness/generated/projection"):
+    if (
+        normalized in {".mylittleharness", ".mylittleharness/project-workflow.toml", ".mylittleharness/generated"}
+        or normalized.startswith(".mylittleharness/generated/projection")
+    ):
         return None
     if normalized.startswith(".mylittleharness/"):
         return ("product-debris", "generated MyLittleHarness output is allowed only under .mylittleharness/generated/projection")

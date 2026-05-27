@@ -18,7 +18,7 @@ The supported distribution posture is deliberately local before publication. Sou
 
 The first-run path is source checkout first, package-smoke when the operator wants package evidence, and target-repository `init` / `check` / `repair` / `detach` after that. `bootstrap --inspect`, publishing, global install, workstation adoption, semantic/provider setup, MCP clients, hooks, and CI are progressive-disclosure or future-contract surfaces, not prerequisites for first-contact correctness.
 
-The default operating-root start pass is file and shell based: read `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and the active plan only when `plan_status = "active"` or the operator asks about plan/phase/closeout; use `active_phase` and `phase_status` as the structured continuation pointers when present; use `check` before mutation; use `.agents/docmap.yaml`, `audit-links`, and relevant specs as docs-routing inputs when user-facing meaning changes. Meta-feedback is an opt-in capture rail, not a default start-pass requirement. No skill, IDE rule, MCP client, hook, CI job, or workstation adoption step is part of the correctness path.
+The default operating-root start pass is file and shell based: read `AGENTS.md`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`, and the active plan only when `plan_status = "active"` or the operator asks about plan/phase/closeout; use legacy `.codex/project-workflow.toml` only as a fallback manifest when the neutral manifest is absent; use `active_phase` and `phase_status` as the structured continuation pointers when present; use `check` before mutation; use `.agents/docmap.yaml`, `audit-links`, and relevant specs as docs-routing inputs when user-facing meaning changes. Meta-feedback is an opt-in capture rail, not a default start-pass requirement. No skill, IDE rule, MCP client, hook, CI job, or workstation adoption step is part of the correctness path.
 
 The formula is:
 
@@ -45,7 +45,7 @@ Files hold authority; metadata routes; Git records durable history; generated pr
 - Product docs live under `docs/...` in the product source tree.
 - Operating workflow memory does not live in the product source tree.
 - MyLittleHarness serves an explicit target repository directly.
-- Compatibility fixture files under `.codex/`, `.agents/`, and `project/` are subordinate fixtures for CLI/tests.
+- Compatibility fixture files under `.mylittleharness/`, `.agents/`, and `project/` are subordinate fixtures for CLI/tests; legacy `.codex/` manifests remain target-root fallback/migration compatibility only.
 - Product docs may name target CLI and roadmap surfaces, but docs alone do not implement unshipped commands.
 - Generated views, databases, caches, reports, helper logs, and adapter state cannot be the only copy of accepted decisions, active focus, plan status, carry-forward fates, or workflow authority.
 - Repair snapshots can preserve pre-repair bytes and metadata for inspection, but they cannot approve repair, closeout, archive, commit, lifecycle decisions.

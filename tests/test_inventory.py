@@ -671,9 +671,9 @@ class InventoryTests(unittest.TestCase):
 
 
 def make_minimal_root(root: Path, active: bool, docmap: bool, mirrors: bool = False) -> Path:
-    (root / ".codex").mkdir(parents=True)
+    (root / ".mylittleharness").mkdir(parents=True)
     (root / "project/specs/workflow").mkdir(parents=True)
-    (root / ".codex/project-workflow.toml").write_text(
+    (root / ".mylittleharness/project-workflow.toml").write_text(
         'workflow = "workflow-core"\n\n[memory]\nstate_file = "project/project-state.md"\nplan_file = "project/implementation-plan.md"\n',
         encoding="utf-8",
     )
@@ -689,7 +689,7 @@ def make_minimal_root(root: Path, active: bool, docmap: bool, mirrors: bool = Fa
     if docmap:
         (root / ".agents").mkdir(parents=True)
         (root / ".agents/docmap.yaml").write_text(
-            'version: 2\nrepo_summary:\n  product_docs_entrypoints:\n    - "README.md"\n    - "AGENTS.md"\n    - ".codex/project-workflow.toml"\n    - "project/project-state.md"\n    - "project/specs/workflow/"\n',
+            'version: 2\nrepo_summary:\n  product_docs_entrypoints:\n    - "README.md"\n    - "AGENTS.md"\n    - ".mylittleharness/project-workflow.toml"\n    - "project/project-state.md"\n    - "project/specs/workflow/"\n',
             encoding="utf-8",
         )
     if active:

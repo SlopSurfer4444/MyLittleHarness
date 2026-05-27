@@ -30,7 +30,7 @@ Core promises visible in `README.md`, `docs/architecture/product-architecture.md
 
 Main layers:
 
-- Contracts/docs: `AGENTS.md`, `README.md`, `docs/**`, `.agents/docmap.yaml`, `.codex/project-workflow.toml`, `project/project-state.md`, `project/specs/workflow/**`.
+- Contracts/docs: `AGENTS.md`, `README.md`, `docs/**`, `.agents/docmap.yaml`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`, `project/specs/workflow/**`.
 - CLI/parser/dispatch: `src/mylittleharness/cli.py`, `cli_parser.py`, `__main__.py`.
 - Inventory/routing/validation: `inventory.py`, `routes.py`, `checks.py`, `product_hygiene_checks.py`, `route_reference_guards.py`, `lifecycle_metadata.py`.
 - Lifecycle/write rails: `planning.py`, `writeback.py`, `roadmap.py`, `memory_hygiene.py`, `incubate.py`, `research_*`, `relationship_drift.py`.
@@ -77,7 +77,7 @@ Each block gives: title; why it exists; files/modules/docs/tests; visible promis
 ### 1. Product Source vs Target Operating Root Boundary
 
 - Why: MLH safety depends on never treating product source fixtures as live operating memory.
-- Surfaces: `AGENTS.md`; `README.md`; `.agents/docmap.yaml`; `.codex/project-workflow.toml`; `project/project-state.md`; `docs/specs/product-boundary.md`; `docs/specs/operating-root.md`; `inventory.py`; `product_hygiene_checks.py`; `bootstrap.py`; `tests/test_inventory.py`; `tests/test_package_metadata.py`; `tests/test_cli.py`.
+- Surfaces: `AGENTS.md`; `README.md`; `.agents/docmap.yaml`; `.mylittleharness/project-workflow.toml`; `project/project-state.md`; `docs/specs/product-boundary.md`; `docs/specs/operating-root.md`; `inventory.py`; `product_hygiene_checks.py`; `bootstrap.py`; `tests/test_inventory.py`; `tests/test_package_metadata.py`; `tests/test_cli.py`.
 - Invariants: product source holds reusable code/docs/tests/package metadata/templates/compat fixtures only; live memory belongs to explicit target roots; product-source fixtures refuse unsafe mutation; product root should not hold active plans, archives, research corpora, reports, caches, local DBs, repair snapshots, package artifacts, or generated validation artifacts.
 - Questions: Can root classification be spoofed by partial fixtures, symlinks, malformed state, or stale docmap? Do all mutating commands refuse product-source fixtures? Are product hygiene warnings complete and non-destructive?
 - Evidence: `status`; `check`; `bootstrap --inspect`; `manifest --inspect --json`; temp-root refusal scenarios; `python -m unittest tests.test_inventory tests.test_package_metadata`.
@@ -221,7 +221,7 @@ Each block gives: title; why it exists; files/modules/docs/tests; visible promis
 ### 17. Templates and Compatibility Fixtures
 
 - Why: MLH ships operating-root/workflow templates and product-root compatibility fixtures.
-- Surfaces: `src/mylittleharness/templates/operating-root/AGENTS.md`; `src/mylittleharness/templates/workflow/*.md`; `project/specs/workflow/*.md`; `.codex/project-workflow.toml`; `project/project-state.md`; `AGENTS.md`; template/package/inventory/CLI tests.
+- Surfaces: `src/mylittleharness/templates/operating-root/AGENTS.md`; `src/mylittleharness/templates/workflow/*.md`; `project/specs/workflow/*.md`; `.mylittleharness/project-workflow.toml`; `project/project-state.md`; `AGENTS.md`; template/package/inventory/CLI tests.
 - Invariants: product fixtures are not live memory; stable workflow spec templates can be restored create-only in eligible live roots; template content should align with product contracts where mirrored; operating-root template must teach safe rails.
 - Questions: Do packaged templates drift from fixtures/specs? Are generated scaffolds minimal and complete? Can restore overwrite user edits? Does template wording overclaim authority?
 - Evidence: compare template files to fixtures; temp-root `repair --dry-run`; package/inventory tests.
@@ -269,7 +269,7 @@ Hard scope rules:
 - Exclude meta-feedback as a standalone audit topic. Do not audit the meta-feedback route, capture flow, env routing, tests, docs, prompts, or developer-local feedback workflow.
 - Do not fix code, commit, stage, or mutate product behavior during audit unless explicitly asked in a separate task.
 
-Start by reading AGENTS.md, README.md, docs/README.md, docs/architecture/*.md, docs/specs/*.md, .agents/docmap.yaml, .codex/project-workflow.toml, project/project-state.md, pyproject.toml, and docs/external-audit-prep.md.
+Start by reading AGENTS.md, README.md, docs/README.md, docs/architecture/*.md, docs/specs/*.md, .agents/docmap.yaml, .mylittleharness/project-workflow.toml, project/project-state.md, pyproject.toml, and docs/external-audit-prep.md.
 
 For every finding, cite repo-relative files and line numbers where possible. Distinguish code behavior, test behavior, docs promises, and inferred risk. Do not treat CLI report output, generated projection output, MCP output, hooks, dashboard, or daemon state as authority.
 ```
@@ -378,7 +378,7 @@ Suggested external auditor output filenames:
 
 Source files and surfaces reviewed for this prep:
 
-- Root/product instructions: `AGENTS.md`, `README.md`, `.agents/docmap.yaml`, `.codex/project-workflow.toml`, `project/project-state.md`.
+- Root/product instructions: `AGENTS.md`, `README.md`, `.agents/docmap.yaml`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`.
 - Architecture docs: `docs/README.md`, `docs/architecture/product-architecture.md`, `docs/architecture/layer-model.md`, `docs/architecture/clean-room-carry-forward.md`.
 - Specs: `docs/specs/product-boundary.md`, `docs/specs/operating-root.md`, `docs/specs/authority-and-memory.md`, `docs/specs/generated-state-and-projections.md`, `docs/specs/generated-state-search-and-sqlite.md`, `docs/specs/context-and-ceremony-budget.md`, `docs/specs/mcp-ecosystem-adoption-gate.md`, `docs/specs/attach-repair-status-cli.md`, `docs/specs/metadata-routing-and-evidence.md`, `docs/specs/adapter-boundary.md`.
 - Workflow compatibility fixtures: `project/specs/workflow/*.md`.

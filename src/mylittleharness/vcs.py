@@ -18,6 +18,12 @@ GIT_TIMEOUT_SECONDS = 5
 CHANGED_SAMPLE_LIMIT = 10
 TRAILER_SAMPLE_LIMIT = 10
 COORDINATION_ROOT_ENV_VAR = "MLH_COORDINATION_ROOT"
+PRODUCT_COMPATIBILITY_FIXTURE_SCOPES = {
+    ".agents/docmap.yaml",
+    ".codex/project-workflow.toml",
+    ".mylittleharness/project-workflow.toml",
+    "project/project-state.md",
+}
 
 
 @dataclass(frozen=True)
@@ -483,6 +489,8 @@ def _invalid_product_scope_reason(value: str) -> str:
 def _looks_like_product_scope(path: str) -> bool:
     if not path:
         return False
+    if path in PRODUCT_COMPATIBILITY_FIXTURE_SCOPES:
+        return True
     operating_prefixes = (".agents/", ".codex/", ".mylittleharness/")
     if path.startswith(operating_prefixes):
         return False
