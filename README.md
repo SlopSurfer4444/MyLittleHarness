@@ -261,6 +261,10 @@ Your application repository is the target.
 
 The target owns its own operating memory.
 
+Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.
+The product checkout should show reusable product truth; operating memory belongs in target repositories.
+`.mylittleharness/project-workflow.toml` is the neutral workflow manifest, and `.codex/project-workflow.toml` is legacy/client-adapter compatibility, not the core product path.
+
 ---
 
 ## Generated projections are disposable

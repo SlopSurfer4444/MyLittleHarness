@@ -15,6 +15,11 @@ route contracts in `docs/specs/`.
 | `detach` | detach marker | yes | yes | live operating root | medium: marker-only disable posture |
 
 The top-level help intentionally foregrounds the small operator surface first.
+The default command story is agent-neutral: run from the product source, point
+`--root` at a target repository, create the neutral
+`.mylittleharness/project-workflow.toml` manifest, and keep the rule simple:
+`.codex/project-workflow.toml` is legacy/client-adapter compatibility, limited
+to legacy migration or explicit client-adapter context.
 `migrate` is a public migration utility for legacy roots: dry-run writes
 nothing, apply copies `.codex/project-workflow.toml` to
 `.mylittleharness/project-workflow.toml`, preserves the legacy file, and

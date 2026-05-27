@@ -342,6 +342,45 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("[console_scripts]\n", entry_points)
         self.assertIn("mylittleharness = mylittleharness.cli:main\n", entry_points)
 
+    def test_public_package_metadata_keeps_agent_neutral_golden_path(self) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        project = pyproject["project"]
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        command_surface = (ROOT / "docs/reference/command-surface.md").read_text(encoding="utf-8")
+        security = (ROOT / "docs/security.md").read_text(encoding="utf-8")
+        template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        package_surface = "\n".join(
+            [
+                project["name"],
+                project["description"],
+                project["readme"],
+                "\n".join(project["scripts"].keys()),
+                "\n".join(project["scripts"].values()),
+            ]
+        )
+
+        self.assertIn("mylittleharness", package_surface)
+        self.assertIn("mylittleharness.cli:main", package_surface)
+        self.assertNotIn("Codex", package_surface)
+        self.assertNotIn(".codex", package_surface)
+        for doc in (readme, docs_readme, security):
+            self.assertIn(
+                "Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.",
+                doc,
+            )
+            self.assertIn("operating memory belongs in target repositories", doc)
+        for doc in (readme, docs_readme, command_surface, security, template):
+            self.assertIn(".mylittleharness/project-workflow.toml", doc)
+            self.assertIn(
+                "`.codex/project-workflow.toml` is legacy/client-adapter compatibility",
+                doc,
+            )
+        self.assertIn("The default command story is agent-neutral", command_surface)
+        self.assertIn("Core operation is agent-neutral", template)
+
     def test_release_readiness_docs_keep_publication_optional(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")

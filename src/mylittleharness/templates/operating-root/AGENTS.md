@@ -4,6 +4,7 @@
 - Repo-visible files remain authoritative; command output is advisory until changes are written here.
 - Any file-reading, shell-capable agent can operate from this contract, repo-visible files, and MyLittleHarness CLI reports; installed skills, IDE rules, MCP clients, hooks, and CI are optional convenience layers only.
 - Start by reading this `AGENTS.md`, `.mylittleharness/project-workflow.toml`, and `project/project-state.md`; use `.codex/project-workflow.toml` only as the legacy fallback manifest when the neutral manifest is absent.
+- Core operation is agent-neutral: `.mylittleharness/project-workflow.toml` is the neutral workflow manifest, and `.codex/project-workflow.toml` is legacy/client-adapter compatibility rather than a required correctness path.
 - Read `project/implementation-plan.md` only when `project/project-state.md` or the manifest says `plan_status = "active"` or the user explicitly asks about the plan, phase, or closeout.
 - When `plan_status = "active"`, prefer first-class `active_phase` and `phase_status` values from `project/project-state.md` over prose inference for continuation.
 - Use MLH lifecycle routes instead of ad hoc memory pockets; incubation notes live under `project/plan-incubation/*.md`, and optional accepted-work sequencing lives at `project/roadmap.md`.

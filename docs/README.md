@@ -34,6 +34,10 @@ Legacy evidence is not a default input for fresh product-doc work. Open old mate
 This product tree may contain source, tests, the stdlib build backend, product docs, and minimal compatibility fixtures for CLI/tests.
 It must not contain active plans, project memory, research/history/raw intake, archived plans, logs, caches, local databases, generated validation artifacts, or legacy workflow residue.
 
+Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.
+The product checkout should show reusable product truth; operating memory belongs in target repositories.
+`.mylittleharness/project-workflow.toml` is the neutral workflow manifest for target operating roots, and `.codex/project-workflow.toml` is legacy/client-adapter compatibility, not the core product path.
+
 ## Fixture Boundary
 
 The workflow-shaped files under `.codex/`, `.agents/`, and `project/` in this product tree are compatibility fixtures for CLI reports and tests.

@@ -14,6 +14,7 @@ MLH core will not:
   output, daemon state, or provider output;
 - require a daemon, dashboard, MCP client, IDE plugin, hook, CI job, or cloud
   service for correctness;
+- require Codex or any named client adapter as the core correctness path;
 - store provider credentials or send repository data to a model provider by
   itself;
 - make `--dry-run` write durable repo authority;
@@ -95,3 +96,7 @@ The product source declares Apache-2.0 licensing in `LICENSE` and package
 metadata. Public redistribution still needs CI evidence for the stdlib test
 suite. Publishing to PyPI, TestPyPI, or another package index is a separate
 release operation, not part of local correctness.
+
+Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.
+The product checkout should show reusable product truth; operating memory belongs in target repositories.
+`.mylittleharness/project-workflow.toml` is the neutral workflow manifest for target operating roots, and `.codex/project-workflow.toml` is legacy/client-adapter compatibility, not the core product path.
