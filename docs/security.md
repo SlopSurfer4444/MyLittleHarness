@@ -57,6 +57,12 @@ It exposes source-bound projection, bounded source reads, search, and related
 context. It does not install an SDK, open an HTTP server, refresh caches from
 inside the adapter, write files, or expose a generic shell passthrough.
 
+`adapter --client-config --target mcp-read-projection` is a read/propose-only
+config generator. It can print generic MCP, VS Code, Claude Code, and JetBrains
+AI Assistant profile snippets, but printing the snippets writes no client files,
+starts no server, opens no network listener, enables no provider routing,
+enables no mutating MCP tools by default, and exposes no shell passthrough.
+
 Mutating MCP tools are not part of the default product surface. Any future
 mutating MCP tool needs a separate scoped plan, disabled-by-default posture,
 write metadata, dry-run artifact, and explicit human apply gate.

@@ -85,6 +85,18 @@ Copilot, VS Code, MCP, or other client configuration. Project-local native
 hooks stay behind explicit `hooks adapter --client <client> --dry-run|--apply
 --scope project` review.
 
+`adapter --client-config --target mcp-read-projection` prints a no-write JSON
+payload with schema `mylittleharness.mcp-client-configs.v1`, read/propose-only
+defaults, read-only tool authority metadata, and copy-or-review profiles for
+generic MCP, VS Code, Claude Code, and JetBrains AI Assistant. The profiles use
+the same local stdio command and mirror the client-owned config shapes: generic
+MCP and JetBrains use `mcpServers`, VS Code uses `servers` in `mcp.json`, and
+Claude Code can use project `.mcp.json` with `mcpServers`. Printing these
+profiles does not write client files, start the server, enable mutating tools,
+enable provider routing, open a network listener, or expose shell passthrough.
+The Codex `adapter --install-client-config --dry-run|--apply` rail remains a
+separate reviewed workstation mutation path.
+
 ## Release-Blocking Product Decisions
 
 - Apache-2.0 is declared in `LICENSE` and package metadata for public

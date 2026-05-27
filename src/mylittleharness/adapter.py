@@ -28,8 +28,10 @@ MCP_READ_SOURCE_TOOL = "mylittleharness.read_source"
 MCP_SEARCH_TOOL = "mylittleharness.search"
 MCP_RELATED_OR_BUNDLE_TOOL = "mylittleharness.related_or_bundle"
 MCP_READ_PROJECTION_SERVER_NAME = "mylittleharness"
+MCP_READ_PROJECTION_RESOURCE_URI = "mylittleharness://projection"
 CODEX_CONFIG_DISPLAY_PATH = "%USERPROFILE%\\.codex\\config.toml"
 CODEX_MCP_ADOPTION_SCHEMA = "mylittleharness.codex-mcp-adoption.v1"
+MCP_CLIENT_CONFIGS_SCHEMA = "mylittleharness.mcp-client-configs.v1"
 CODEX_MCP_BLOCK_START = "# BEGIN MyLittleHarness mcp-read-projection"
 CODEX_MCP_BLOCK_END = "# END MyLittleHarness mcp-read-projection"
 MCP_TOOL_NAMES = (
@@ -407,15 +409,15 @@ def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path
         "args": command[1:],
         "transport": "stdio",
     }
+    client_configs = _mcp_readonly_client_configs(command)
     return {
+        "schema": MCP_CLIENT_CONFIGS_SCHEMA,
         "status": "available",
         "defaultActive": True,
         "serverName": MCP_READ_PROJECTION_SERVER_NAME,
         "tool": MCP_READ_PROJECTION_TOOL,
-        "tools": [
-            {"name": definition["name"], "inputSchema": definition["inputSchema"]}
-            for definition in _tool_definitions()
-        ],
+        "tools": [_client_tool_profile(definition) for definition in _tool_definitions()],
+        "clientDefaults": _mcp_readonly_client_defaults(command),
         "recommendedUse": (
             "call before or alongside CLI/file reads when route discovery, source snippets, text search, "
             "relationship lookup, impact checks, or root selection would reduce navigation"
@@ -444,12 +446,20 @@ def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path
             "server": server,
             "json": {"mcpServers": {MCP_READ_PROJECTION_SERVER_NAME: {"command": command[0], "args": command[1:]}}},
         },
+        "clientConfigs": client_configs,
         "adoption": adoption,
         "boundary": {
             "writesUserConfig": False,
             "writesUserConfigOnApplyOnly": True,
             "writesRepoFiles": False,
             "writesProjectCodexHooksOnInstallApplyOnly": True,
+            "clientConfigProfilesWriteFiles": False,
+            "defaultConfigMode": "read-propose-only",
+            "mutatingToolsDefaultEnabled": False,
+            "networkListenerDefaultEnabled": False,
+            "providerRoutingDefaultEnabled": False,
+            "shellPassthrough": False,
+            "arbitraryCommandExecution": False,
             "storesSecrets": False,
             "storesNewSecrets": False,
             "printsExistingConfigValues": False,
@@ -457,6 +467,103 @@ def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path
             "authorizesLifecycle": False,
             "fallback": "repo-visible files and generic CLI remain authoritative when no MCP client is active",
         },
+    }
+
+
+def _mcp_readonly_client_defaults(command: list[str]) -> dict[str, object]:
+    return {
+        "schema": MCP_CLIENT_CONFIGS_SCHEMA,
+        "serverName": MCP_READ_PROJECTION_SERVER_NAME,
+        "transport": "stdio",
+        "command": command[0],
+        "args": command[1:],
+        "mode": "read-propose-only",
+        "tools": list(MCP_TOOL_NAMES),
+        "resources": [MCP_READ_PROJECTION_RESOURCE_URI],
+        "readOnly": True,
+        "proposeOnlyConfig": True,
+        "mutatingToolsDefaultEnabled": False,
+        "networkListenerDefaultEnabled": False,
+        "providerRoutingDefaultEnabled": False,
+        "shellPassthrough": False,
+        "arbitraryCommandExecution": False,
+        "requiresReviewBeforeInstall": True,
+        "authority": {
+            "repoVisibleFilesRemainAuthority": True,
+            "authorizesLifecycle": False,
+            "authorizesVcs": False,
+            "authorizesProviderRouting": False,
+            "fallback": "repo-visible files and generic CLI remain sufficient without MCP tooling",
+        },
+    }
+
+
+def _mcp_readonly_client_configs(command: list[str]) -> dict[str, object]:
+    generic_server = _mcp_stdio_server(command)
+    vscode_server = {"type": "stdio", **generic_server}
+    claude_server = {**generic_server, "env": {}}
+    setup = _client_profile_setup_boundary()
+    return {
+        "genericMcp": {
+            "label": "Generic MCP",
+            "configSurface": "client-managed MCP JSON",
+            "configKey": "mcpServers",
+            "json": {"mcpServers": {MCP_READ_PROJECTION_SERVER_NAME: generic_server}},
+            "setup": setup,
+            "reference": "https://modelcontextprotocol.io/",
+        },
+        "vsCode": {
+            "label": "VS Code",
+            "configSurface": ".vscode/mcp.json or user mcp.json",
+            "configKey": "servers",
+            "json": {"servers": {MCP_READ_PROJECTION_SERVER_NAME: vscode_server}},
+            "setup": setup,
+            "reference": "https://code.visualstudio.com/docs/copilot/reference/mcp-configuration",
+        },
+        "claudeCode": {
+            "label": "Claude Code",
+            "configSurface": ".mcp.json project scope or user-level Claude config",
+            "configKey": "mcpServers",
+            "json": {"mcpServers": {MCP_READ_PROJECTION_SERVER_NAME: claude_server}},
+            "setup": setup,
+            "reference": "https://code.claude.com/docs/en/mcp",
+        },
+        "jetBrains": {
+            "label": "JetBrains AI Assistant",
+            "configSurface": "Settings | Tools | AI Assistant | Model Context Protocol (MCP)",
+            "configKey": "mcpServers",
+            "json": {"mcpServers": {MCP_READ_PROJECTION_SERVER_NAME: generic_server}},
+            "setup": setup,
+            "reference": "https://www.jetbrains.com/help/ai-assistant/mcp.html",
+        },
+    }
+
+
+def _mcp_stdio_server(command: list[str]) -> dict[str, object]:
+    return {"command": command[0], "args": command[1:]}
+
+
+def _client_profile_setup_boundary() -> dict[str, object]:
+    return {
+        "mode": "copy-or-review",
+        "writesFiles": False,
+        "writesUserConfig": False,
+        "startsServer": False,
+        "installsDaemon": False,
+        "requiresReviewBeforeUse": True,
+        "mutatingToolsDefaultEnabled": False,
+        "shellPassthrough": False,
+        "arbitraryCommandExecution": False,
+    }
+
+
+def _client_tool_profile(definition: dict[str, object]) -> dict[str, object]:
+    return {
+        "name": definition["name"],
+        "inputSchema": definition["inputSchema"],
+        "annotations": definition["annotations"],
+        "execution": definition["execution"],
+        "authority": definition["authority"],
     }
 
 
@@ -1229,13 +1336,20 @@ def _handle_jsonrpc_message(inventory: Inventory | None, message: object, invent
         return _result_response(request_id, {"tools": _tool_definitions()})
     if method == "tools/call":
         return _tools_call_response(inventory, request_id, message.get("params"), inventory_loader)
+    if method == "resources/list":
+        return _resources_list_response(inventory, request_id)
+    if method == "resources/read":
+        return _resources_read_response(inventory, request_id, message.get("params"))
     return _error_response(request_id, -32601, f"Method not found: {method}")
 
 
 def _initialize_result() -> dict[str, object]:
     return {
         "protocolVersion": MCP_PROTOCOL_VERSION,
-        "capabilities": {"tools": {"listChanged": False}},
+        "capabilities": {
+            "tools": {"listChanged": False},
+            "resources": {"subscribe": False, "listChanged": False},
+        },
         "serverInfo": {
             "name": "mylittleharness",
             "title": "MyLittleHarness Read Projection",
@@ -1247,6 +1361,52 @@ def _initialize_result() -> dict[str, object]:
             "repo-visible files and the generic CLI remain authoritative."
         ),
     }
+
+
+def _resources_list_response(inventory: Inventory | None, request_id: object) -> dict[str, object]:
+    if inventory is None:
+        return _error_response(request_id, -32602, "Invalid params: root-bound resources require launching the adapter with --root.")
+    return _result_response(
+        request_id,
+        {
+            "resources": [
+                {
+                    "uri": MCP_READ_PROJECTION_RESOURCE_URI,
+                    "name": "MyLittleHarness projection",
+                    "title": "MyLittleHarness Projection",
+                    "description": (
+                        "Read-only projection summary and authority metadata for the adapter startup root; "
+                        "source bodies are not persisted."
+                    ),
+                    "mimeType": "application/json",
+                    "annotations": {"audience": ["assistant"], "priority": 0.8},
+                }
+            ]
+        },
+    )
+
+
+def _resources_read_response(inventory: Inventory | None, request_id: object, params: object) -> dict[str, object]:
+    if inventory is None:
+        return _error_response(request_id, -32602, "Invalid params: root-bound resources require launching the adapter with --root.")
+    if not isinstance(params, dict):
+        return _error_response(request_id, -32602, "Invalid params: resources/read params must be an object.")
+    uri = params.get("uri")
+    if uri != MCP_READ_PROJECTION_RESOURCE_URI:
+        return _error_response(request_id, -32602, f"Unknown resource: {uri}")
+    payload = mcp_read_projection_payload(inventory, default_root=inventory.root, requested_root=None)
+    return _result_response(
+        request_id,
+        {
+            "contents": [
+                {
+                    "uri": MCP_READ_PROJECTION_RESOURCE_URI,
+                    "mimeType": "application/json",
+                    "text": json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True),
+                }
+            ]
+        },
+    )
 
 
 def _root_input_property() -> dict[str, object]:
@@ -1338,6 +1498,21 @@ def _tool_definitions() -> list[dict[str, object]]:
     return [_read_projection_tool_definition(), _read_source_tool_definition(), _search_tool_definition(), _related_or_bundle_tool_definition()]
 
 
+def _tool_authority(source_body_mode: str) -> dict[str, object]:
+    return {
+        "readOnly": True,
+        "writesFiles": False,
+        "refreshesGeneratedCache": False,
+        "createsAdapterState": False,
+        "authorizesLifecycle": False,
+        "authorizesVcs": False,
+        "providerRouting": False,
+        "shellPassthrough": False,
+        "arbitraryCommandExecution": False,
+        "sourceBodyMode": source_body_mode,
+    }
+
+
 def _read_projection_tool_definition() -> dict[str, object]:
     return {
         "name": MCP_READ_PROJECTION_TOOL,
@@ -1383,7 +1558,8 @@ def _read_projection_tool_definition() -> dict[str, object]:
             ],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
-        "execution": {"taskSupport": "forbidden"},
+        "execution": {"taskSupport": "forbidden", "shellPassthrough": False},
+        "authority": _tool_authority("none"),
     }
 
 
@@ -1410,7 +1586,8 @@ def _read_source_tool_definition() -> dict[str, object]:
             "required": ["tool", "root", "source", "range", "lines", "text", "boundary"],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
-        "execution": {"taskSupport": "forbidden"},
+        "execution": {"taskSupport": "forbidden", "shellPassthrough": False},
+        "authority": _tool_authority("bounded-line-slice"),
     }
 
 
@@ -1438,7 +1615,8 @@ def _search_tool_definition() -> dict[str, object]:
             "required": ["tool", "root", "query", "mode", "limit", "results", "findings", "boundary"],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
-        "execution": {"taskSupport": "forbidden"},
+        "execution": {"taskSupport": "forbidden", "shellPassthrough": False},
+        "authority": _tool_authority("matched-line-snippets"),
     }
 
 
@@ -1469,7 +1647,8 @@ def _related_or_bundle_tool_definition() -> dict[str, object]:
             "required": ["tool", "root", "path", "source", "outboundLinks", "inboundLinks", "bundleSources", "boundary"],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
-        "execution": {"taskSupport": "forbidden"},
+        "execution": {"taskSupport": "forbidden", "shellPassthrough": False},
+        "authority": _tool_authority("source-records-only"),
     }
 
 

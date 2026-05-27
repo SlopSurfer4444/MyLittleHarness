@@ -24443,10 +24443,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertFalse((root / ".mylittleharness").exists())
             payload = json.loads(output.getvalue())
+            expected_args = [
+                "adapter",
+                "--serve",
+                "--target",
+                "mcp-read-projection",
+                "--transport",
+                "stdio",
+            ]
             self.assertEqual("available", payload["status"])
+            self.assertEqual("mylittleharness.mcp-client-configs.v1", payload["schema"])
             self.assertTrue(payload["defaultActive"])
             self.assertEqual("mylittleharness", payload["serverName"])
             self.assertEqual("mylittleharness.read_projection", payload["tool"])
+            self.assertTrue(payload["clientDefaults"]["readOnly"])
+            self.assertTrue(payload["clientDefaults"]["proposeOnlyConfig"])
+            self.assertFalse(payload["clientDefaults"]["mutatingToolsDefaultEnabled"])
+            self.assertFalse(payload["clientDefaults"]["networkListenerDefaultEnabled"])
+            self.assertFalse(payload["clientDefaults"]["providerRoutingDefaultEnabled"])
+            self.assertFalse(payload["clientDefaults"]["shellPassthrough"])
+            self.assertFalse(payload["clientDefaults"]["arbitraryCommandExecution"])
+            for tool in payload["tools"]:
+                self.assertTrue(tool["annotations"]["readOnlyHint"])
+                self.assertFalse(tool["annotations"]["destructiveHint"])
+                self.assertEqual("forbidden", tool["execution"]["taskSupport"])
+                self.assertFalse(tool["execution"]["shellPassthrough"])
+                self.assertTrue(tool["authority"]["readOnly"])
+                self.assertFalse(tool["authority"]["writesFiles"])
+                self.assertFalse(tool["authority"]["authorizesLifecycle"])
+                self.assertFalse(tool["authority"]["shellPassthrough"])
+                self.assertFalse(tool["authority"]["arbitraryCommandExecution"])
             self.assertIn("before or alongside CLI/file reads", payload["recommendedUse"])
             self.assertEqual("root", payload["rootSelection"]["toolArgument"])
             self.assertTrue(payload["rootSelection"]["supportsPerCallRoot"])
@@ -24474,25 +24500,81 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 {
                     "command": "mylittleharness",
-                    "args": [
-                        "adapter",
-                        "--serve",
-                        "--target",
-                        "mcp-read-projection",
-                        "--transport",
-                        "stdio",
-                    ],
+                    "args": expected_args,
                 },
                 payload["generic"]["json"]["mcpServers"]["mylittleharness"],
             )
+            client_configs = payload["clientConfigs"]
+            self.assertEqual(
+                {"genericMcp", "vsCode", "claudeCode", "jetBrains"},
+                set(client_configs),
+            )
+            self.assertEqual(
+                {"command": "mylittleharness", "args": expected_args},
+                client_configs["genericMcp"]["json"]["mcpServers"]["mylittleharness"],
+            )
+            self.assertEqual(
+                {"type": "stdio", "command": "mylittleharness", "args": expected_args},
+                client_configs["vsCode"]["json"]["servers"]["mylittleharness"],
+            )
+            self.assertEqual(
+                {"command": "mylittleharness", "args": expected_args, "env": {}},
+                client_configs["claudeCode"]["json"]["mcpServers"]["mylittleharness"],
+            )
+            self.assertEqual(
+                {"command": "mylittleharness", "args": expected_args},
+                client_configs["jetBrains"]["json"]["mcpServers"]["mylittleharness"],
+            )
+            self.assertIn(".vscode/mcp.json", client_configs["vsCode"]["configSurface"])
+            self.assertIn(".mcp.json", client_configs["claudeCode"]["configSurface"])
+            self.assertIn("AI Assistant", client_configs["jetBrains"]["configSurface"])
+            for profile in client_configs.values():
+                self.assertEqual("copy-or-review", profile["setup"]["mode"])
+                self.assertFalse(profile["setup"]["writesFiles"])
+                self.assertFalse(profile["setup"]["startsServer"])
+                self.assertFalse(profile["setup"]["installsDaemon"])
+                self.assertTrue(profile["setup"]["requiresReviewBeforeUse"])
+                self.assertFalse(profile["setup"]["mutatingToolsDefaultEnabled"])
+                self.assertFalse(profile["setup"]["shellPassthrough"])
+                self.assertFalse(profile["setup"]["arbitraryCommandExecution"])
             self.assertFalse(payload["boundary"]["writesUserConfig"])
             self.assertTrue(payload["boundary"]["writesUserConfigOnApplyOnly"])
             self.assertFalse(payload["boundary"]["writesRepoFiles"])
+            self.assertFalse(payload["boundary"]["clientConfigProfilesWriteFiles"])
+            self.assertEqual("read-propose-only", payload["boundary"]["defaultConfigMode"])
+            self.assertFalse(payload["boundary"]["mutatingToolsDefaultEnabled"])
+            self.assertFalse(payload["boundary"]["networkListenerDefaultEnabled"])
+            self.assertFalse(payload["boundary"]["providerRoutingDefaultEnabled"])
+            self.assertFalse(payload["boundary"]["shellPassthrough"])
+            self.assertFalse(payload["boundary"]["arbitraryCommandExecution"])
             self.assertFalse(payload["boundary"]["storesSecrets"])
             self.assertFalse(payload["boundary"]["storesNewSecrets"])
             self.assertTrue(payload["boundary"]["backupMayPreserveExistingConfigSecrets"])
             self.assertFalse(payload["boundary"]["printsExistingConfigValues"])
             self.assertFalse(payload["boundary"]["authorizesLifecycle"])
+
+    def test_adapter_client_config_docs_pin_readonly_profiles(self) -> None:
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        command_surface = (ROOT / "docs/reference/command-surface.md").read_text(encoding="utf-8")
+        security = (ROOT / "docs/security.md").read_text(encoding="utf-8")
+        docs_readme_flat = re.sub(r"\s+", " ", docs_readme)
+        command_surface_flat = re.sub(r"\s+", " ", command_surface)
+        security_flat = re.sub(r"\s+", " ", security)
+
+        self.assertIn("mylittleharness.mcp-client-configs.v1", docs_readme)
+        self.assertIn("generic MCP, VS Code, Claude Code, and JetBrains AI Assistant", docs_readme_flat)
+        self.assertIn("no shell passthrough is exposed", docs_readme_flat)
+        self.assertIn("copy-or-review profiles", command_surface)
+        self.assertIn("generic MCP and JetBrains use `mcpServers`", command_surface_flat)
+        self.assertIn("VS Code uses `servers` in `mcp.json`", command_surface_flat)
+        self.assertIn("Claude Code can use project `.mcp.json` with `mcpServers`", command_surface_flat)
+        self.assertIn("does not write client files", command_surface_flat)
+        self.assertIn("enable mutating tools", command_surface_flat)
+        self.assertIn("expose shell passthrough", command_surface_flat)
+        self.assertIn("read/propose-only", security)
+        self.assertIn("generic MCP, VS Code, Claude Code, and JetBrains", security_flat)
+        self.assertIn("enables no mutating MCP tools by default", security_flat)
+        self.assertIn("exposes no shell passthrough", security_flat)
 
     def test_adapter_install_client_config_dry_run_and_apply_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -24801,9 +24883,16 @@ class CliTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 {"jsonrpc": "2.0", "id": 2, "method": "ping"},
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 4, "method": "resources/list"},
                 {
                     "jsonrpc": "2.0",
-                    "id": 4,
+                    "id": 5,
+                    "method": "resources/read",
+                    "params": {"uri": "mylittleharness://projection"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
                     "method": "tools/call",
                     "params": {"name": "mylittleharness.read_projection", "arguments": {}},
                 },
@@ -24817,16 +24906,27 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertFalse((root / ".mylittleharness").exists())
             responses = jsonrpc_lines(output.getvalue())
-            self.assertEqual([1, 2, 3, 4], [response["id"] for response in responses])
+            self.assertEqual([1, 2, 3, 4, 5, 6], [response["id"] for response in responses])
             self.assertEqual("2025-11-25", responses[0]["result"]["protocolVersion"])
-            self.assertEqual({"tools": {"listChanged": False}}, responses[0]["result"]["capabilities"])
+            self.assertEqual(
+                {"tools": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}},
+                responses[0]["result"]["capabilities"],
+            )
             self.assertEqual({}, responses[1]["result"])
             tool = responses[2]["result"]["tools"][0]
             self.assertEqual("mylittleharness.read_projection", tool["name"])
             self.assertEqual("root", next(iter(tool["inputSchema"]["properties"])))
             self.assertIn("Optional filesystem path", tool["inputSchema"]["properties"]["root"]["description"])
             self.assertFalse(tool["inputSchema"]["additionalProperties"])
-            result = responses[3]["result"]
+            resource = responses[3]["result"]["resources"][0]
+            self.assertEqual("mylittleharness://projection", resource["uri"])
+            self.assertEqual("application/json", resource["mimeType"])
+            self.assertIn("Read-only projection summary", resource["description"])
+            resource_content = responses[4]["result"]["contents"][0]
+            self.assertEqual("mylittleharness://projection", resource_content["uri"])
+            self.assertEqual("application/json", resource_content["mimeType"])
+            self.assertEqual("mcp-read-projection", json.loads(resource_content["text"])["adapter"]["id"])
+            result = responses[5]["result"]
             self.assertFalse(result["isError"])
             structured = result["structuredContent"]
             self.assertEqual("mcp-read-projection", structured["adapter"]["id"])
@@ -24844,6 +24944,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual("ok", structured["status"])
             self.assertTrue(structured["activation"]["defaultActive"])
             self.assertEqual("mylittleharness.read_projection", structured["activation"]["tool"])
+            self.assertEqual(["mylittleharness://projection"], structured["activation"]["clientDefaults"]["resources"])
             self.assertEqual(
                 [
                     "mylittleharness",
