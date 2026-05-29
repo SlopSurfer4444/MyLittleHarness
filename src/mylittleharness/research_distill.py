@@ -27,6 +27,11 @@ QUALITY_STATUS_SUFFICIENT = "sufficient-for-planning"
 QUALITY_STATUS_PROVISIONAL = "provisional"
 PLANNING_RELIANCE_ALLOWED = "allowed"
 PLANNING_RELIANCE_BLOCKED = "blocked"
+DISCOVERY_PACKET_SCHEMA = "mylittleharness.discovery-packet.v1"
+DISCOVERY_PACKET_SOURCE_TYPE = "pre-plan-discovery-packet"
+_VALID_QUALITY_STATUSES = {QUALITY_STATUS_SUFFICIENT, QUALITY_STATUS_PROVISIONAL}
+_VALID_PLANNING_RELIANCE = {PLANNING_RELIANCE_ALLOWED, PLANNING_RELIANCE_BLOCKED}
+_DISCOVERY_PACKET_BLOCKED_STATUSES = {"blocked", "contested", "draft"}
 _RESERVED_SLUGS = {
     "aux",
     "con",
@@ -262,21 +267,34 @@ def assess_research_distill_quality(
 
 def research_distill_quality_problem(source_rel: str, text: str) -> str:
     frontmatter = parse_frontmatter(text)
+    schema = ""
     status = ""
     source_type = ""
+    discovery_status = ""
     quality_status = ""
     planning_reliance = ""
     issues: tuple[str, ...] = ()
     if frontmatter.has_frontmatter:
+        schema = _normalized_note(frontmatter.data.get("schema")).lower()
         status = _normalized_note(frontmatter.data.get("status")).lower()
         source_type = _normalized_note(frontmatter.data.get("source_type")).lower()
+        discovery_status = _normalized_note(frontmatter.data.get("discovery_status")).lower()
         quality_status = _normalized_note(frontmatter.data.get("quality_status")).lower()
         planning_reliance = _normalized_note(frontmatter.data.get("planning_reliance")).lower()
         issues = tuple(_frontmatter_values(frontmatter.data.get("quality_gate_issues")))
 
-    is_distillate = status == "distilled" or "research-distill" in source_type or bool(quality_status or planning_reliance)
-    if not is_distillate:
+    is_discovery_packet = _is_discovery_packet_profile(schema, source_type)
+    is_quality_profile = status == "distilled" or "research-distill" in source_type or is_discovery_packet or bool(quality_status or planning_reliance)
+    if not is_quality_profile:
         return ""
+    if is_discovery_packet:
+        packet_problem = _discovery_packet_frontmatter_problem(
+            quality_status=quality_status,
+            planning_reliance=planning_reliance,
+            discovery_status=discovery_status,
+        )
+        if packet_problem:
+            return packet_problem
     if quality_status == QUALITY_STATUS_SUFFICIENT and planning_reliance == PLANNING_RELIANCE_ALLOWED:
         return ""
     if quality_status == QUALITY_STATUS_PROVISIONAL or planning_reliance == PLANNING_RELIANCE_BLOCKED:
@@ -286,6 +304,36 @@ def research_distill_quality_problem(source_rel: str, text: str) -> str:
     quality = assess_research_distill_quality(source_rel, text)
     if quality.planning_reliance != PLANNING_RELIANCE_ALLOWED:
         return f"{quality.quality_status}/{quality.planning_reliance}: {'; '.join(quality.quality_gate_issues)}"
+    return ""
+
+
+def _is_discovery_packet_profile(schema: str, source_type: str) -> bool:
+    return (
+        schema == DISCOVERY_PACKET_SCHEMA
+        or source_type == DISCOVERY_PACKET_SOURCE_TYPE
+        or "discovery-packet" in source_type
+        or "discovery packet" in source_type
+    )
+
+
+def _discovery_packet_frontmatter_problem(*, quality_status: str, planning_reliance: str, discovery_status: str) -> str:
+    if not quality_status or not planning_reliance:
+        return (
+            f"{QUALITY_STATUS_PROVISIONAL}/{PLANNING_RELIANCE_BLOCKED}: discovery packet requires "
+            "quality_status and planning_reliance using the existing research gate vocabulary"
+        )
+    invalid: list[str] = []
+    if quality_status not in _VALID_QUALITY_STATUSES:
+        invalid.append(f"quality_status must be {QUALITY_STATUS_SUFFICIENT} or {QUALITY_STATUS_PROVISIONAL}")
+    if planning_reliance not in _VALID_PLANNING_RELIANCE:
+        invalid.append(f"planning_reliance must be {PLANNING_RELIANCE_ALLOWED} or {PLANNING_RELIANCE_BLOCKED}")
+    if invalid:
+        return f"{quality_status}/{planning_reliance}: discovery packet {'; '.join(invalid)}"
+    if discovery_status in _DISCOVERY_PACKET_BLOCKED_STATUSES and planning_reliance != PLANNING_RELIANCE_BLOCKED:
+        return (
+            f"{quality_status}/{planning_reliance}: discovery_status={discovery_status} "
+            f"must map to planning_reliance={PLANNING_RELIANCE_BLOCKED}"
+        )
     return ""
 
 
@@ -508,9 +556,9 @@ def _source_links(source_rel: str, text: str) -> tuple[str, ...]:
     links = [source_rel] if source_rel else []
     frontmatter = parse_frontmatter(text)
     if frontmatter.has_frontmatter:
-        for key in ("derived_from", "source", "source_research", "related_prompt"):
+        for key in ("derived_from", "source", "source_research", "related_prompt", "source_refs", "source_members"):
             links.extend(_frontmatter_values(frontmatter.data.get(key)))
-        for key in ("related_artifacts", "source_hashes"):
+        for key in ("related_artifacts", "source_hashes", "evidence_refs"):
             links.extend(_frontmatter_values(frontmatter.data.get(key)))
     links.extend(ref.target for ref in extract_path_refs(text))
     return _dedupe(_clean_ref(value) for value in links if _clean_ref(value))
@@ -576,8 +624,16 @@ def _items_with_hint(text: str, hints: tuple[str, ...]) -> tuple[str, ...]:
 def _frontmatter_values(value: object) -> list[str]:
     if value is None:
         return []
+    if isinstance(value, dict):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(_frontmatter_values(item))
+        return values
     if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip() and str(item).strip() != "none"]
+        values = []
+        for item in value:
+            values.extend(_frontmatter_values(item))
+        return values
     text = str(value).strip()
     return [] if not text or text == "none" else [text]
 
@@ -841,6 +897,8 @@ def _yaml_list_lines(values: tuple[str, ...], *, indent: str = "") -> list[str]:
 
 
 __all__ = [
+    "DISCOVERY_PACKET_SCHEMA",
+    "DISCOVERY_PACKET_SOURCE_TYPE",
     "ResearchDistillExtraction",
     "ResearchDistillQuality",
     "ResearchDistillRequest",

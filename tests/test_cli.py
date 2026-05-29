@@ -57,6 +57,7 @@ from mylittleharness.projection_artifacts import (
 )
 from mylittleharness.projection_index import INDEX_REL_PATH
 from mylittleharness.reporting import next_safe_routes_for_report, render_report
+from mylittleharness.research_distill import research_distill_quality_problem
 from mylittleharness.root_boundary import first_symlink_prefix, path_resolves_within_root, source_path_boundary_violation
 from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrailerParseResult, product_diff_write_scope_findings
 
@@ -158,6 +159,79 @@ class CliTests(unittest.TestCase):
             self.assertEqual("state\n", target.read_text(encoding="utf-8"))
             self.assertFalse(tmp_path.exists())
             self.assertFalse(backup_path.exists())
+
+    def test_file_transaction_retries_transient_replace_permission_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            source = root / ".state.tmp"
+            target = root / "state.md"
+            source.write_text("state\n", encoding="utf-8")
+            attempts = {"count": 0}
+
+            def flaky_replace_once(source_path: Path, target_path: Path) -> None:
+                attempts["count"] += 1
+                if attempts["count"] < 3:
+                    raise PermissionError("temporary access denied")
+                source_path.replace(target_path)
+
+            with (
+                patch.object(atomic_files, "_replace_path_once", side_effect=flaky_replace_once),
+                patch.object(atomic_files.time, "sleep") as sleep,
+            ):
+                atomic_files._replace_path(source, target)
+
+            self.assertEqual(3, attempts["count"])
+            self.assertEqual(2, sleep.call_count)
+            self.assertFalse(source.exists())
+            self.assertEqual("state\n", target.read_text(encoding="utf-8"))
+
+    def test_file_transaction_uses_portable_sidecars_for_dot_prefixed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            target = root / "state.md"
+            target.write_text("old\n", encoding="utf-8")
+            tmp_path = root / ".state.md.tmp"
+            backup_path = root / ".state.md.backup"
+            calls: list[tuple[str, str]] = []
+            original_replace_once = atomic_files._replace_path_once
+
+            def recording_replace_once(source_path: Path, target_path: Path) -> None:
+                calls.append((source_path.name, target_path.name))
+                original_replace_once(source_path, target_path)
+
+            with patch.object(atomic_files, "_replace_path_once", side_effect=recording_replace_once):
+                warnings = atomic_files.apply_file_transaction(
+                    (atomic_files.AtomicFileWrite(target, tmp_path, "new\n", backup_path),),
+                    root=root,
+                )
+
+            self.assertEqual((), warnings)
+            self.assertEqual("new\n", target.read_text(encoding="utf-8"))
+            self.assertEqual([("state.md.tmp", "state.md")], calls)
+            self.assertFalse(tmp_path.exists())
+            self.assertFalse(backup_path.exists())
+            self.assertFalse((root / "state.md.tmp").exists())
+            self.assertFalse((root / "state.md.backup").exists())
+
+    def test_file_transaction_falls_back_to_copy_unlink_after_persistent_replace_permission_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            source = root / "state.md.tmp"
+            target = root / "state.md"
+            source.write_text("state\n", encoding="utf-8")
+
+            with (
+                patch.object(atomic_files, "_replace_path_once", side_effect=PermissionError("replace denied")),
+                patch.object(atomic_files.time, "sleep") as sleep,
+            ):
+                atomic_files._replace_path(source, target)
+
+            self.assertEqual(len(atomic_files._REPLACE_RETRY_DELAYS_SECONDS), sleep.call_count)
+            self.assertFalse(source.exists())
+            self.assertEqual("state\n", target.read_text(encoding="utf-8"))
 
     def test_root_boundary_primitives_detect_symlink_and_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1116,6 +1190,22 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("research-human-review-gate", rendered)
             self.assertNotIn("recover-deep-research-rubric", rendered)
             self.assertNotIn("recover-roadmap-source-incubation", rendered)
+
+    def test_suggest_intent_routes_discovery_packet_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "создай пакет дискавери перед планом"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("discovery-packet-writer", rendered)
+            self.assertIn("discover --dry-run", rendered)
+            self.assertIn("--quality-status provisional --planning-reliance blocked", rendered)
+            self.assertIn("writes exactly one non-authority project/research packet", rendered)
 
     def test_suggest_intent_routes_projection_cache_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4240,6 +4330,7 @@ class CliTests(unittest.TestCase):
             "approval-packet",
             "review-token",
             "reconcile",
+            "discover",
             "research-import",
             "research-distill",
             "research-compare",
@@ -4274,6 +4365,7 @@ class CliTests(unittest.TestCase):
             (["approval-packet", "--help"], "Advanced coordination helper: create repo-visible human-gate approval"),
             (["review-token", "--help"], "Advanced diagnostic: compute or verify a deterministic fan-in review"),
             (["reconcile", "--help"], "Advanced diagnostic: report route/source/evidence drift"),
+            (["discover", "--help"], "Advanced mutating command: write one explicit pre-plan discovery packet"),
             (["research-import", "--help"], "Advanced mutating command: import external research output"),
             (["research-distill", "--help"], "Advanced mutating command: distill one project/research artifact"),
             (["research-compare", "--help"], "Advanced mutating command: compare imported/distilled research"),
@@ -11774,6 +11866,123 @@ class CliTests(unittest.TestCase):
             self.assertIn("imported_text sha256=", text)
             self.assertIn("Promotion into specs, plans, or project state requires", text)
 
+    def test_discover_dry_run_reports_packet_and_gates_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/research/repo-review.md"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("# Repo Review\n\n- Source claims are reviewed.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "discover",
+                        "--dry-run",
+                        "--topic",
+                        "Plan Readiness",
+                        "--source-ref",
+                        "project/research/repo-review.md",
+                        "--open-question",
+                        "Which gaps remain?",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("discover-dry-run", rendered)
+            self.assertIn(f"project/research/{date.today().isoformat()}-plan-readiness-discovery-packet.md", rendered)
+            self.assertIn("discover-quality-gate", rendered)
+            self.assertIn("planning_reliance=blocked", rendered)
+            self.assertIn("discover dry-run reported the target discovery packet", rendered)
+
+    def test_discover_apply_writes_one_ready_discovery_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/research/repo-review.md"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("# Repo Review\n\n- Source claims are reviewed.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "discover",
+                        "--apply",
+                        "--topic",
+                        "Plan Readiness",
+                        "--source-ref",
+                        "project/research/repo-review.md",
+                        "--target",
+                        "project/research/plan-readiness-discovery-packet.md",
+                        "--quality-status",
+                        "sufficient-for-planning",
+                        "--planning-reliance",
+                        "allowed",
+                        "--discovery-status",
+                        "ready-for-plan",
+                        "--selected-option",
+                        "Open the bounded implementation plan.",
+                        "--rationale",
+                        "All source refs are present and reviewed.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("discover-written", rendered)
+            self.assertIn("discover-route-write", rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/research/plan-readiness-discovery-packet.md"], changed)
+            packet = root / "project/research/plan-readiness-discovery-packet.md"
+            text = packet.read_text(encoding="utf-8")
+            self.assertIn('schema: "mylittleharness.discovery-packet.v1"', text)
+            self.assertIn('source_type: "pre-plan-discovery-packet"', text)
+            self.assertIn('quality_status: "sufficient-for-planning"', text)
+            self.assertIn('planning_reliance: "allowed"', text)
+            self.assertIn("source-bound pre-plan evidence", text)
+            self.assertEqual("", research_distill_quality_problem("project/research/plan-readiness-discovery-packet.md", text))
+
+    def test_discover_apply_refuses_unbound_ready_packet_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "discover",
+                        "--apply",
+                        "--topic",
+                        "Missing Source Packet",
+                        "--source-ref",
+                        "project/research/missing.md",
+                        "--quality-status",
+                        "sufficient-for-planning",
+                        "--planning-reliance",
+                        "allowed",
+                        "--discovery-status",
+                        "ready-for-plan",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("allowed discovery packets require existing source/evidence refs", rendered)
+            self.assertIn("discover apply was refused before any discovery packet was written", rendered)
+
     def test_research_import_dry_run_reports_decision_packet_field_completeness_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -15573,6 +15782,130 @@ class CliTests(unittest.TestCase):
             self.assertIn("memory-hygiene --dry-run --scan", rendered)
             self.assertIn("relationship-writeback-refused", rendered)
             self.assertIn("dry-run refused before apply", rendered)
+
+    def test_plan_dry_run_refuses_blocked_discovery_packet_source_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            packet_rel = "project/research/blocked-discovery-packet.md"
+            packet_path = root / packet_rel
+            packet_path.parent.mkdir(parents=True, exist_ok=True)
+            packet_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.discovery-packet.v1"\n'
+                'status: "research-ready"\n'
+                'discovery_status: "blocked"\n'
+                'quality_status: "provisional"\n'
+                'planning_reliance: "blocked"\n'
+                "quality_gate_issues:\n"
+                '  - "source review is incomplete"\n'
+                "---\n"
+                "# Blocked Discovery Packet\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Discovery Member Plan\n\n"
+                "- `id`: `discovery-member-plan`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `discovery-member-plan`\n"
+                f"- `source_members`: `[\"{packet_rel}\"]`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\"]`\n"
+                "- `verification_summary`: `Blocked discovery packets must stop plan opening.`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "discovery-member-plan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("roadmap-source-members-quality-gate", rendered)
+            self.assertIn("plan-roadmap-source-evidence-refused", rendered)
+            self.assertIn("provisional/blocked", rendered)
+            self.assertIn("dry-run refused before apply", rendered)
+
+    def test_plan_apply_refuses_missing_discovery_packet_source_research(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            packet_rel = "project/research/missing-discovery-packet.md"
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Missing Discovery Packet Plan\n\n"
+                "- `id`: `missing-discovery-packet-plan`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `missing-discovery-packet-plan`\n"
+                f"- `source_research`: `{packet_rel}`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\"]`\n"
+                "- `verification_summary`: `Missing discovery packet evidence must block plan apply.`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "missing-discovery-packet-plan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("roadmap-source-research-missing", rendered)
+            self.assertIn("plan-roadmap-source-evidence-refused", rendered)
+            self.assertIn("source_research evidence target is missing", rendered)
+            self.assertIn("apply refused before route writes", rendered)
+
+    def test_plan_apply_carries_allowed_discovery_packet_as_read_context_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            packet_rel = "project/research/allowed-discovery-packet.md"
+            packet_path = root / packet_rel
+            packet_path.parent.mkdir(parents=True, exist_ok=True)
+            packet_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.discovery-packet.v1"\n'
+                'status: "research-ready"\n'
+                'discovery_status: "ready-for-plan"\n'
+                'quality_status: "sufficient-for-planning"\n'
+                'planning_reliance: "allowed"\n'
+                "---\n"
+                "# Allowed Discovery Packet\n\n"
+                "## Gate Coverage\n\n"
+                "- Gate: source-bound claims and uncertainty were reviewed.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Allowed Discovery Packet Plan\n\n"
+                "- `id`: `allowed-discovery-packet-plan`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `allowed-discovery-packet-plan`\n"
+                f"- `source_members`: `[\"{packet_rel}\"]`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"tests/test_planning.py\"]`\n"
+                "- `verification_summary`: `Allowed discovery packet evidence should be read context only.`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "allowed-discovery-packet-plan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertNotIn("plan-roadmap-source-evidence-refused", rendered)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn(f"`{packet_rel}`", plan_text)
+            self.assertIn("- read_context:", plan_text)
+            self.assertNotIn("source_members:", plan_text)
 
     def test_plan_dry_run_refuses_meta_feedback_candidate_without_target_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -19633,6 +19966,55 @@ class CliTests(unittest.TestCase):
             self.assertIn("research quality gate blocks planning", rendered)
             self.assertIn("missing gate-question coverage matrix", rendered)
 
+    def test_check_blocks_roadmap_readiness_on_invalid_discovery_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            packet_rel = "project/research/draft-discovery-packet.md"
+            packet_path = root / packet_rel
+            packet_path.parent.mkdir(parents=True, exist_ok=True)
+            packet_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.discovery-packet.v1"\n'
+                'status: "research-ready"\n'
+                'discovery_status: "draft"\n'
+                'quality_status: "sufficient-for-planning"\n'
+                'planning_reliance: "allowed"\n'
+                "---\n"
+                "# Draft Discovery Packet\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Discovery Backed Item\n\n"
+                "- `id`: `discovery-backed-item`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `discovery-backed-item`\n"
+                f"- `source_research`: `{packet_rel}`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\"]`\n"
+                "- `verification_summary`: `Plan only after discovery packet gates are ready.`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-source-research-quality-gate", rendered)
+            self.assertIn("roadmap-acceptance-readiness", rendered)
+            self.assertIn("readiness='blocked-before-plan'", rendered)
+            self.assertIn("discovery_status=draft", rendered)
+            self.assertIn("planning_reliance=blocked", rendered)
+
     def test_roadmap_dry_run_reports_acceptance_readiness_for_requested_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -23519,6 +23901,75 @@ class CliTests(unittest.TestCase):
             self.assertTrue(add_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", add_codes)
 
+    def test_hooks_pre_tool_allows_exact_post_closeout_lifecycle_route_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            roadmap = root / "project" / "roadmap.md"
+            archive = root / "project" / "archive" / "plans" / "reviewed-closeout.md"
+            archive.parent.mkdir(parents=True)
+            roadmap.write_text("# Roadmap\n", encoding="utf-8")
+            archive.write_text("# Reviewed Closeout\n", encoding="utf-8")
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(
+                        [
+                            "git",
+                            "add",
+                            "--",
+                            "project/project-state.md",
+                            "project/roadmap.md",
+                            "project/archive/plans/reviewed-closeout.md",
+                        ]
+                    ),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertIn("does not approve route content, closeout, commit, push", messages)
+
+    def test_hooks_pre_tool_keeps_active_lifecycle_route_staging_blocked(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            roadmap = root / "project" / "roadmap.md"
+            archive = root / "project" / "archive" / "plans" / "active-closeout.md"
+            archive.parent.mkdir(parents=True)
+            roadmap.write_text("# Roadmap\n", encoding="utf-8")
+            archive.write_text("# Active Closeout\n", encoding="utf-8")
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(
+                        [
+                            "git",
+                            "add",
+                            "--",
+                            "project/project-state.md",
+                            "project/roadmap.md",
+                            "project/archive/plans/active-closeout.md",
+                        ]
+                    ),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+
     def test_hooks_pre_tool_allows_mlh_owner_route_apply_evidence_paths(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -26146,7 +26597,7 @@ class CliTests(unittest.TestCase):
             self.assertFalse((root / "project").exists())
             self.assertIn("attach-project-required", output.getvalue())
 
-    def test_attach_apply_creates_only_allowed_scaffold_and_templates(self) -> None:
+    def test_attach_apply_creates_allowed_scaffold_templates_and_codex_hooks(self) -> None:
         for command in ("init", "attach"):
             with self.subTest(command=command):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -26160,7 +26611,8 @@ class CliTests(unittest.TestCase):
                         self.assertTrue((root / rel_path).is_dir(), rel_path)
                         self.assertIn(rel_path, rendered)
                     self.assertTrue((root / ".mylittleharness/project-workflow.toml").is_file())
-                    self.assertFalse((root / ".codex").exists())
+                    self.assertTrue((root / ".codex/hooks.json").is_file())
+                    self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
                     self.assertTrue((root / "project/project-state.md").is_file())
                     self.assertIn('project: "Sample"', (root / "project/project-state.md").read_text(encoding="utf-8"))
                     self.assertFalse((root / ".agents/docmap.yaml").exists())
@@ -26168,10 +26620,8 @@ class CliTests(unittest.TestCase):
                     self.assertEqual([], list((root / "project/specs/workflow").glob("*.md")))
                     self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
                     self.assertTrue((root / INDEX_REL_PATH).is_file())
-                    self.assertIn("attach-client-adapters-explicit", rendered)
-                    self.assertIn("client adapters and hooks are explicit opt-in", rendered)
-                    self.assertNotIn("attach-codex-hooks-autoadoption", rendered)
-                    self.assertNotIn("hooks-codex-adapter-apply-written", rendered)
+                    self.assertIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertIn("hooks-codex-adapter-apply-written", rendered)
                     self.assertIn("attach-generated-projection-build", rendered)
 
     def test_attach_apply_is_idempotent_and_preserves_contents(self) -> None:
@@ -26182,6 +26632,8 @@ class CliTests(unittest.TestCase):
             preserved_paths = (
                 ".mylittleharness/project-workflow.toml",
                 "project/project-state.md",
+                ".codex/hooks.json",
+                ".codex/hooks/mylittleharness_session_start.py",
             )
             before = {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths}
             output = io.StringIO()
@@ -26190,12 +26642,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(first_code, 0)
             self.assertEqual(second_code, 0)
             self.assertEqual(before, {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths})
-            self.assertFalse((root / ".codex").exists())
+            self.assertTrue((root / ".codex/hooks.json").is_file())
             self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
             self.assertTrue((root / INDEX_REL_PATH).is_file())
             self.assertIn("attach-already-attached", output.getvalue())
-            self.assertIn("client hooks remain explicit opt-in adapters", output.getvalue())
-            self.assertNotIn("hooks-codex-adapter-apply", output.getvalue())
+            self.assertIn("attach-codex-hooks-autoadoption", output.getvalue())
+            self.assertIn("hooks-codex-adapter-apply-unchanged", output.getvalue())
             self.assertNotIn("attach-generated-projection-build", output.getvalue())
 
     def test_init_attach_dry_run_reports_already_attached_live_root_noop_without_writes(self) -> None:
@@ -26215,10 +26667,11 @@ class CliTests(unittest.TestCase):
                     self.assertIn("would create missing advertised scaffold directory", rendered)
                     self.assertIn(LEGACY_WORKFLOW_MANIFEST_REL, rendered)
                     self.assertIn("project/project-state.md", rendered)
-                    self.assertIn("attach-client-adapters-explicit", rendered)
+                    self.assertIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertIn(".codex/hooks.json", rendered)
                     self.assertNotIn("attach-target-conflict", rendered)
 
-    def test_init_attach_apply_already_attached_live_root_preserves_authority_without_hooks(self) -> None:
+    def test_init_attach_apply_already_attached_live_root_preserves_authority_and_keeps_hooks_current(self) -> None:
         for command in ("init", "attach"):
             with self.subTest(command=command):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -26229,15 +26682,14 @@ class CliTests(unittest.TestCase):
                     rendered = output.getvalue()
                     self.assertEqual(code, 0)
                     self.assertFalse((root / ARTIFACT_DIR_REL).exists())
-                    self.assertFalse((root / ".codex/hooks.json").exists())
-                    self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
+                    self.assertTrue((root / ".codex/hooks.json").is_file())
+                    self.assertTrue((root / ".codex/hooks/mylittleharness_session_start.py").is_file())
                     for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
                         self.assertTrue((root / rel_path).is_dir(), rel_path)
                     self.assertIn("created missing advertised scaffold directory", rendered)
                     self.assertIn("attach-already-attached", rendered)
-                    self.assertIn("client hooks remain explicit opt-in adapters", rendered)
-                    self.assertNotIn("attach-codex-hooks-autoadoption", rendered)
-                    self.assertNotIn("hooks-codex-adapter-apply-written", rendered)
+                    self.assertIn("attach-codex-hooks-autoadoption", rendered)
+                    self.assertIn("hooks-codex-adapter-apply-written", rendered)
                     self.assertNotIn("attach-generated-projection-build", rendered)
 
     def test_init_attach_refuses_detached_live_root_without_noop(self) -> None:
@@ -26332,22 +26784,23 @@ class CliTests(unittest.TestCase):
             self.assertIn("projection-index-fts5-unavailable", rendered)
             self.assertNotIn("attach-generated-projection-recovery", rendered)
 
-    def test_attach_apply_does_not_run_codex_hook_adapter_by_default_after_scaffold_writes(self) -> None:
+    def test_attach_apply_reports_recovery_when_codex_hook_adapter_fails_after_scaffold_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = io.StringIO()
             with patch("mylittleharness.hooks.codex_hook_adapter_apply_findings", side_effect=RuntimeError("hook boom")) as hook_apply, redirect_stdout(output):
                 code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             rendered = output.getvalue()
-            self.assertEqual(code, 0)
-            hook_apply.assert_not_called()
+            self.assertEqual(code, 2)
+            hook_apply.assert_called_once()
             self.assertTrue((root / ".mylittleharness/project-workflow.toml").is_file())
             self.assertTrue((root / "project/project-state.md").is_file())
-            self.assertFalse((root / ".codex").exists())
             self.assertFalse((root / ".codex/hooks.json").exists())
-            self.assertIn("attach-client-adapters-explicit", rendered)
-            self.assertNotIn("attach-codex-hooks-failed-after-scaffold", rendered)
-            self.assertNotIn("attach-codex-hooks-recovery", rendered)
+            self.assertFalse((root / ARTIFACT_DIR_REL / "manifest.json").exists())
+            self.assertIn("attach-codex-hooks-autoadoption", rendered)
+            self.assertIn("attach-codex-hooks-failed-after-scaffold", rendered)
+            self.assertIn("attach-codex-hooks-recovery", rendered)
+            self.assertIn("hooks adapter --client codex --apply --scope project", rendered)
 
     def test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -26359,8 +26812,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertTrue((root / ".mylittleharness/project-workflow.toml").is_file())
             self.assertTrue((root / "project/project-state.md").is_file())
-            self.assertFalse((root / ".codex").exists())
+            self.assertTrue((root / ".codex/hooks.json").is_file())
             self.assertFalse((root / ARTIFACT_DIR_REL / "manifest.json").exists())
+            self.assertIn("hooks-codex-adapter-apply-written", rendered)
             self.assertIn("attach-generated-projection-failed-after-scaffold", rendered)
             self.assertIn("attach-generated-projection-recovery", rendered)
             self.assertIn("projection --rebuild --target all", rendered)

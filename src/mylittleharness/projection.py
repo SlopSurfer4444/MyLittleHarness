@@ -481,12 +481,15 @@ def _local_link_records(inventory: Inventory, surfaces: tuple[Surface, ...]) -> 
             if resolution.kind in {"external", "anchor"}:
                 continue
             target = normalized_link_path(link.target)
+            generated_cache_reason = generated_cache_target_reason(inventory, link.target)
             product_target_reason = product_target_artifact_reason(inventory, surface, link.target, link.line)
             historical_context_reason = historical_link_context_reason(surface, link.target, link.line)
             if resolution.kind == "unresolved":
                 status = "unresolved"
             elif resolution.kind == "unsafe":
                 status = "unsafe"
+            elif generated_cache_reason:
+                status = "generated-cache"
             elif resolution.kind == "pattern":
                 if resolution.exists:
                     status = "pattern-present"
@@ -524,6 +527,8 @@ def _fan_in_records(surface_by_rel: dict[str, Surface], records: tuple[Projectio
             status = "missing"
         elif "missing-optional" in statuses or "pattern-missing" in statuses:
             status = "missing-optional"
+        elif "generated-cache" in statuses:
+            status = "generated-cache"
         elif "product-target" in statuses:
             status = "product-target"
         elif "historical-context" in statuses:
@@ -684,6 +689,8 @@ def _relationship_target_status(
             return "unsafe"
     if relation == "target_artifacts" and _is_product_target_artifact_rel(target):
         return "product-target"
+    if generated_cache_target_reason(inventory, target):
+        return "generated-cache"
     if target in surface_by_rel:
         return "present" if surface_by_rel[target].exists else "missing"
     if _path_escapes_root(inventory.root, inventory.root / target):
@@ -721,6 +728,18 @@ def product_target_artifact_reason(inventory: Inventory, surface: Surface, targe
             f"configured product source root: {product_root}"
         )
     return f"{rel} is product-source target metadata or product-source evidence; product files are not required inside this live operating root"
+
+
+def generated_cache_target_reason(inventory: Inventory, target: str) -> str | None:
+    rel = normalized_link_path(target)
+    if not rel:
+        return None
+    root_rel = _root_relative_link_path(inventory, rel)
+    if root_rel is not None:
+        rel = root_rel
+    if rel == ".mylittleharness/generated/projection" or rel.startswith(".mylittleharness/generated/projection/"):
+        return f"{rel} is disposable generated projection cache; source files remain authoritative"
+    return None
 
 
 def historical_link_context_reason(surface: Surface, target: str, line: int | None) -> str | None:

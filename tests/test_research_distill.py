@@ -67,6 +67,80 @@ derived_from: "project/research/raw-google-doc.md"
 - Add a research distill quality gate to `src/mylittleharness/research_distill.py`.
 """
 
+DISCOVERY_PACKET = """---
+schema: "mylittleharness.discovery-packet.v1"
+status: "research-ready"
+discovery_status: "ready-for-plan"
+quality_status: "sufficient-for-planning"
+planning_reliance: "allowed"
+source_refs:
+  - "project/research/repo-research.md"
+source_members:
+  - "project/research/risk-review.md"
+roles:
+  repo_researcher:
+    status: "complete"
+    evidence_refs:
+      - "project/research/repo-research.md"
+---
+# Discovery Packet
+
+## Gate Coverage
+
+- Gate: roadmap and plan synthesis require source-bound claims, uncertainty, and explicit planning reliance.
+
+## Source-Bound Claims
+
+- Claim: The repo research identifies discovery packets as evidence records under `project/research/*.md`.
+
+## Confidence And Uncertainty
+
+- Confidence: high because the packet names the MLH routes and source evidence.
+- Uncertainty: future writer commands remain optional and out of this profile.
+"""
+
+MISALIGNED_DISCOVERY_PACKET = """---
+schema: "mylittleharness.discovery-packet.v1"
+status: "research-ready"
+discovery_status: "draft"
+quality_status: "sufficient-for-planning"
+planning_reliance: "allowed"
+---
+# Draft Discovery Packet
+
+## Gate Coverage
+
+- Gate: draft packets must not be treated as ready planning evidence.
+
+## Source-Bound Claims
+
+- Claim: This packet is still draft.
+
+## Confidence And Uncertainty
+
+- Uncertainty: draft status remains unresolved.
+"""
+
+MISSING_GATE_DISCOVERY_PACKET = """---
+schema: "mylittleharness.discovery-packet.v1"
+status: "research-ready"
+discovery_status: "ready-for-plan"
+---
+# Discovery Packet
+"""
+
+PROVISIONAL_DISCOVERY_PACKET = """---
+schema: "mylittleharness.discovery-packet.v1"
+status: "research-ready"
+discovery_status: "blocked"
+quality_status: "provisional"
+planning_reliance: "blocked"
+quality_gate_issues:
+  - "source review is incomplete"
+---
+# Blocked Discovery Packet
+"""
+
 
 class ResearchDistillTests(unittest.TestCase):
     def test_distill_extracts_candidates_gaps_source_links_and_route_proposals(self) -> None:
@@ -92,6 +166,29 @@ class ResearchDistillTests(unittest.TestCase):
         self.assertTrue(extraction.quality.gate_coverage)
         self.assertTrue(extraction.quality.source_bound_claims)
         self.assertTrue(extraction.quality.confidence_notes)
+
+    def test_discovery_packet_profile_uses_existing_quality_gate_vocabulary(self) -> None:
+        extraction = distill_research_text("project/research/discovery-packet.md", DISCOVERY_PACKET)
+
+        self.assertEqual("sufficient-for-planning", extraction.quality.quality_status)
+        self.assertEqual("allowed", extraction.quality.planning_reliance)
+        self.assertIn("project/research/repo-research.md", extraction.source_links)
+        self.assertIn("project/research/risk-review.md", extraction.source_links)
+        self.assertEqual("", research_distill_quality_problem("project/research/discovery-packet.md", DISCOVERY_PACKET))
+
+    def test_discovery_packet_profile_blocks_missing_or_misaligned_gate(self) -> None:
+        misaligned = research_distill_quality_problem("project/research/draft-discovery-packet.md", MISALIGNED_DISCOVERY_PACKET)
+        missing = research_distill_quality_problem("project/research/missing-gate-discovery-packet.md", MISSING_GATE_DISCOVERY_PACKET)
+
+        self.assertIn("discovery_status=draft", misaligned)
+        self.assertIn("planning_reliance=blocked", misaligned)
+        self.assertIn("discovery packet requires quality_status and planning_reliance", missing)
+
+    def test_discovery_packet_profile_preserves_provisional_blocker_issue(self) -> None:
+        problem = research_distill_quality_problem("project/research/blocked-discovery-packet.md", PROVISIONAL_DISCOVERY_PACKET)
+
+        self.assertIn("provisional/blocked", problem)
+        self.assertIn("source review is incomplete", problem)
 
     def test_dry_run_reports_distillate_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

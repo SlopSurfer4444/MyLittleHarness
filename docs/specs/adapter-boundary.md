@@ -76,6 +76,8 @@ The implemented `preflight` command is a terminal-only warning feed that wrapper
 
 PreToolUse route blockers classify concrete mutation targets before treating path-looking payload text as route contact. `apply_patch` targets come from file operation headers, and recognized shell writes use command targets such as PowerShell `-Path`/`-LiteralPath`/`-FilePath`, paired move/copy operands, or shell redirection targets. Lifecycle route strings or product-source strings embedded inside code, tests, examples, or command content are inert data unless the actual write target is that lifecycle route or an out-of-scope product path. When a write target cannot be classified, the hook keeps the older conservative path scan so ambiguous direct writes still fail toward explicit MLH routes.
 
+After lifecycle closeout (`plan_status=none`), PreToolUse may allow exact Git staging of existing MLH lifecycle route files so reviewed route writes can be staged precisely instead of forcing a broad VCS add. This allowance is limited to staging existing route files and does not approve route content, direct lifecycle Markdown mutation, closeout, archive, roadmap movement, commit, push, or future lifecycle decisions.
+
 The first-contact hook event does not install native client config, install Git hooks, start a daemon or listener, create adapter state, choose providers, dispatch workers, accept product diffs, approve lifecycle movement, archive plans, move roadmap status, stage, commit, push, or release. Native clients may render the hook's status or inject its additional context, but repo-visible files and explicit MLH dry-run/apply rails remain authority.
 
 ## Product Gates

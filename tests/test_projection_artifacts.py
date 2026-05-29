@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -228,6 +229,41 @@ class ProjectionArtifactTests(unittest.TestCase):
             for name in ARTIFACT_NAMES:
                 self.assertTrue((artifact_dir / name).is_file(), name)
 
+    def test_projection_rebuild_keeps_cache_current_when_sources_reference_dirty_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            readme = root / "README.md"
+            readme.write_text(
+                readme.read_text(encoding="utf-8")
+                + "\nGenerated cache dirty markers: `.mylittleharness/generated/projection/*.dirty.json`.\n",
+                encoding="utf-8",
+            )
+            projection_dir = root / ARTIFACT_DIR_REL
+            projection_dir.mkdir(parents=True)
+            marker_payload = {
+                "schema_version": 1,
+                "marker_kind": "mylittleharness-projection-cache-dirty",
+                "command": "meta-feedback --apply",
+                "dirty_since_utc": "2026-05-29T00:00:00Z",
+                "changed_paths": ["project/plan-incubation/projection-rebuild-check-stale-mismatch.md"],
+                "authority": "repo-visible source files remain authoritative",
+            }
+            (projection_dir / ARTIFACT_DIRTY_MARKER_NAME).write_text(json.dumps(marker_payload), encoding="utf-8")
+            (projection_dir / INDEX_DIRTY_MARKER_NAME).write_text(json.dumps(marker_payload), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--rebuild", "--target", "all"]), 0)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "projection", "--inspect", "--target", "all"]), 0)
+
+            rendered = output.getvalue()
+            self.assertIn("projection-artifact-current", rendered)
+            self.assertIn("projection-index-current", rendered)
+            self.assertNotIn("projection-artifact-stale", rendered)
+            self.assertNotIn("projection-index-hash", rendered)
+
     def test_projection_delete_refuses_directory_shaped_expected_artifact_without_partial_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -255,6 +291,7 @@ class ProjectionArtifactTests(unittest.TestCase):
     def test_projection_build_refuses_boundary_path_conflict_without_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
+            shutil.rmtree(root / ".mylittleharness", ignore_errors=True)
             (root / ".mylittleharness").write_text("not a directory\n", encoding="utf-8")
             before = snapshot_tree(root)
             output = io.StringIO()

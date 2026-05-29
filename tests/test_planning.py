@@ -146,6 +146,50 @@ class PlanningTests(unittest.TestCase):
         self.assertIn("current-phase-only execution", rendered)
         self.assertNotIn("Generated as one explicit current phase", rendered)
 
+    def test_renderer_carries_discovery_packet_source_member_as_read_context_only(self) -> None:
+        request = make_plan_request(
+            "Discovery Packet Read Context",
+            "Use discovery packet evidence without promoting it to plan authority.",
+            None,
+            roadmap_item="discovery-packet-read-context",
+        )
+        packet_rel = "project/research/allowed-discovery-packet.md"
+        contract = RoadmapSliceContract(
+            primary_roadmap_item="discovery-packet-read-context",
+            execution_slice="discovery-packet-read-context",
+            slice_goal="Carry source member evidence as read context.",
+            covered_roadmap_items=("discovery-packet-read-context",),
+            domain_context="Carry source member evidence as read context.",
+            target_artifacts=("src/mylittleharness/planning.py", "tests/test_planning.py"),
+            execution_policy="current-phase-only",
+            closeout_boundary="explicit closeout/writeback only",
+            source_incubation="",
+            source_research="",
+            related_specs=(),
+            source_members=(packet_rel,),
+        )
+        report = RoadmapSynthesisReport(
+            primary_roadmap_item="discovery-packet-read-context",
+            execution_slice="discovery-packet-read-context",
+            covered_roadmap_items=("discovery-packet-read-context",),
+            domain_contexts=("Carry source member evidence as read context.",),
+            target_artifacts=contract.target_artifacts,
+            related_specs=(),
+            source_inputs=contract.source_members,
+            bundle_signals=("shared source inputs: project/research/allowed-discovery-packet.md",),
+            split_signals=("bundle/split output is advisory and cannot approve lifecycle movement",),
+            in_slice_dependencies=(),
+            verification_summary_count=1,
+            target_artifact_pressure="2 target artifacts across 1 roadmap item; report-only sizing signal, not a hard gate",
+            phase_pressure="1 domain context and 1 verification summary; candidate plan outline: 3 phases or explicit one-shot rationale",
+        )
+
+        rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
+
+        self.assertIn(f"`{packet_rel}`", rendered)
+        self.assertIn("- read_context:", rendered)
+        self.assertNotIn("source_members:", rendered)
+
     def test_renderer_includes_docs_scope_when_docs_decision_will_be_updated(self) -> None:
         request = make_plan_request(
             "Docs Scope",

@@ -38,7 +38,7 @@ EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX = {
     },
     "attach late failures": {
         "tests/test_cli.py": (
-            "test_attach_apply_does_not_run_codex_hook_adapter_by_default_after_scaffold_writes",
+            "test_attach_apply_reports_recovery_when_codex_hook_adapter_fails_after_scaffold_writes",
             "test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes",
         ),
     },
@@ -768,7 +768,8 @@ class PackageMetadataTests(unittest.TestCase):
         ):
             self.assertIn(expected, adapter)
         for expected in (
-            "No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, hooks, adapters, MCP, GitHub, generated projections, caches, logs, reports, local databases, package archives, or workflow execution surfaces.",
+            "No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, adapters, MCP, GitHub, caches, logs, reports, local databases, package archives, or workflow execution surfaces.",
+            "The only init/attach hook mutation is the project-local Codex native hook adapter in eligible live roots",
             "No background daemon, scheduler, queue, or dashboard.",
             "`mlhd status` is the read-only local control-plane inspection surface",
             "`mlhd start`, `mlhd stop`, `mlhd run-once`, `mlhd install`, and `mlhd uninstall` require exactly one of `--dry-run` or `--apply`",
@@ -1131,14 +1132,14 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn(expected, projection_spec)
         self.assertNotIn("accepts only an empty-object tool argument shape", cli_spec)
 
-    def test_codex_hooks_docs_keep_explicit_adapter_outside_correctness_path(self) -> None:
+    def test_codex_hooks_docs_keep_default_project_local_adapter_outside_correctness_path(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
         product_boundary = (ROOT / "docs/specs/product-boundary.md").read_text(encoding="utf-8")
 
         for doc in (readme, docs_readme):
-            self.assertIn("create `.codex` by default", doc)
+            self.assertIn("project-local Codex native hooks", doc)
             self.assertIn("hooks adapter --client codex --dry-run|--apply --scope project", doc)
         for doc in (readme, docs_readme, cli_spec, product_boundary):
             self.assertIn("Codex native hooks", doc)
@@ -1147,13 +1148,13 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn("not correctness prerequisites", doc)
         self.assertIn("Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest", readme)
         self.assertIn("Successful `init --apply` and compatibility `attach --apply` create the neutral `.mylittleharness/project-workflow.toml` manifest", docs_readme)
-        self.assertIn("init --apply` and compatibility `attach --apply` do not write project-local Codex native hooks by default", cli_spec)
+        self.assertIn("init --apply` and compatibility `attach --apply` create or refresh project-local Codex native hooks by default", cli_spec)
         self.assertIn("Those hooks are optional non-authoritative sensors, not correctness prerequisites", cli_spec)
         self.assertIn("cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions", cli_spec)
-        self.assertIn("Fresh init/attach does not install the project-local Codex hook adapter by default", product_boundary)
+        self.assertIn("Fresh init/attach installs or refreshes the project-local Codex hook adapter by default", product_boundary)
         self.assertIn("not correctness prerequisites", product_boundary)
-        self.assertNotIn("keep those project-local Codex native hooks current by default", cli_spec)
-        self.assertNotIn("attach/init apply keeps the Codex hook adapter current by default", product_boundary)
+        self.assertIn("Codex Trust remains client-owned", cli_spec)
+        self.assertIn("user-global Codex config remains explicit", product_boundary)
 
     def test_rule_context_drift_docs_keep_check_compact(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

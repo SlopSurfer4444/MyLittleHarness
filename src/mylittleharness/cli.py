@@ -164,7 +164,14 @@ from .relationship_drift import (
 )
 from .research_compare import make_research_compare_request, research_compare_apply_findings, research_compare_dry_run_findings
 from .research_distill import make_research_distill_request, research_distill_apply_findings, research_distill_dry_run_findings
-from .research_intake import make_research_import_request, research_import_apply_findings, research_import_dry_run_findings
+from .research_intake import (
+    discovery_packet_apply_findings,
+    discovery_packet_dry_run_findings,
+    make_discovery_packet_request,
+    make_research_import_request,
+    research_import_apply_findings,
+    research_import_dry_run_findings,
+)
 from .review_tokens import make_review_token_request, review_token_findings
 from .routes import route_manifest
 from .roadmap import (
@@ -216,6 +223,7 @@ COMMANDS = (
     "reconcile",
     "closeout",
     "intake",
+    "discover",
     "research-import",
     "research-distill",
     "research-compare",
@@ -241,6 +249,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "incubate",
     "incubation-reconcile",
     "intake",
+    "discover",
     "memory-hygiene",
     "relationship-drift",
     "meta-feedback",
@@ -765,6 +774,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         report_name = "research-import --apply" if args.apply else "research-import --dry-run"
         findings = research_import_apply_findings(inventory, request) if args.apply else research_import_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "discover":
+        request = make_discovery_packet_request(
+            args.topic,
+            goal=args.goal,
+            target=args.target,
+            packet_id=args.packet_id,
+            quality_status=args.quality_status,
+            planning_reliance=args.planning_reliance,
+            discovery_status=args.discovery_status,
+            source_refs=args.source_refs,
+            source_members=args.source_members,
+            evidence_refs=args.evidence_refs,
+            selected_option=args.selected_option,
+            rationale=args.rationale,
+            open_questions=args.open_questions,
+            stop_conditions=args.stop_conditions,
+        )
+        report_name = "discover --apply" if args.apply else "discover --dry-run"
+        findings = discovery_packet_apply_findings(inventory, request) if args.apply else discovery_packet_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -2687,6 +2719,12 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.code == "research-import-dry-run" for finding in findings):
             return ["research-import dry-run reported the target research artifact and provenance hashes without writing files."]
         return ["research-import apply wrote one non-authority research artifact; promotion into specs, plans, or state remains explicit."]
+    if command == "discover":
+        if any(finding.severity == "error" for finding in findings):
+            return ["discover apply was refused before any discovery packet was written."]
+        if any(finding.code == "discover-dry-run" for finding in findings):
+            return ["discover dry-run reported the target discovery packet, source refs, hashes, and readiness gates without writing files."]
+        return ["discover apply wrote one non-authority discovery packet; roadmap and plan consumption remains gated by explicit readiness fields."]
     if command == "research-distill":
         if any(finding.severity == "error" for finding in findings):
             return ["research-distill apply was refused before any distillate artifact was written."]
@@ -2906,6 +2944,7 @@ def _dry_run_refusal_suggestion(command: str, findings) -> str:
         "handoff": "handoff packet",
         "incubate": "incubation note",
         "intake": "routed note",
+        "discover": "discovery packet",
         "evidence": "agent run evidence record",
         "meta-feedback": "candidate note or cluster metadata",
         "plan": "active-plan or lifecycle update",

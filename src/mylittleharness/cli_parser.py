@@ -280,6 +280,33 @@ def build_parser() -> argparse.ArgumentParser:
     research_import.add_argument("--topic", help="Optional frontmatter topic. Defaults to --title.")
     research_import.add_argument("--source", dest="source_label", help="Optional source/provenance label for the imported research.")
     research_import.add_argument("--related-prompt", dest="related_prompt", help="Optional root-relative prompt or framing artifact.")
+    discover = subparsers.add_parser(
+        "discover",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: write one explicit pre-plan discovery packet as non-authority project/research evidence.",
+    )
+    discover_mode = discover.add_mutually_exclusive_group(required=True)
+    discover_mode.add_argument("--dry-run", action="store_true", help="Preview discovery packet creation without writing files.")
+    discover_mode.add_argument("--apply", action="store_true", help="Write one discovery packet in an eligible live operating root.")
+    discover.add_argument("--topic", required=True, help="Discovery topic and default filename slug.")
+    discover.add_argument("--goal", help="Optional discovery goal. Defaults to --topic.")
+    discover.add_argument("--target", help="Optional explicit root-relative target under project/research/*.md.")
+    discover.add_argument("--packet-id", dest="packet_id", help="Optional stable packet id. Defaults to the topic slug.")
+    discover.add_argument("--quality-status", choices=("sufficient-for-planning", "provisional"), default="provisional", help="Explicit existing research gate quality status.")
+    discover.add_argument("--planning-reliance", choices=("allowed", "blocked"), default="blocked", help="Explicit existing research gate planning reliance.")
+    discover.add_argument(
+        "--discovery-status",
+        choices=("draft", "ready-for-plan", "reviewed", "blocked", "contested"),
+        default="draft",
+        help="Operator-supplied discovery status. draft/blocked/contested require planning reliance blocked.",
+    )
+    discover.add_argument("--source-ref", dest="source_refs", action="append", default=[], help="Root-relative source evidence reference. May be repeated.")
+    discover.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative source member reference. May be repeated.")
+    discover.add_argument("--evidence-ref", dest="evidence_refs", action="append", default=[], help="Root-relative supporting evidence reference. May be repeated.")
+    discover.add_argument("--selected-option", dest="selected_option", help="Optional operator-supplied selected option.")
+    discover.add_argument("--rationale", help="Optional operator-supplied rationale.")
+    discover.add_argument("--open-question", dest="open_questions", action="append", default=[], help="Open question to record. May be repeated.")
+    discover.add_argument("--stop-condition", dest="stop_conditions", action="append", default=[], help="Planning stop condition to record. May be repeated.")
     research_distill = subparsers.add_parser(
         "research-distill",
         help=argparse.SUPPRESS,

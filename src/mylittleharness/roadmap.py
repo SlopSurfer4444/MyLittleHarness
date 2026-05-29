@@ -336,6 +336,7 @@ class RoadmapSliceContract:
     source_incubation: str
     source_research: str
     related_specs: tuple[str, ...]
+    source_members: tuple[str, ...] = ()
     related_incubation: str = ""
     work_class: str = "implementation"
     deliverable_class: str = "implementation"
@@ -1264,6 +1265,10 @@ def roadmap_source_incubation_consumers(
 def roadmap_source_incubation_evidence_findings(
     inventory: Inventory,
     item_ids: tuple[str, ...] = (),
+    *,
+    apply: bool = False,
+    block_apply: bool = False,
+    source: str = ROADMAP_REL,
 ) -> list[Finding]:
     if inventory.root_kind != "live_operating_root":
         return []
@@ -1291,39 +1296,60 @@ def roadmap_source_incubation_evidence_findings(
         elif status not in SOURCE_INCUBATION_EVIDENCE_STATUSES:
             continue
 
-        source_incubation = _normalize_rel(_field_scalar(item.fields, "source_incubation"))
-        if not source_incubation:
-            continue
-        source_path = inventory.root / source_incubation
-        if (
-            _rel_has_absolute_or_parent_parts(source_incubation)
-            or _path_escapes_root(inventory.root, source_path)
-            or not source_path.is_file()
-            or source_path.is_symlink()
-        ):
-            findings.append(
-                Finding(
-                    "warn",
-                    "roadmap-source-incubation-missing",
-                    (
-                        f"roadmap item {item_id!r} source_incubation evidence target is missing: {source_incubation}; "
-                        "recover or recreate the incubation note, retarget the item to an existing incubation/archive note, "
-                        "or run `mylittleharness --root <root> memory-hygiene --dry-run --scan` before relying on roadmap-derived plan input"
-                    ),
-                    ROADMAP_REL,
-                    item.start + 1,
-                )
+        findings.extend(
+            _roadmap_source_evidence_findings_for_item(
+                inventory,
+                item_id,
+                item,
+                severity="error" if apply and block_apply else "warn",
+                source=source,
             )
+        )
     if findings:
         findings.append(
             Finding(
                 "info",
                 "roadmap-source-incubation-boundary",
-                "roadmap source-incubation evidence diagnostics are read-only and cannot create notes, repair relationships, open plans, archive, stage, commit, or approve lifecycle movement",
-                ROADMAP_REL,
+                "roadmap source evidence diagnostics are read-only and cannot create notes, repair relationships, open plans, archive, stage, commit, or approve lifecycle movement",
+                source,
             )
         )
     return findings
+
+
+def roadmap_source_evidence_blockers(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    if inventory.root_kind != "live_operating_root":
+        return ()
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return ()
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return ()
+    _items_start, _items_end, items = parse_result[0]
+
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    blockers: list[str] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        if requested_ids and item_id not in requested_ids:
+            continue
+        status = _normalized_status(item.fields.get("status"))
+        if not requested_ids and status not in SOURCE_INCUBATION_EVIDENCE_STATUSES:
+            continue
+        for field, rel_path in _roadmap_source_evidence_refs(item.fields):
+            problem = _roadmap_source_evidence_problem(inventory, field, rel_path)
+            if problem:
+                blockers.append(f"roadmap item {item_id!r} {field} evidence {problem}: {rel_path}")
+    return tuple(_dedupe_nonempty(blockers))
 
 
 def roadmap_related_specs_evidence_findings(
@@ -1856,6 +1882,7 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
         source_incubation=_first_value_from_items([primary], "source_incubation"),
         source_research=_first_value_from_items(covered_items or [primary], "source_research"),
         related_specs=tuple(_dedupe_nonempty(_values_from_items(covered_items or [primary], "related_specs"))),
+        source_members=tuple(_dedupe_nonempty(_values_from_items(covered_items or [primary], SOURCE_MEMBERS_FIELD))),
         related_incubation=_first_value_from_items([primary], RELATED_INCUBATION_FIELD),
         work_class=work_class,
         deliverable_class=deliverable_class,
@@ -4807,6 +4834,87 @@ def _field_list(fields: dict[str, object], key: str) -> tuple[str, ...]:
     if isinstance(value, (list, tuple)):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return (str(value).strip(),)
+
+
+def _roadmap_source_evidence_findings_for_item(
+    inventory: Inventory,
+    item_id: str,
+    item: RoadmapItem,
+    *,
+    severity: str,
+    source: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for field, rel_path in _roadmap_source_evidence_refs(item.fields):
+        problem = _roadmap_source_evidence_problem(inventory, field, rel_path)
+        if not problem:
+            continue
+        findings.append(
+            Finding(
+                severity,
+                _roadmap_source_evidence_problem_code(field, problem),
+                (
+                    f"roadmap item {item_id!r} {field} evidence {problem}: {rel_path}; "
+                    f"{_roadmap_source_evidence_recovery_hint(field)} before relying on roadmap-derived plan input"
+                ),
+                source,
+                item.start + 1,
+            )
+        )
+    return findings
+
+
+def _roadmap_source_evidence_refs(fields: dict[str, object]) -> tuple[tuple[str, str], ...]:
+    refs: list[tuple[str, str]] = []
+    source_incubation = _normalize_rel(_field_scalar(fields, "source_incubation"))
+    if source_incubation:
+        refs.append(("source_incubation", source_incubation))
+    source_research = _normalize_rel(_field_scalar(fields, "source_research"))
+    if source_research:
+        refs.append(("source_research", source_research))
+    for source_member in _field_list(fields, SOURCE_MEMBERS_FIELD):
+        normalized = _normalize_rel(source_member)
+        if normalized:
+            refs.append((SOURCE_MEMBERS_FIELD, normalized))
+    return tuple(refs)
+
+
+def _roadmap_source_evidence_problem(inventory: Inventory, field: str, rel_path: str) -> str:
+    problem = _roadmap_readiness_path_problem(inventory, rel_path)
+    if problem:
+        return f"target is {problem}"
+    if field == "source_incubation":
+        return ""
+    quality_problem = _roadmap_readiness_research_quality_problem(inventory, rel_path)
+    if quality_problem:
+        return f"research quality gate blocks planning: {quality_problem}"
+    return ""
+
+
+def _roadmap_source_evidence_problem_code(field: str, problem: str) -> str:
+    normalized_field = field.replace("_", "-")
+    if "research quality gate blocks planning" in problem:
+        return f"roadmap-{normalized_field}-quality-gate"
+    if field == "source_incubation":
+        return "roadmap-source-incubation-missing"
+    return f"roadmap-{normalized_field}-missing"
+
+
+def _roadmap_source_evidence_recovery_hint(field: str) -> str:
+    if field == "source_incubation":
+        return (
+            "recover or recreate the incubation note, retarget the item to an existing incubation/archive note, "
+            "or run `mylittleharness --root <root> memory-hygiene --dry-run --scan`"
+        )
+    if field == "source_research":
+        return (
+            "restore or regenerate the research artifact, retarget source_research, or update the research quality "
+            "frontmatter through an explicit reviewed route"
+        )
+    return (
+        "restore or retarget source_members evidence, or update discovery packet quality_status/planning_reliance "
+        "through an explicit reviewed route"
+    )
 
 
 def _roadmap_scope_source_text(inventory: Inventory, fields: dict[str, object]) -> str:

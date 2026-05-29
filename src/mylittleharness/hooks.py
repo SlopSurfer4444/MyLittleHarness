@@ -1315,6 +1315,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_mlh_owner_route_paths = _is_mlh_owner_route_review_command(command) or allow_research_import_related_prompt
     allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, data)
     allow_active_plan_spec_doc_patch = _is_active_plan_spec_doc_patch_request(inventory, data)
+    allow_post_closeout_lifecycle_route_stage = _is_post_closeout_lifecycle_route_stage_command(inventory, command, paths)
     if _active_plan_roadmap_policy_relevant(inventory, command, paths):
         findings.append(
             Finding(
@@ -1338,6 +1339,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         allow_mlh_owner_route_paths=allow_mlh_owner_route_paths,
         allow_existing_route_patch=allow_existing_route_patch,
         allow_active_plan_spec_doc_patch=allow_active_plan_spec_doc_patch,
+        allow_post_closeout_lifecycle_route_stage=allow_post_closeout_lifecycle_route_stage,
     ):
         findings.append(finding)
     if _looks_like_opaque_shell_payload(command):
@@ -1364,6 +1366,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         _looks_like_lifecycle_markdown_write(paths, write_command)
         and not allow_existing_route_patch
         and not allow_active_plan_spec_doc_patch
+        and not allow_post_closeout_lifecycle_route_stage
     ):
         route_path = paths[0] if paths else "project"
         findings.append(
@@ -1409,6 +1412,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     owner_route_evidence_path,
                 )
             )
+    if allow_post_closeout_lifecycle_route_stage:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-post-closeout-lifecycle-route-staging",
+                (
+                    "allowed exact Git staging of existing MLH lifecycle route files after plan_status=none; "
+                    "this is VCS reviewability only and does not approve route content, closeout, commit, push, "
+                    "roadmap movement, or future lifecycle decisions"
+                ),
+                paths[0] if paths else None,
+            )
+        )
     if allow_research_import_related_prompt:
         related_prompt = _research_import_related_prompt_path(command)
         findings.append(
@@ -2223,6 +2239,7 @@ def _path_policy_findings(
     allow_mlh_owner_route_paths: bool = False,
     allow_existing_route_patch: bool = False,
     allow_active_plan_spec_doc_patch: bool = False,
+    allow_post_closeout_lifecycle_route_stage: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
     severity = "warn" if warn_only else "error"
@@ -2247,6 +2264,8 @@ def _path_policy_findings(
         if allow_existing_route_patch and _is_editable_route_patch_path(inventory, rel):
             continue
         if allow_active_plan_spec_doc_patch and _is_active_plan_spec_doc_patch_path(inventory, rel):
+            continue
+        if allow_post_closeout_lifecycle_route_stage and _is_existing_lifecycle_route_file(inventory, rel):
             continue
         if _is_lifecycle_authority_path(rel):
             findings.append(
@@ -2391,6 +2410,16 @@ def _is_read_only_git_inspection_command(command: str) -> bool:
     if _looks_like_write_command(command):
         return False
     return _git_subcommand(command) in READ_ONLY_GIT_INSPECTION_COMMANDS
+
+
+def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, command: str, paths: list[str]) -> bool:
+    if _has_active_plan(inventory):
+        return False
+    if _git_subcommand(command) not in {"add", "stage"}:
+        return False
+    if not paths:
+        return False
+    return all(_is_existing_lifecycle_route_file(inventory, path) for path in paths)
 
 
 def _git_subcommand(command: str) -> str:
@@ -2805,6 +2834,19 @@ def _is_lifecycle_route_path(path: str) -> bool:
         if not prefix.endswith("/") and (rel == route or rel.startswith(route + "/")):
             return True
     return False
+
+
+def _is_existing_lifecycle_route_file(inventory: Inventory, path: str) -> bool:
+    rel = _hook_route_rel_path(inventory, path)
+    if not rel or not _is_lifecycle_route_path(rel):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        return route_path.is_file() and not route_path.is_symlink()
+    except (OSError, RuntimeError):
+        return False
 
 
 def _is_roadmap_path(path: str) -> bool:

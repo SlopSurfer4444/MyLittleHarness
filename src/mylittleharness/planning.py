@@ -41,6 +41,7 @@ from .roadmap import (
     roadmap_slice_result_gate_next_safe_command,
     roadmap_plans_for_requests,
     roadmap_slice_contract_for_item,
+    roadmap_source_evidence_blockers,
     roadmap_compacted_dependency_archive_evidence_findings,
     roadmap_human_review_gate_findings,
     roadmap_related_specs_evidence_findings,
@@ -1581,7 +1582,13 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
     errors.extend(source_errors)
     roadmap_item_ids = _plan_roadmap_item_ids(inventory, request)
     roadmap_evidence_findings = [
-        *roadmap_source_incubation_evidence_findings(inventory, roadmap_item_ids),
+        *roadmap_source_incubation_evidence_findings(
+            inventory,
+            roadmap_item_ids,
+            apply=True,
+            block_apply=True,
+            source=DEFAULT_PLAN_REL,
+        ),
         *roadmap_related_specs_evidence_findings(inventory, roadmap_item_ids),
         *roadmap_human_review_gate_findings(inventory, roadmap_item_ids),
         *roadmap_batch_slice_gate_findings(inventory, roadmap_item_ids, route="plan", source=DEFAULT_PLAN_REL, apply=False),
@@ -1677,7 +1684,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
             Finding(
                 "info",
                 "plan-validation-posture",
-                "apply refused before route writes; use --only-requested-item for one-slice work or record reviewed bundle/human-gate evidence before batching",
+                "apply refused before route writes; fix blocking roadmap evidence or use --only-requested-item only when the refusal is a bundle-scope gate",
                 DEFAULT_PLAN_REL,
             ),
         ]
@@ -2408,6 +2415,15 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
                     ROADMAP_REL,
                 )
             )
+        for blocker in roadmap_source_evidence_blockers(inventory, _plan_roadmap_item_ids(inventory, request)):
+            errors.append(
+                Finding(
+                    "error",
+                    "plan-roadmap-source-evidence-refused",
+                    f"{blocker}; next_safe_command=mylittleharness --root <root> check",
+                    ROADMAP_REL,
+                )
+            )
 
     if inventory.root_kind == "product_source_fixture":
         errors.append(Finding("error", "plan-refused", "target is a product-source compatibility fixture; plan --apply is refused", DEFAULT_PLAN_REL))
@@ -2729,6 +2745,7 @@ def _plan_slice_contract(inventory: Inventory, request: PlanRequest) -> RoadmapS
         source_incubation=_normalize_rel(str(fields.get("source_incubation") or "")),
         source_research=_normalize_rel(str(fields.get("source_research") or "")),
         related_specs=tuple(_dedupe_nonempty(_field_list(fields.get("related_specs")))),
+        source_members=tuple(_dedupe_nonempty(_field_list(fields.get("source_members")))),
         related_incubation=_normalize_rel(str(fields.get(RELATED_INCUBATION_FIELD) or "")),
         work_class=getattr(contract, "work_class", "implementation"),
         deliverable_class=getattr(contract, "deliverable_class", "implementation"),
@@ -2752,7 +2769,16 @@ def _plan_synthesis_report(
     contract = slice_contract or _plan_slice_contract(inventory, request)
     if contract is None:
         return None
-    source_inputs = tuple(_dedupe_nonempty((contract.source_incubation, contract.related_incubation, contract.source_research)))
+    source_inputs = tuple(
+        _dedupe_nonempty(
+            (
+                contract.source_incubation,
+                contract.related_incubation,
+                contract.source_research,
+                *getattr(contract, "source_members", ()),
+            )
+        )
+    )
     item_fields = roadmap_item_fields(inventory, request.roadmap_item)
     verification_summary = _normalized_note(item_fields.get("verification_summary"))
     docs_update_count = 1 if str(item_fields.get("docs_decision") or "").strip().casefold() == "updated" else 0

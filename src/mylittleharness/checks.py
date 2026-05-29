@@ -3350,8 +3350,9 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
     findings.append(
         Finding(
             "info",
-            "attach-client-adapters-explicit",
-            "client adapters are explicit opt-in steps; default init/attach will not create .codex hooks or client config",
+            "attach-codex-hooks-autoadoption",
+            "default init/attach apply would create or refresh project-local Codex native hooks; Codex Trust and user-global client config remain client-owned",
+            ".codex/hooks.json",
         )
     )
 
@@ -3375,6 +3376,9 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
 ATTACH_MANIFEST_REL_PATH = WORKFLOW_MANIFEST_REL
 ATTACH_STATE_REL_PATH = "project/project-state.md"
 ATTACH_RECOVERY_CHECK_COMMAND = "next_safe_command=mylittleharness --root <root> check"
+ATTACH_CODEX_HOOKS_RECOVERY_COMMAND = (
+    "next_safe_command=mylittleharness --root <root> hooks adapter --client codex --apply --scope project"
+)
 
 
 def attach_apply_findings(inventory: Inventory, project_name: str | None) -> list[Finding]:
@@ -3449,19 +3453,65 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         Finding(
             "info",
             "attach-apply-boundary",
-            "attach --apply wrote eager scaffold directories, absent manifest/state templates, and attach-time disposable generated projection output; client adapters and hooks are explicit opt-in steps and not correctness prerequisites",
-        )
-    )
-    findings.append(
-        Finding(
-            "info",
-            "attach-client-adapters-explicit",
-            "default init/attach did not create .codex hooks or client config; use an explicit adapter command when a client integration is desired",
+            "attach --apply wrote eager scaffold directories, absent manifest/state templates, project-local Codex native hooks, and attach-time disposable generated projection output; Codex Trust and user-global client config remain client-owned, and hooks are not correctness prerequisites",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
+    hook_findings = _attach_codex_hooks_default_apply_findings(refreshed_inventory, after_scaffold_write=True)
+    findings.extend(hook_findings)
+    if any(finding.severity == "error" for finding in hook_findings):
+        findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
+        return findings
     findings.extend(_attach_generated_projection_findings(refreshed_inventory, after_scaffold_write=True))
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
+    return findings
+
+
+def _attach_codex_hooks_default_apply_findings(inventory: Inventory, *, after_scaffold_write: bool = False) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "attach-codex-hooks-autoadoption",
+            "attach/init apply keeps the project-local Codex native hook adapter current by default; Codex Trust and user-global client config remain client-owned",
+            ".codex/hooks.json",
+        )
+    ]
+    try:
+        from . import hooks as hooks_module
+
+        hook_findings = hooks_module.codex_hook_adapter_apply_findings(inventory, hooks_module.CodexHookAdapterRequest())
+    except Exception as exc:
+        findings.append(
+            _attach_post_step_exception_finding(
+                "codex-hooks",
+                "project-local Codex native hook adapter setup",
+                exc,
+                ".codex/hooks.json",
+            )
+        )
+        if after_scaffold_write:
+            findings.append(
+                _attach_post_scaffold_recovery_finding(
+                    "attach-codex-hooks-recovery",
+                    "project-local Codex native hook adapter setup",
+                    ATTACH_CODEX_HOOKS_RECOVERY_COMMAND,
+                    ".codex/hooks.json",
+                    severity="error",
+                )
+            )
+        return findings
+
+    findings.extend(hook_findings)
+    if after_scaffold_write and any(finding.severity == "error" for finding in hook_findings):
+        findings.append(
+            _attach_post_scaffold_recovery_finding(
+                "attach-codex-hooks-recovery",
+                "project-local Codex native hook adapter setup",
+                ATTACH_CODEX_HOOKS_RECOVERY_COMMAND,
+                ".codex/hooks.json",
+                severity="error",
+            )
+        )
     return findings
 
 
@@ -3646,8 +3696,9 @@ def _attach_already_attached_dry_run_findings(inventory: Inventory) -> list[Find
         Finding("info", "attach-existing", f"existing project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
         Finding(
             "info",
-            "attach-client-adapters-explicit",
-            "default init/attach does not create client hooks; use an explicit adapter command when a client integration is desired",
+            "attach-codex-hooks-autoadoption",
+            "default init/attach apply would create or refresh project-local Codex native hooks; Codex Trust and user-global client config remain client-owned",
+            ".codex/hooks.json",
         ),
     ]
     missing_dirs = [rel_path for rel_path in WORKFLOW_ATTACH_DIRECTORIES if not (inventory.root / rel_path).exists()]
@@ -3692,10 +3743,15 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
         Finding(
             "info",
             "attach-apply-boundary",
-            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories; client hooks remain explicit opt-in adapters",
+            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories and refresh project-local Codex native hooks; Codex Trust and user-global client config remain client-owned",
         )
     )
     refreshed_inventory = load_inventory(inventory.root)
+    hook_findings = _attach_codex_hooks_default_apply_findings(refreshed_inventory, after_scaffold_write=False)
+    findings.extend(hook_findings)
+    if any(finding.severity == "error" for finding in hook_findings):
+        findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
+        return findings
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 

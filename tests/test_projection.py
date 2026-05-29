@@ -212,6 +212,43 @@ class ProjectionTests(unittest.TestCase):
                 link_statuses,
             )
 
+    def test_projection_classifies_generated_cache_paths_independent_of_marker_presence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            readme = root / "README.md"
+            readme.write_text(
+                "# Generated Cache References\n\n"
+                "Generated cache markers: `.mylittleharness/generated/projection/*.dirty.json` and "
+                "`.mylittleharness/generated/projection/relationships.json`.\n",
+                encoding="utf-8",
+            )
+            projection_dir = root / ".mylittleharness/generated/projection"
+            projection_dir.mkdir(parents=True)
+            marker = projection_dir / "artifacts.dirty.json"
+            marker.write_text("{}\n", encoding="utf-8")
+            relationships = projection_dir / "relationships.json"
+            relationships.write_text("{}\n", encoding="utf-8")
+
+            with_generated_files = build_projection(load_inventory(root))
+            marker.unlink()
+            relationships.unlink()
+            without_generated_files = build_projection(load_inventory(root))
+
+            def generated_rows(projection):
+                return sorted(
+                    (record.target, record.status, record.resolution_kind)
+                    for record in projection.links
+                    if record.source == "README.md"
+                    and record.target.startswith(".mylittleharness/generated/projection/")
+                )
+
+            expected = [
+                (".mylittleharness/generated/projection/*.dirty.json", "generated-cache", "pattern"),
+                (".mylittleharness/generated/projection/relationships.json", "generated-cache", "local"),
+            ]
+            self.assertEqual(expected, generated_rows(with_generated_files))
+            self.assertEqual(expected, generated_rows(without_generated_files))
+
     def test_projection_includes_cold_memory_routes_without_start_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

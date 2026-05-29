@@ -6,20 +6,39 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Sequence
 
 from .atomic_files import AtomicFileWrite, apply_file_transaction
 from .evidence import lifecycle_mutation_provenance_findings
 from .inventory import Inventory
 from .models import Finding
 from .reporting import RouteWriteEvidence, route_write_findings
+from .research_distill import (
+    DISCOVERY_PACKET_SCHEMA,
+    DISCOVERY_PACKET_SOURCE_TYPE,
+    PLANNING_RELIANCE_ALLOWED,
+    PLANNING_RELIANCE_BLOCKED,
+    QUALITY_STATUS_PROVISIONAL,
+    QUALITY_STATUS_SUFFICIENT,
+)
 
 
 RESEARCH_DIR_REL = "project/research"
 RESEARCH_IMPORT_SOURCE = "research-import cli"
+DISCOVERY_PACKET_SOURCE = "discover cli"
 NON_AUTHORITY_NOTE = (
     "imported research is durable provenance and synthesis input; it cannot approve lifecycle, specs, plans, archive, "
     "roadmap status, staging, commit, or next-plan opening."
 )
+DISCOVERY_PACKET_NON_AUTHORITY_NOTE = (
+    "discovery packet is source-bound pre-plan evidence; it cannot approve lifecycle, open plans, update roadmap "
+    "status, archive, stage, commit, call providers, or decide planning readiness unless its explicit gate fields allow it."
+)
+DISCOVERY_PACKET_READY_STATUS = "ready-for-plan"
+DISCOVERY_PACKET_DEFAULT_STATUS = "draft"
+DISCOVERY_PACKET_BLOCKED_STATUSES = {"blocked", "contested", "draft"}
+_DISCOVERY_PACKET_QUALITY_STATUSES = {QUALITY_STATUS_SUFFICIENT, QUALITY_STATUS_PROVISIONAL}
+_DISCOVERY_PACKET_PLANNING_RELIANCE = {PLANNING_RELIANCE_ALLOWED, PLANNING_RELIANCE_BLOCKED}
 DECISION_PACKET_FIELDS = (
     "confirmed_fixes",
     "new_slice_candidates",
@@ -78,6 +97,45 @@ class ResearchImportTarget:
     imported_text_hash: str
 
 
+@dataclass(frozen=True)
+class DiscoveryPacketRequest:
+    topic: str
+    goal: str = ""
+    target: str = ""
+    packet_id: str = ""
+    quality_status: str = QUALITY_STATUS_PROVISIONAL
+    planning_reliance: str = PLANNING_RELIANCE_BLOCKED
+    discovery_status: str = DISCOVERY_PACKET_DEFAULT_STATUS
+    source_refs: tuple[str, ...] = ()
+    source_members: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    selected_option: str = ""
+    rationale: str = ""
+    open_questions: tuple[str, ...] = ()
+    stop_conditions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DiscoveryPacketTarget:
+    topic: str
+    goal: str
+    rel_path: str
+    path: Path
+    packet_id: str
+    quality_status: str
+    planning_reliance: str
+    discovery_status: str
+    source_refs: tuple[str, ...]
+    source_members: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+    selected_option: str
+    rationale: str
+    open_questions: tuple[str, ...]
+    stop_conditions: tuple[str, ...]
+    missing_refs: tuple[str, ...]
+    source_hashes: tuple[str, ...]
+
+
 def make_research_import_request(
     title: str | None,
     text: str | None,
@@ -99,6 +157,118 @@ def make_research_import_request(
         related_prompt=_normalize_rel(related_prompt),
         input_path=_normalized_note(input_path),
     )
+
+
+def make_discovery_packet_request(
+    topic: str | None,
+    *,
+    goal: str | None = None,
+    target: str | None = None,
+    packet_id: str | None = None,
+    quality_status: str | None = None,
+    planning_reliance: str | None = None,
+    discovery_status: str | None = None,
+    source_refs: Sequence[str] | None = None,
+    source_members: Sequence[str] | None = None,
+    evidence_refs: Sequence[str] | None = None,
+    selected_option: str | None = None,
+    rationale: str | None = None,
+    open_questions: Sequence[str] | None = None,
+    stop_conditions: Sequence[str] | None = None,
+) -> DiscoveryPacketRequest:
+    normalized_topic = _normalized_note(topic)
+    return DiscoveryPacketRequest(
+        topic=normalized_topic,
+        goal=_normalized_note(goal) or normalized_topic,
+        target=_normalize_rel(target),
+        packet_id=_normalized_note(packet_id) or _safe_slug(normalized_topic),
+        quality_status=_normalized_note(quality_status) or QUALITY_STATUS_PROVISIONAL,
+        planning_reliance=_normalized_note(planning_reliance) or PLANNING_RELIANCE_BLOCKED,
+        discovery_status=_normalized_note(discovery_status) or DISCOVERY_PACKET_DEFAULT_STATUS,
+        source_refs=_normalize_rel_sequence(source_refs),
+        source_members=_normalize_rel_sequence(source_members),
+        evidence_refs=_normalize_rel_sequence(evidence_refs),
+        selected_option=_normalized_note(selected_option),
+        rationale=_normalized_note(rationale),
+        open_questions=_normalized_note_sequence(open_questions),
+        stop_conditions=_normalized_note_sequence(stop_conditions),
+    )
+
+
+def discovery_packet_dry_run_findings(inventory: Inventory, request: DiscoveryPacketRequest) -> list[Finding]:
+    target = _discovery_packet_target(inventory, request)
+    findings = [
+        Finding("info", "discover-dry-run", "discovery packet proposal only; no files were written"),
+        _root_posture_finding(inventory, "discover"),
+        *lifecycle_mutation_provenance_findings(inventory, "discover-lifecycle-provenance"),
+    ]
+    errors = _discovery_packet_preflight_errors(inventory, request, target)
+    if target:
+        findings.extend(_discovery_target_findings(target, apply=False))
+    if target and not errors:
+        rendered, render_findings = _render_discovery_packet(inventory.root, target)
+        findings.extend(render_findings)
+        findings.extend(route_write_findings("discover-route-write", (_route_write(inventory.root, target.rel_path, rendered),), apply=False))
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "discover-validation-posture",
+                "dry-run refused before apply; fix refusal reasons, then rerun dry-run before writing the discovery packet",
+            )
+        )
+        return findings
+    findings.extend(_discovery_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "discover-validation-posture",
+            "apply would write one explicit discovery packet in a live operating root; dry-run writes no files",
+            target.rel_path if target else RESEARCH_DIR_REL,
+        )
+    )
+    return findings
+
+
+def discovery_packet_apply_findings(inventory: Inventory, request: DiscoveryPacketRequest) -> list[Finding]:
+    target = _discovery_packet_target(inventory, request)
+    errors = _discovery_packet_preflight_errors(inventory, request, target)
+    if errors:
+        return errors
+    assert target is not None
+
+    rendered, render_findings = _render_discovery_packet(inventory.root, target)
+    write_evidence = _route_write(inventory.root, target.rel_path, rendered)
+    tmp_path = target.path.with_name(f".{target.path.name}.discover.tmp")
+    backup_path = target.path.with_name(f".{target.path.name}.discover.backup")
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target.path, tmp_path, rendered, backup_path),),
+            root=inventory.root,
+        )
+    except OSError as exc:
+        return [Finding("error", "discover-refused", f"discover apply failed before all target writes completed: {exc}", target.rel_path)]
+
+    findings = [
+        Finding("info", "discover-apply", "discovery packet apply started"),
+        _root_posture_finding(inventory, "discover"),
+        *lifecycle_mutation_provenance_findings(inventory, "discover-lifecycle-provenance"),
+        *_discovery_target_findings(target, apply=True),
+        *render_findings,
+        Finding("info", "discover-written", "created discovery packet artifact", target.rel_path),
+        *route_write_findings("discover-route-write", (write_evidence,), apply=True),
+        *_discovery_boundary_findings(),
+        Finding(
+            "info",
+            "discover-validation-posture",
+            "run check after apply to verify discovery packet quality gates and roadmap readiness; packet evidence remains non-authority until consumed by explicit lifecycle rails",
+            target.rel_path,
+        ),
+    ]
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "discover-backup-cleanup", warning, target.rel_path))
+    return findings
 
 
 def research_import_dry_run_findings(inventory: Inventory, request: ResearchImportRequest) -> list[Finding]:
@@ -195,6 +365,34 @@ def _research_import_target(inventory: Inventory, request: ResearchImportRequest
     )
 
 
+def _discovery_packet_target(inventory: Inventory, request: DiscoveryPacketRequest) -> DiscoveryPacketTarget | None:
+    rel_path = request.target or _default_discovery_packet_rel(request.topic)
+    if not rel_path:
+        return None
+    refs = (*request.source_refs, *request.source_members, *request.evidence_refs)
+    missing_refs = tuple(ref for ref in refs if ref and not (inventory.root / ref).is_file())
+    source_hashes = tuple(_source_ref_hash(inventory.root, ref) for ref in refs if ref and (inventory.root / ref).is_file())
+    return DiscoveryPacketTarget(
+        topic=request.topic,
+        goal=request.goal or request.topic,
+        rel_path=rel_path,
+        path=inventory.root / rel_path,
+        packet_id=request.packet_id or _safe_slug(request.topic),
+        quality_status=request.quality_status,
+        planning_reliance=request.planning_reliance,
+        discovery_status=request.discovery_status,
+        source_refs=request.source_refs,
+        source_members=request.source_members,
+        evidence_refs=request.evidence_refs,
+        selected_option=request.selected_option,
+        rationale=request.rationale,
+        open_questions=request.open_questions,
+        stop_conditions=request.stop_conditions,
+        missing_refs=missing_refs,
+        source_hashes=source_hashes,
+    )
+
+
 def _research_import_preflight_errors(
     inventory: Inventory,
     request: ResearchImportRequest,
@@ -270,6 +468,134 @@ def _research_import_preflight_errors(
     return errors
 
 
+def _discovery_packet_preflight_errors(
+    inventory: Inventory,
+    request: DiscoveryPacketRequest,
+    target: DiscoveryPacketTarget | None,
+) -> list[Finding]:
+    errors: list[Finding] = []
+    if not request.topic:
+        errors.append(Finding("error", "discover-refused", "--topic is required and cannot be empty or whitespace-only"))
+    elif target is None:
+        errors.append(Finding("error", "discover-refused", "--topic does not produce a safe non-empty ASCII target slug"))
+    if request.target and _root_relative_path_conflict(request.target):
+        errors.append(Finding("error", "discover-refused", f"target {_root_relative_path_conflict(request.target)}", request.target))
+    for label, refs in (
+        ("source-ref", request.source_refs),
+        ("source-member", request.source_members),
+        ("evidence-ref", request.evidence_refs),
+    ):
+        for ref in refs:
+            if _root_relative_path_conflict(ref):
+                errors.append(Finding("error", "discover-refused", f"{label} {_root_relative_path_conflict(ref)}", ref))
+    if not any((request.source_refs, request.source_members, request.evidence_refs)):
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                "at least one --source-ref, --source-member, or --evidence-ref is required so the packet stays source-bound",
+            )
+        )
+    if request.quality_status not in _DISCOVERY_PACKET_QUALITY_STATUSES:
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                f"--quality-status must be {QUALITY_STATUS_SUFFICIENT} or {QUALITY_STATUS_PROVISIONAL}",
+                target.rel_path if target else RESEARCH_DIR_REL,
+            )
+        )
+    if request.planning_reliance not in _DISCOVERY_PACKET_PLANNING_RELIANCE:
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                f"--planning-reliance must be {PLANNING_RELIANCE_ALLOWED} or {PLANNING_RELIANCE_BLOCKED}",
+                target.rel_path if target else RESEARCH_DIR_REL,
+            )
+        )
+    if request.discovery_status in DISCOVERY_PACKET_BLOCKED_STATUSES and request.planning_reliance == PLANNING_RELIANCE_ALLOWED:
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                f"discovery_status={request.discovery_status} must use planning_reliance={PLANNING_RELIANCE_BLOCKED}",
+                target.rel_path if target else RESEARCH_DIR_REL,
+            )
+        )
+    if (
+        target
+        and target.missing_refs
+        and target.quality_status == QUALITY_STATUS_SUFFICIENT
+        and target.planning_reliance == PLANNING_RELIANCE_ALLOWED
+    ):
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                "allowed discovery packets require existing source/evidence refs; missing: " + ", ".join(target.missing_refs),
+                target.rel_path,
+            )
+        )
+
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                "target is a product-source compatibility fixture; discover --apply is refused",
+                target.rel_path if target else RESEARCH_DIR_REL,
+            )
+        )
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                "target is fallback/archive or generated-output evidence; discover --apply is refused",
+                target.rel_path if target else RESEARCH_DIR_REL,
+            )
+        )
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding("error", "discover-refused", f"target root kind is {inventory.root_kind}; discover requires a live operating root"))
+
+    state = inventory.state
+    if state is None or not state.exists:
+        errors.append(Finding("error", "discover-refused", "project-state.md is missing", "project/project-state.md"))
+    elif not state.frontmatter.has_frontmatter:
+        errors.append(Finding("error", "discover-refused", "project-state.md frontmatter is required for discover apply", state.rel_path))
+    elif state.frontmatter.errors:
+        errors.append(Finding("error", "discover-refused", "project-state.md frontmatter is malformed", state.rel_path))
+    elif not state.path.is_file():
+        errors.append(Finding("error", "discover-refused", "project-state.md is not a regular file", state.rel_path))
+    elif state.path.is_symlink():
+        errors.append(Finding("error", "discover-refused", "project-state.md is a symlink", state.rel_path))
+
+    research_dir = inventory.root / RESEARCH_DIR_REL
+    if _path_escapes_root(inventory.root, research_dir):
+        errors.append(Finding("error", "discover-refused", "research directory path escapes the target root", RESEARCH_DIR_REL))
+    for parent in _parents_between(inventory.root, research_dir):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding("error", "discover-refused", f"research directory contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding("error", "discover-refused", f"research directory contains a non-directory segment: {rel}", rel))
+
+    if target:
+        if not target.rel_path.startswith(f"{RESEARCH_DIR_REL}/") or not target.rel_path.endswith(".md"):
+            errors.append(Finding("error", "discover-refused", f"target must be under {RESEARCH_DIR_REL}/*.md", target.rel_path))
+        if _path_escapes_root(inventory.root, target.path):
+            errors.append(Finding("error", "discover-refused", "target discovery packet path escapes the target root", target.rel_path))
+        elif target.path.exists():
+            if target.path.is_symlink():
+                errors.append(Finding("error", "discover-refused", "target discovery packet is a symlink; overwrite is refused", target.rel_path))
+            elif not target.path.is_file():
+                errors.append(Finding("error", "discover-refused", "target discovery packet path exists but is not a regular file", target.rel_path))
+            else:
+                errors.append(Finding("error", "discover-refused", "target discovery packet already exists; choose a new --target", target.rel_path))
+    return errors
+
+
 def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[str, list[Finding]]:
     today = date.today().isoformat()
     source_hashes = _source_hash_entries(root, target)
@@ -337,6 +663,129 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
     return "\n".join(lines), findings
 
 
+def _render_discovery_packet(root: Path, target: DiscoveryPacketTarget) -> tuple[str, list[Finding]]:
+    today = date.today().isoformat()
+    gate_issues = _discovery_quality_gate_issues(target)
+    frontmatter: list[str] = [
+        "---",
+        f'schema: "{DISCOVERY_PACKET_SCHEMA}"',
+        f'source_type: "{DISCOVERY_PACKET_SOURCE_TYPE}"',
+        'status: "research-ready"',
+        f'topic: "{_yaml_double_quoted_value(target.topic)}"',
+        f'title: "{_yaml_double_quoted_value(target.topic)} Discovery Packet"',
+        f'packet_id: "{_yaml_double_quoted_value(target.packet_id)}"',
+        f'created: "{today}"',
+        f'last_reviewed: "{today}"',
+        f'discovery_status: "{_yaml_double_quoted_value(target.discovery_status)}"',
+        f'quality_status: "{_yaml_double_quoted_value(target.quality_status)}"',
+        f'planning_reliance: "{_yaml_double_quoted_value(target.planning_reliance)}"',
+        *_yaml_list_lines("source_refs", target.source_refs),
+        *_yaml_list_lines("source_members", target.source_members),
+        *_yaml_list_lines("evidence_refs", target.evidence_refs),
+    ]
+    if gate_issues:
+        frontmatter.extend(_yaml_list_lines("quality_gate_issues", gate_issues))
+    frontmatter.extend(
+        [
+            "roles:",
+            "  repo_researcher:",
+            '    status: "operator-supplied"',
+            "    evidence_refs:",
+            *_yaml_indented_list_lines((*target.source_refs, *target.source_members), indent="      "),
+            "  plan_reviewer:",
+            f'    status: "{_yaml_double_quoted_value(target.discovery_status)}"',
+            "recommendation:",
+            f'  selected_option: "{_yaml_double_quoted_value(target.selected_option or "not supplied")}"',
+            f'  rationale: "{_yaml_double_quoted_value(target.rationale or "not supplied")}"',
+            "---",
+        ]
+    )
+
+    lines = [
+        *frontmatter,
+        f"# {target.topic} Discovery Packet",
+        "",
+        DISCOVERY_PACKET_NON_AUTHORITY_NOTE,
+        "",
+        "## Goal",
+        "",
+        f"- Topic: {target.topic}",
+        f"- Goal: {target.goal or target.topic}",
+        "",
+        "## Source Evidence",
+        "",
+        *_markdown_ref_lines("source_refs", target.source_refs),
+        *_markdown_ref_lines("source_members", target.source_members),
+        *_markdown_ref_lines("evidence_refs", target.evidence_refs),
+        "",
+        "## Source Hashes",
+        "",
+    ]
+    lines.extend(f"- `{entry}`" for entry in target.source_hashes)
+    if not target.source_hashes:
+        lines.append("- No existing source refs were hashable at write time.")
+    lines.extend(
+        [
+            "",
+            "## Readiness Gate",
+            "",
+            f"- Discovery status: `{target.discovery_status}`",
+            f"- Quality status: `{target.quality_status}`",
+            f"- Planning reliance: `{target.planning_reliance}`",
+        ]
+    )
+    if gate_issues:
+        lines.extend(f"- Gate issue: {issue}" for issue in gate_issues)
+    else:
+        lines.append("- Gate issue: none recorded by operator input.")
+    lines.extend(
+        [
+            "",
+            "## Recommendation",
+            "",
+            f"- Selected option: {target.selected_option or 'not supplied'}",
+            f"- Rationale: {target.rationale or 'not supplied'}",
+            "",
+            "## Open Questions",
+            "",
+            *_markdown_list_or_none(target.open_questions),
+            "",
+            "## Stop Conditions",
+            "",
+            *_markdown_list_or_none(target.stop_conditions),
+            "",
+            "## Boundaries",
+            "",
+            "- This artifact records pre-plan discovery evidence only.",
+            "- It does not run research, call providers, synthesize hidden judgment, open a plan, close a phase, archive plans, update roadmap status, stage files, or commit.",
+            "- Planning may rely on it only when explicit quality_status and planning_reliance fields satisfy the existing research gate vocabulary.",
+            "",
+        ]
+    )
+    findings = [
+        Finding("info", "discover-source-hash", f"source/evidence hashes={len(target.source_hashes)}", target.rel_path),
+        Finding(
+            "info",
+            "discover-quality-gate",
+            f"discovery_status={target.discovery_status}; quality_status={target.quality_status}; planning_reliance={target.planning_reliance}",
+            target.rel_path,
+        ),
+        Finding("info", "discover-non-authority", DISCOVERY_PACKET_NON_AUTHORITY_NOTE, target.rel_path),
+    ]
+    if target.missing_refs:
+        findings.append(
+            Finding(
+                "warn",
+                "discover-source-ref-missing",
+                "discovery packet records missing source/evidence refs: " + ", ".join(target.missing_refs),
+                target.rel_path,
+            )
+        )
+    for entry in target.source_hashes:
+        findings.append(Finding("info", "discover-source-ref", entry, target.rel_path))
+    return "\n".join(lines), findings
+
+
 def _source_hash_entries(root: Path, target: ResearchImportTarget) -> tuple[str, ...]:
     entries = [f"imported_text sha256={target.imported_text_hash}"]
     input_path = Path(target.input_path).expanduser() if target.input_path and target.input_path != "-" else None
@@ -354,11 +803,28 @@ def _source_hash_entries(root: Path, target: ResearchImportTarget) -> tuple[str,
     return tuple(entries)
 
 
+def _source_ref_hash(root: Path, rel_path: str) -> str:
+    path = root / rel_path
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return f"{rel_path} unreadable"
+    return f"{rel_path} sha256={digest}"
+
+
 def _target_findings(target: ResearchImportTarget, apply: bool) -> list[Finding]:
     verb = "target research artifact" if apply else "would target research artifact"
     return [
         Finding("info", "research-import-title", f"normalized title: {target.title}", target.rel_path),
         Finding("info", "research-import-target", f"{verb}: {target.rel_path}", target.rel_path),
+    ]
+
+
+def _discovery_target_findings(target: DiscoveryPacketTarget, apply: bool) -> list[Finding]:
+    verb = "target discovery packet" if apply else "would target discovery packet"
+    return [
+        Finding("info", "discover-topic", f"normalized topic: {target.topic}", target.rel_path),
+        Finding("info", "discover-target", f"{verb}: {target.rel_path}", target.rel_path),
     ]
 
 
@@ -493,8 +959,8 @@ def _compact_field_value(value: str) -> str:
     return compact
 
 
-def _root_posture_finding(inventory: Inventory) -> Finding:
-    return Finding("info", "research-import-root-posture", f"root kind: {inventory.root_kind}")
+def _root_posture_finding(inventory: Inventory, prefix: str = "research-import") -> Finding:
+    return Finding("info", f"{prefix}-root-posture", f"root kind: {inventory.root_kind}")
 
 
 def _boundary_findings() -> list[Finding]:
@@ -512,6 +978,21 @@ def _boundary_findings() -> list[Finding]:
     ]
 
 
+def _discovery_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "discover-boundary",
+            "discover writes only one project/research/<safe-topic>-discovery-packet.md artifact in eligible live operating roots; it does not execute providers, repair, archive, stage, commit, or mutate product-source fixtures",
+        ),
+        Finding(
+            "info",
+            "discover-authority",
+            "discovery packets are source-bound evidence only; roadmap/plan consumption remains gated by explicit quality_status and planning_reliance fields",
+        ),
+    ]
+
+
 def _route_write(root: Path, rel_path: str, after_text: str) -> RouteWriteEvidence:
     target = root / rel_path
     before_text = target.read_text(encoding="utf-8") if target.is_file() else None
@@ -525,6 +1006,15 @@ def _default_research_rel(title: str) -> str:
     return f"{RESEARCH_DIR_REL}/{date.today().isoformat()}-{slug}.md"
 
 
+def _default_discovery_packet_rel(topic: str) -> str:
+    slug = _safe_slug(topic)
+    if not slug or slug in _RESERVED_SLUGS:
+        return ""
+    if not slug.endswith("discovery-packet"):
+        slug = f"{slug}-discovery-packet"
+    return f"{RESEARCH_DIR_REL}/{date.today().isoformat()}-{slug}.md"
+
+
 def _safe_slug(value: str) -> str:
     ascii_text = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
@@ -534,8 +1024,16 @@ def _normalize_rel(value: str | None) -> str:
     return str(value or "").strip().replace("\\", "/")
 
 
+def _normalize_rel_sequence(values: Sequence[str] | None) -> tuple[str, ...]:
+    return tuple(_dedupe(_normalize_rel(value) for value in (values or ()) if _normalize_rel(value)))
+
+
 def _normalized_note(value: object) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _normalized_note_sequence(values: Sequence[str] | None) -> tuple[str, ...]:
+    return tuple(_dedupe(_normalized_note(value) for value in (values or ()) if _normalized_note(value)))
 
 
 def _root_relative_path_conflict(rel_path: str) -> str:
@@ -589,13 +1087,69 @@ def _with_severity(findings: list[Finding], severity: str) -> list[Finding]:
     ]
 
 
+def _discovery_quality_gate_issues(target: DiscoveryPacketTarget) -> tuple[str, ...]:
+    issues: list[str] = []
+    if target.quality_status != QUALITY_STATUS_SUFFICIENT or target.planning_reliance != PLANNING_RELIANCE_ALLOWED:
+        issues.append(
+            f"operator marked packet {target.quality_status}/{target.planning_reliance}; planning must remain blocked until explicit ready review"
+        )
+    if target.discovery_status in DISCOVERY_PACKET_BLOCKED_STATUSES:
+        issues.append(f"discovery_status={target.discovery_status} is not ready for planning")
+    if target.missing_refs:
+        issues.append("missing referenced evidence: " + ", ".join(target.missing_refs))
+    return tuple(_dedupe(issues))
+
+
+def _yaml_list_lines(key: str, values: tuple[str, ...]) -> list[str]:
+    if not values:
+        return [f"{key}:", '  - "none"']
+    return [f"{key}:", *(f'  - "{_yaml_double_quoted_value(value)}"' for value in values)]
+
+
+def _yaml_indented_list_lines(values: tuple[str, ...], *, indent: str) -> list[str]:
+    if not values:
+        return [f'{indent}- "none"']
+    return [f'{indent}- "{_yaml_double_quoted_value(value)}"' for value in values]
+
+
+def _markdown_ref_lines(label: str, values: tuple[str, ...]) -> list[str]:
+    if not values:
+        return [f"- {label}: none supplied"]
+    return [f"- {label}: `{value}`" for value in values]
+
+
+def _markdown_list_or_none(values: tuple[str, ...]) -> list[str]:
+    if not values:
+        return ["- none supplied"]
+    return [f"- {value}" for value in values]
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 def _yaml_double_quoted_value(value: object) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
 __all__ = [
+    "DISCOVERY_PACKET_DEFAULT_STATUS",
+    "DISCOVERY_PACKET_NON_AUTHORITY_NOTE",
+    "DISCOVERY_PACKET_READY_STATUS",
+    "DiscoveryPacketRequest",
+    "DiscoveryPacketTarget",
     "ResearchImportRequest",
     "ResearchImportTarget",
+    "discovery_packet_apply_findings",
+    "discovery_packet_dry_run_findings",
+    "make_discovery_packet_request",
     "make_research_import_request",
     "research_import_apply_findings",
     "research_import_dry_run_findings",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Iterable
 
 from .root_boundary import absolute_path, first_symlink_prefix
@@ -31,12 +33,16 @@ class FileTransactionError(OSError):
     pass
 
 
+_REPLACE_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
+_UNLINK_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
 def apply_file_transaction(
     operations: Iterable[AtomicFileWrite | AtomicFileDelete],
     *,
     root: Path | None = None,
 ) -> tuple[str, ...]:
-    planned = tuple(operations)
+    planned = _portable_sidecar_operations(tuple(operations))
     if not planned:
         return ()
 
@@ -57,11 +63,13 @@ def apply_file_transaction(
         for operation in planned:
             had_original = operation.target_path.exists()
             if had_original:
-                _replace_path(operation.target_path, operation.backup_path)
+                _copy_path(operation.target_path, operation.backup_path)
             applied.append(_AppliedOperation(operation, had_original))
             if isinstance(operation, AtomicFileWrite):
                 _replace_path(operation.tmp_path, operation.target_path)
                 _remove_known_path(written_tmps, operation.tmp_path)
+            elif had_original:
+                _unlink_path(operation.target_path)
     except OSError as exc:
         rollback_errors = _rollback_applied_operations(applied)
         cleanup_errors = _cleanup_temporary_writes(written_tmps)
@@ -69,6 +77,33 @@ def apply_file_transaction(
         raise FileTransactionError(_transaction_failure_message(exc, rollback_errors + cleanup_errors)) from exc
 
     return tuple(_cleanup_success_backups(applied))
+
+
+def _portable_sidecar_operations(
+    operations: tuple[AtomicFileWrite | AtomicFileDelete, ...],
+) -> tuple[AtomicFileWrite | AtomicFileDelete, ...]:
+    return tuple(_portable_sidecar_operation(operation) for operation in operations)
+
+
+def _portable_sidecar_operation(operation: AtomicFileWrite | AtomicFileDelete) -> AtomicFileWrite | AtomicFileDelete:
+    backup_path = _portable_sidecar_path(operation.backup_path)
+    if isinstance(operation, AtomicFileWrite):
+        return AtomicFileWrite(
+            target_path=operation.target_path,
+            tmp_path=_portable_sidecar_path(operation.tmp_path),
+            text=operation.text,
+            backup_path=backup_path,
+        )
+    return AtomicFileDelete(target_path=operation.target_path, backup_path=backup_path)
+
+
+def _portable_sidecar_path(path: Path) -> Path:
+    if not path.name.startswith("."):
+        return path
+    portable_name = path.name.lstrip(".")
+    if not portable_name:
+        portable_name = "mylittleharness-sidecar"
+    return path.with_name(portable_name)
 
 
 def _validate_transaction_paths(
@@ -211,10 +246,61 @@ def _missing_parent_dirs(path: Path) -> list[Path]:
 
 
 def _replace_path(source: Path, target: Path) -> None:
+    last_retryable_error: OSError | None = None
+    for delay in (*_REPLACE_RETRY_DELAYS_SECONDS, None):
+        try:
+            _replace_path_once(source, target)
+            return
+        except OSError as exc:
+            if not _retryable_replace_error(exc):
+                raise
+            last_retryable_error = exc
+            if delay is not None:
+                time.sleep(delay)
+    if last_retryable_error is not None:
+        _replace_path_by_copy_unlink(source, target)
+
+
+def _replace_path_once(source: Path, target: Path) -> None:
     source.replace(target)
 
 
+def _replace_path_by_copy_unlink(source: Path, target: Path) -> None:
+    _copy_path(source, target)
+    try:
+        _unlink_path(source)
+    except OSError:
+        try:
+            if target.exists():
+                _unlink_path(target)
+        finally:
+            raise
+
+
+def _copy_path(source: Path, target: Path) -> None:
+    target.write_bytes(source.read_bytes())
+
+
+def _retryable_replace_error(exc: OSError) -> bool:
+    if getattr(exc, "winerror", None) in {5, 32, 33}:
+        return True
+    if isinstance(exc, PermissionError):
+        return True
+    return exc.errno in {errno.EACCES, errno.EPERM}
+
+
 def _unlink_path(path: Path) -> None:
+    for delay in (*_UNLINK_RETRY_DELAYS_SECONDS, None):
+        try:
+            _unlink_path_once(path)
+            return
+        except OSError as exc:
+            if delay is None or not _retryable_replace_error(exc):
+                raise
+            time.sleep(delay)
+
+
+def _unlink_path_once(path: Path) -> None:
     path.unlink()
 
 
