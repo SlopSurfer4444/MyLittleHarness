@@ -33,6 +33,7 @@ from .evidence import (
     AGENT_RUN_STATUSES,
     agent_run_record_template_finding,
     lifecycle_mutation_provenance_findings,
+    worker_run_receipt_findings,
 )
 from .handoff import HANDOFF_PACKET_SCHEMA, HANDOFF_PACKETS_DIR_REL, HANDOFF_PACKET_STATUSES, HANDOFF_WORKER_FORBIDDEN_ROUTES
 from .inventory import (
@@ -302,7 +303,7 @@ PRODUCT_DOC_COPY_DRIFT_SURFACES = (
     "docs/specs/attach-repair-status-cli.md",
     ".agents/docmap.yaml",
 )
-COORDINATION_EVIDENCE_RECORD_KINDS = ("agent-run", "work-claim", "handoff", "approval-packet")
+COORDINATION_EVIDENCE_RECORD_KINDS = ("agent-run", "worker-run-receipt", "work-claim", "handoff", "approval-packet")
 COORDINATION_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 COORDINATION_SOURCE_HASH_RE = re.compile(r"^(.+?)\s+(?:sha256=([a-fA-F0-9]{64})|(missing)|(unreadable)|(invalid-path))$")
 COORDINATION_SOURCE_HASH_REQUIRED_PREFIXES = (".agents/", ".codex/", "docs/", "src/", "tests/")
@@ -561,6 +562,8 @@ def coordination_evidence_identity_findings(
         findings.extend(_coordination_approval_packet_identity_findings(inventory.root, code_prefix))
     if "agent-run" in requested:
         findings.extend(_coordination_agent_run_identity_findings(inventory.root, code_prefix))
+    if "worker-run-receipt" in requested:
+        findings.extend(worker_run_receipt_findings(inventory, f"{code_prefix}-worker-run-receipt"))
 
     if not any(finding.severity == "warn" for finding in findings):
         findings.append(

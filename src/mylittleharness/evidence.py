@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 from pathlib import Path
 import re
 import shlex
@@ -56,10 +57,14 @@ DURABLE_PROOF_RECORD_LIMIT = 5
 AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
 AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
+WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
+WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
+RUNTIME_STATE_NAMESPACE_ID = "runtime_state_namespace.v1"
 COORDINATION_RECORD_DIRS = (
     "project/verification/work-claims",
     "project/verification/handoffs",
     "project/verification/session-active-work",
+    WORKER_RUN_RECEIPTS_DIR_REL,
 )
 AGENT_RUN_REQUIRED_SCALARS = (
     "schema",
@@ -87,6 +92,104 @@ AGENT_RUN_STATUSES = {
     "needs-human-review",
 }
 AGENT_RUN_DOCS_DECISIONS = {"updated", "not-needed", "uncertain"}
+WORKER_RUN_RECEIPT_REQUIRED_SCALARS = (
+    "schema",
+    "record_type",
+    "receipt_id",
+    "launch_id",
+    "worker_id",
+    "role",
+    "target_root",
+    "runtime_namespace",
+    "worker_status",
+    "non_authority",
+)
+WORKER_RUN_RECEIPT_REQUIRED_LISTS = (
+    "task_input_refs",
+    "event_stream_refs",
+    "output_refs",
+    "verification_refs",
+    "source_hashes",
+)
+WORKER_RUN_RECEIPT_WORKER_STATUSES = {
+    "queued",
+    "running",
+    "succeeded",
+    "failed",
+    "blocked",
+    "cancelled",
+    "timed-out",
+    "skipped",
+    "needs-human-review",
+}
+WORKER_RUN_RECEIPT_RUNTIME_STATUSES = {
+    "not-started",
+    "starting",
+    "running",
+    "exited",
+    "failed",
+    "cancelled",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKFLOW_STATUSES = {
+    "queued",
+    "ready",
+    "in-progress",
+    "blocked",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "waiting-for-review",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_VERIFICATION_VERDICTS = {
+    "not-run",
+    "passed",
+    "failed",
+    "blocked",
+    "skipped",
+    "inconclusive",
+}
+WORKER_RUN_RECEIPT_LIFECYCLE_STATUSES = {
+    "none",
+    "pending",
+    "active",
+    "in-progress",
+    "ready-for-closeout",
+    "complete",
+    "archived",
+    "blocked",
+}
+WORKER_RUN_RECEIPT_RESEARCH_IMPORT_STATUSES = {
+    "not-imported",
+    "candidate",
+    "imported",
+    "distilled",
+    "compared",
+    "insufficient",
+    "uncertain",
+}
+WORKER_RUN_RECEIPT_FORBIDDEN_WORKER_STATUS_TERMS = {
+    "accepted",
+    "active",
+    "approved",
+    "archived",
+    "complete",
+    "done",
+    "passed",
+    "roadmap-done",
+}
+WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS = (
+    "approves_lifecycle",
+    "approves_archive",
+    "approves_roadmap_status",
+    "approves_git",
+    "approves_provider_routing",
+    "approves_release",
+    "lifecycle_accepted",
+    "approves_closeout",
+    "approves_target_repo_acceptance",
+)
 AGENT_RUN_ROUTE_PROPOSAL_FIELDS = ("route_proposals", "recommended_next_routes", "recommended_next_route")
 ROUTE_PROPOSAL_FORBIDDEN_TERMS = {
     "--apply",
@@ -365,6 +468,67 @@ def agent_run_record_template_finding(rel_path: str, code_prefix: str = "agent-r
         "`mylittleharness --root <root> evidence --record --dry-run ...`"
     )
     return Finding("info", f"{code_prefix}-record-template", example, rel_path)
+
+
+def worker_run_receipt_findings(inventory: Inventory, code_prefix: str = "worker-run-receipt") -> list[Finding]:
+    code = f"{code_prefix}-record"
+    if inventory.root_kind != "live_operating_root":
+        return [
+            Finding(
+                "info",
+                code,
+                "worker run receipt scan is live-root only; product fixtures and archive roots remain non-authority context",
+                inventory.state.rel_path if inventory.state and inventory.state.exists else None,
+            )
+        ]
+
+    paths = _worker_run_receipt_paths(inventory.root)
+    if not paths:
+        return [
+            Finding(
+                "info",
+                code,
+                "no worker run receipts found at project/verification/worker-run-receipts/*.json; receipts are optional evidence until a worker launch exists",
+            ),
+            *_worker_run_receipt_boundary_findings(code_prefix),
+        ]
+
+    findings: list[Finding] = []
+    for path in paths:
+        rel_path = _to_rel_path(inventory.root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", f"{code}-malformed", "worker run receipt path is not a regular file", rel_path))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            findings.append(Finding("warn", f"{code}-malformed", f"worker run receipt could not be read as JSON: {exc}", rel_path))
+            continue
+        if not isinstance(data, dict):
+            findings.append(Finding("warn", f"{code}-malformed", "worker run receipt JSON root must be an object", rel_path))
+            continue
+
+        receipt_id = str(data.get("receipt_id") or "").strip() or "<missing>"
+        launch_id = str(data.get("launch_id") or "").strip() or "<missing>"
+        worker_id = str(data.get("worker_id") or "").strip() or "<missing>"
+        worker_status = str(data.get("worker_status") or "").strip() or "<missing>"
+        findings.append(
+            Finding(
+                "info",
+                code,
+                (
+                    f"candidate: worker run receipt: {rel_path}; receipt_id={receipt_id}; "
+                    f"launch_id={launch_id}; worker_id={worker_id}; worker_status={worker_status}; "
+                    "repo-visible evidence input only"
+                ),
+                rel_path,
+            )
+        )
+        findings.extend(_worker_run_receipt_metadata_findings(inventory.root, rel_path, path.stem, data, code_prefix))
+        findings.extend(_worker_run_receipt_source_hash_findings(inventory.root, rel_path, data, code_prefix))
+
+    findings.extend(_worker_run_receipt_boundary_findings(code_prefix))
+    return findings
 
 
 def lifecycle_mutation_provenance_findings(inventory: Inventory, code_prefix: str = "lifecycle-provenance") -> list[Finding]:
@@ -1111,6 +1275,235 @@ def _agent_run_route_proposal_findings(rel_path: str, data: dict[str, object], c
     return findings
 
 
+def _worker_run_receipt_metadata_findings(
+    root: Path,
+    rel_path: str,
+    filename_stem: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    code = f"{code_prefix}-record-malformed"
+    findings: list[Finding] = []
+    for field in WORKER_RUN_RECEIPT_REQUIRED_SCALARS:
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            findings.append(Finding("warn", code, f"worker run receipt missing required field: {field}", rel_path))
+    for field in WORKER_RUN_RECEIPT_REQUIRED_LISTS:
+        if not _frontmatter_string_list(data.get(field)):
+            findings.append(Finding("warn", code, f"worker run receipt missing required list field: {field}", rel_path))
+    if data.get("schema") != WORKER_RUN_RECEIPT_SCHEMA:
+        findings.append(Finding("warn", code, f"worker run receipt schema should be {WORKER_RUN_RECEIPT_SCHEMA}", rel_path))
+    if data.get("record_type") != "worker-run-receipt":
+        findings.append(Finding("warn", code, "worker run receipt record_type should be worker-run-receipt", rel_path))
+
+    receipt_id = str(data.get("receipt_id") or "").strip()
+    if receipt_id and not RECORD_ID_RE.match(receipt_id):
+        findings.append(Finding("warn", code, "worker run receipt receipt_id may contain only letters, digits, dot, underscore, or dash", rel_path))
+    elif receipt_id and record_id_conflict(receipt_id):
+        findings.append(Finding("warn", code, f"worker run receipt receipt_id {record_id_conflict(receipt_id)}", rel_path))
+    if receipt_id and receipt_id != filename_stem:
+        findings.append(Finding("warn", code, f"worker run receipt filename stem {filename_stem} does not match receipt_id {receipt_id}", rel_path))
+
+    runtime_namespace = str(data.get("runtime_namespace") or "").strip()
+    if runtime_namespace and runtime_namespace not in {RUNTIME_STATE_NAMESPACE_ID, "mylittleharness.runtime-state-namespace.v1"}:
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-status-namespace",
+                f"worker run receipt runtime_namespace should be {RUNTIME_STATE_NAMESPACE_ID}: {runtime_namespace}",
+                rel_path,
+            )
+        )
+
+    findings.extend(_worker_run_receipt_status_namespace_findings(rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_non_authority_findings(rel_path, data, code_prefix))
+    for field in ("task_input_refs", "event_stream_refs", "output_refs", "verification_refs"):
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, field, data.get(field), code))
+    return findings
+
+
+def _worker_run_receipt_status_namespace_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    specs = (
+        ("worker_status", WORKER_RUN_RECEIPT_WORKER_STATUSES, "worker"),
+        ("runtime_status", WORKER_RUN_RECEIPT_RUNTIME_STATUSES, "runtime"),
+        ("workflow_status", WORKER_RUN_RECEIPT_WORKFLOW_STATUSES, "workflow"),
+        ("verification_verdict", WORKER_RUN_RECEIPT_VERIFICATION_VERDICTS, "verification verdict"),
+        ("lifecycle_status", WORKER_RUN_RECEIPT_LIFECYCLE_STATUSES, "MLH lifecycle"),
+        ("research_import_status", WORKER_RUN_RECEIPT_RESEARCH_IMPORT_STATUSES, "research import"),
+    )
+    findings: list[Finding] = []
+    for field, allowed, label in specs:
+        status = str(data.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-status-namespace",
+                    f"worker run receipt {field} must use the {label} namespace: {status}",
+                    rel_path,
+                )
+            )
+    worker_status = str(data.get("worker_status") or "").strip()
+    if worker_status in WORKER_RUN_RECEIPT_FORBIDDEN_WORKER_STATUS_TERMS:
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-status-namespace",
+                f"worker run receipt worker_status must not carry lifecycle or verification status: {worker_status}",
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _worker_run_receipt_non_authority_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    findings: list[Finding] = []
+    label = str(data.get("non_authority") or "").strip().casefold()
+    if label and (
+        "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-authority-boundary",
+                "worker run receipt non_authority must explicitly label the receipt as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+    for field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+        if _worker_run_receipt_truthy(data.get(field)):
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-authority-boundary",
+                    f"worker run receipt {field} must remain false; worker receipts cannot approve lifecycle or external authority",
+                    rel_path,
+                )
+            )
+    authority = data.get("authority")
+    if isinstance(authority, dict):
+        for field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+            if _worker_run_receipt_truthy(authority.get(field)):
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-authority-boundary",
+                        f"worker run receipt authority.{field} must remain false; worker receipts are evidence only",
+                        rel_path,
+                    )
+                )
+    elif authority not in (None, ""):
+        findings.append(Finding("warn", f"{code_prefix}-authority-boundary", "worker run receipt authority must be an object when present", rel_path))
+    return findings
+
+
+def _worker_run_receipt_ref_list_findings(root: Path, rel_path: str, field: str, value: object, code: str) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    refs = _frontmatter_string_list(value)
+    if not refs:
+        return [Finding("warn", code, f"worker run receipt {field} must be a string or list of strings when present", rel_path)]
+    findings: list[Finding] = []
+    for ref in refs:
+        conflict = _root_relative_path_conflict(ref)
+        if conflict:
+            findings.append(Finding("warn", code, f"worker run receipt {field} path {conflict}: {ref}", rel_path))
+            continue
+        target = root / ref
+        boundary_violation = source_path_boundary_violation(root, target, label=f"worker run receipt {field}")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", code, boundary_violation.message, rel_path))
+    return findings
+
+
+def _worker_run_receipt_source_hash_findings(root: Path, rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    code = f"{code_prefix}-record"
+    findings: list[Finding] = []
+    for entry in _frontmatter_string_list(data.get("source_hashes")):
+        match = SOURCE_HASH_RE.match(entry.strip())
+        if not match:
+            findings.append(Finding("warn", f"{code}-malformed", f"malformed source_hashes entry: {entry}", rel_path))
+            continue
+        source_rel = match.group(1).strip()
+        expected_hash = match.group(2)
+        expected_missing = bool(match.group(3))
+        expected_unreadable = bool(match.group(4))
+        expected_invalid = bool(match.group(5))
+        conflict = _root_relative_path_conflict(source_rel)
+        if conflict:
+            findings.append(Finding("warn", f"{code}-malformed", f"source hash path {conflict}: {source_rel}", rel_path))
+            continue
+        source_path = root / source_rel
+        boundary_violation = source_path_boundary_violation(root, source_path, label="worker run receipt source hash target")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", f"{code}-stale", boundary_violation.message, rel_path))
+            continue
+        if expected_missing:
+            if source_path.exists():
+                findings.append(Finding("warn", f"{code}-stale", f"source hash recorded missing path now exists: {source_rel}", rel_path))
+            continue
+        if expected_unreadable or expected_invalid:
+            findings.append(Finding("info", f"{code}-hash", f"source hash entry records {source_rel} as degraded evidence", rel_path))
+            continue
+        if not source_path.exists():
+            findings.append(Finding("warn", f"{code}-stale", f"source hash target is now missing: {source_rel}", rel_path))
+            continue
+        if not source_path.is_file():
+            findings.append(Finding("warn", f"{code}-stale", f"source hash target is no longer a regular file: {source_rel}", rel_path))
+            continue
+        try:
+            current_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            findings.append(Finding("warn", f"{code}-stale", f"source hash target is now unreadable: {source_rel}: {exc}", rel_path))
+            continue
+        if expected_hash and current_hash.lower() != expected_hash.lower():
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code}-stale",
+                    f"source hash mismatch for {source_rel}: expected={expected_hash[:12]} current={current_hash[:12]}",
+                    rel_path,
+                )
+            )
+        else:
+            findings.append(Finding("info", f"{code}-hash", f"source hash current for {source_rel}: {current_hash[:12]}", rel_path))
+    return findings
+
+
+def _worker_run_receipt_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, list):
+        return any(_worker_run_receipt_truthy(item) for item in value)
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "required", "enabled", "on", "approved"}
+
+
+def _worker_run_receipt_boundary_findings(code_prefix: str = "worker-run-receipt") -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-boundary",
+            "worker run receipts are evidence only; worker success, reviewer approval, or SDK traces cannot approve lifecycle, archive, roadmap status, staging, commit, push, release, or provider routing",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-route",
+            "worker run receipts live under project/verification/worker-run-receipts/*.json and no hidden runtime, queue, cache, database, adapter state, or provider gateway is created",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-status-namespace",
+            "runtime_state_namespace.v1 keeps runtime_status, worker_status, workflow_status, verification_verdict, lifecycle_status, and research_import_status as separate namespaces",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+    ]
+
+
 def _route_proposal_allowed(proposal: str) -> tuple[bool, str]:
     text = proposal.strip()
     if not text:
@@ -1179,6 +1572,13 @@ def _agent_run_record_paths(root: Path) -> list[Path]:
     if not directory.exists() or not directory.is_dir():
         return []
     return sorted(directory.glob("*.md"))
+
+
+def _worker_run_receipt_paths(root: Path) -> list[Path]:
+    directory = root / WORKER_RUN_RECEIPTS_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return []
+    return sorted(directory.glob("*.json"))
 
 
 def _coordination_record_paths(root: Path) -> list[Path]:

@@ -6424,6 +6424,133 @@ class CliTests(unittest.TestCase):
             self.assertIn("check-agent-run-record-template", rendered)
             self.assertIn("minimal valid agent-run frontmatter example", rendered)
 
+    def test_check_focus_agents_reports_valid_worker_run_receipt_without_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-1-worker-1.jsonl").write_text(
+                '{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-1-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-1-worker-1",
+                        "launch_id": "launch-1",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, or provider routing",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-1-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "authority": {
+                            "approves_lifecycle": False,
+                            "approves_archive": False,
+                            "approves_roadmap_status": False,
+                            "approves_git": False,
+                            "approves_provider_routing": False,
+                            "approves_release": False,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-1-worker-1.json", rendered)
+            self.assertIn("receipt_id=launch-1-worker-1; launch_id=launch-1; worker_id=worker-1; worker_status=succeeded", rendered)
+            self.assertIn("source hash current for src/worker.py", rendered)
+            self.assertIn("runtime_state_namespace.v1 keeps runtime_status, worker_status, workflow_status, verification_verdict, lifecycle_status, and research_import_status as separate namespaces", rendered)
+            self.assertIn("worker success, reviewer approval, or SDK traces cannot approve lifecycle", rendered)
+            self.assertNotIn("worker run receipt missing required field", rendered)
+            self.assertNotIn("worker run receipt worker_status must not carry lifecycle", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage", rendered)
+
+    def test_check_focus_agents_warns_on_malformed_worker_run_receipt_namespaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (receipt_dir / "bad-worker.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "bad-worker",
+                        "launch_id": "launch-1",
+                        "worker_id": "worker-1",
+                        "role": "reviewer",
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "worker_status": "complete",
+                        "verification_verdict": "succeeded",
+                        "non_authority": "approved",
+                        "task_input_refs": ["../escape.md"],
+                        "event_stream_refs": ["project/verification/logs/missing.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": ["src/worker.py not-a-hash"],
+                        "authority": {"approves_lifecycle": True},
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("check-agents-coordination-evidence-worker-run-receipt-record-malformed", rendered)
+            self.assertIn("worker run receipt missing required field: target_root", rendered)
+            self.assertIn("worker run receipt worker_status must not carry lifecycle or verification status: complete", rendered)
+            self.assertIn("worker run receipt verification_verdict must use the verification verdict namespace: succeeded", rendered)
+            self.assertIn("worker run receipt non_authority must explicitly label the receipt as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt authority.approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt task_input_refs path must not contain parent traversal", rendered)
+            self.assertIn("malformed source_hashes entry: src/worker.py not-a-hash", rendered)
+            self.assertNotIn("worker run receipt runtime_guard_preflight", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage", rendered)
+
     def test_check_reports_symphony_queue_blocked_by_current_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
