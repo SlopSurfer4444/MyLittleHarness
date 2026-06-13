@@ -189,6 +189,92 @@ WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS = (
     "lifecycle_accepted",
     "approves_closeout",
     "approves_target_repo_acceptance",
+    "approves_fan_in",
+    "approves_cleanup",
+    "private_trace_authoritative",
+    "private_traces_authoritative",
+    "sdk_trace_authoritative",
+    "trace_approves_lifecycle",
+    "event_history_approves_lifecycle",
+    "event_stream_approves_lifecycle",
+)
+WORKER_RUN_RECEIPT_EVENT_HISTORY_REDACTION_STATUSES = {
+    "none",
+    "redacted",
+    "summarized",
+    "private-traces-excluded",
+    "not-recorded",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_PRIVATE_TRACE_NON_AUTHORITY_TOKENS = (
+    "cannot",
+    "does not",
+    "not authority",
+    "non-authority",
+    "non-authoritative",
+    "evidence-only",
+    "evidence only",
+    "excluded",
+)
+WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS = (
+    "private trace",
+    "private sdk trace",
+    "sdk trace",
+    "runtime trace",
+    "telemetry",
+)
+WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_VERBS = (
+    "approve",
+    "approves",
+    "approved",
+    "accept",
+    "accepts",
+    "accepted",
+    "authorize",
+    "authorizes",
+    "authorized",
+    "mark",
+    "marks",
+    "marked",
+    "move",
+    "moves",
+    "moved",
+)
+WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_TARGETS = (
+    "lifecycle",
+    "archive",
+    "roadmap",
+    "git",
+    "provider",
+    "verification",
+    "release",
+    "cleanup",
+    "closeout",
+    "fan-in",
+    "staging",
+    "commit",
+    "push",
+    "route proposal",
+    "target-repo",
+    "target repo",
+    "acceptance",
+)
+WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS = (
+    "cannot approve",
+    "cannot accept",
+    "cannot authorize",
+    "does not approve",
+    "does not accept",
+    "does not authorize",
+    "must not approve",
+    "must not accept",
+    "not approve",
+    "not accept",
+    "not authority",
+    "non-authority",
+    "non-authoritative",
+    "evidence only",
+    "evidence-only",
 )
 AGENT_RUN_ROUTE_PROPOSAL_FIELDS = ("route_proposals", "recommended_next_routes", "recommended_next_route")
 ROUTE_PROPOSAL_FORBIDDEN_TERMS = {
@@ -635,6 +721,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_active_plan_findings(inventory, active_plan, state_data))
     findings.extend(durable_proof_record_findings(inventory, "evidence"))
     findings.extend(agent_run_record_findings(inventory, "evidence-agent-run"))
+    findings.extend(worker_run_receipt_findings(inventory, "evidence-worker-run-receipt"))
     findings.extend(_source_set_findings(active_plan, inventory))
     findings.extend(_anchor_findings(active_plan, inventory))
     findings.extend(_identity_findings(active_plan))
@@ -1317,6 +1404,7 @@ def _worker_run_receipt_metadata_findings(
 
     findings.extend(_worker_run_receipt_status_namespace_findings(rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_non_authority_findings(rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_event_history_findings(rel_path, data, code_prefix))
     for field in ("task_input_refs", "event_stream_refs", "output_refs", "verification_refs"):
         findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, field, data.get(field), code))
     return findings
@@ -1397,6 +1485,140 @@ def _worker_run_receipt_non_authority_findings(rel_path: str, data: dict[str, ob
         findings.append(Finding("warn", f"{code_prefix}-authority-boundary", "worker run receipt authority must be an object when present", rel_path))
     return findings
 
+
+
+def _worker_run_receipt_event_history_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    findings: list[Finding] = []
+    code = f"{code_prefix}-authority-boundary"
+
+    redaction = str(data.get("event_history_redaction") or "").strip()
+    if redaction and redaction not in WORKER_RUN_RECEIPT_EVENT_HISTORY_REDACTION_STATUSES:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt event_history_redaction must use the event history redaction vocabulary: {redaction}",
+                rel_path,
+            )
+        )
+
+    summary = data.get("event_history_summary")
+    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt event_history_summary must not claim event history approves lifecycle or external authority",
+                rel_path,
+            )
+        )
+    elif summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt event_history_summary must be a string when present", rel_path))
+
+    private_trace_policy = data.get("private_trace_policy")
+    if isinstance(private_trace_policy, str):
+        if not _worker_run_receipt_private_trace_policy_is_non_authority(private_trace_policy):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    "worker run receipt private_trace_policy must explicitly keep private SDK traces non-authoritative and repo-visible evidence for recovery",
+                    rel_path,
+                )
+            )
+        if _worker_run_receipt_private_trace_authority_claim(private_trace_policy):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    "worker run receipt private_trace_policy must not treat private SDK traces as authoritative approval evidence",
+                    rel_path,
+                )
+            )
+    elif private_trace_policy not in (None, ""):
+        findings.append(Finding("warn", code, "worker run receipt private_trace_policy must be a string when present", rel_path))
+
+    for label in ("event_history", "private_traces"):
+        value = data.get(label)
+        if isinstance(value, dict):
+            findings.extend(_worker_run_receipt_event_history_container_findings(rel_path, label, value, code_prefix))
+        elif value not in (None, ""):
+            findings.append(Finding("warn", code, f"worker run receipt {label} must be an object when present", rel_path))
+    return findings
+
+
+def _worker_run_receipt_event_history_container_findings(
+    rel_path: str,
+    label: str,
+    value: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    code = f"{code_prefix}-authority-boundary"
+    for field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+        if _worker_run_receipt_truthy(value.get(field)):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {label}.{field} must remain false; event history and private traces are evidence only",
+                    rel_path,
+                )
+            )
+    authority = value.get("authority")
+    if isinstance(authority, dict):
+        for field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+            if _worker_run_receipt_truthy(authority.get(field)):
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {label}.authority.{field} must remain false; event history and private traces are evidence only",
+                        rel_path,
+                    )
+                )
+    elif authority not in (None, ""):
+        findings.append(Finding("warn", code, f"worker run receipt {label}.authority must be an object when present", rel_path))
+
+    summary = value.get("summary")
+    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {label}.summary must not claim event history approves lifecycle or external authority",
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _worker_run_receipt_event_history_authority_claim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
+        return False
+    return any(verb in text for verb in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_VERBS) and any(
+        target in text for target in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_TARGETS
+    )
+
+
+def _worker_run_receipt_private_trace_policy_is_non_authority(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    has_trace_source = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS)
+    has_non_authority = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_NON_AUTHORITY_TOKENS)
+    has_repo_visible_recovery = (
+        "repo-visible" in text or "durable evidence" in text or "evidence only" in text or "evidence-only" in text
+    )
+    return has_trace_source and has_non_authority and has_repo_visible_recovery
+
+
+def _worker_run_receipt_private_trace_authority_claim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
+        return False
+    has_trace_source = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS)
+    has_authority = "authoritative" in text or "authority" in text or "approval" in text or "approve" in text
+    return has_trace_source and has_authority
 
 def _worker_run_receipt_ref_list_findings(root: Path, rel_path: str, field: str, value: object, code: str) -> list[Finding]:
     if value in (None, ""):
@@ -1499,6 +1721,12 @@ def _worker_run_receipt_boundary_findings(code_prefix: str = "worker-run-receipt
             "info",
             f"{code_prefix}-status-namespace",
             "runtime_state_namespace.v1 keeps runtime_status, worker_status, workflow_status, verification_verdict, lifecycle_status, and research_import_status as separate namespaces",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-event-history",
+            "event history refs are source-bound evidence; event_history_summary and event streams record receipt provenance, private SDK traces must be redacted/summarized/excluded/non-authoritative, and neither can approve lifecycle, fan-in, roadmap, archive, Git, provider routing, release, or cleanup",
             WORKER_RUN_RECEIPTS_DIR_REL,
         ),
     ]

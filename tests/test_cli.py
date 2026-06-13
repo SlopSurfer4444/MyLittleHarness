@@ -6499,6 +6499,87 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("worker run receipt child_agent_fanout", rendered)
             self.assertNotIn("worker run receipt artifact_lineage", rendered)
 
+
+    def test_check_focus_agents_reports_worker_run_receipt_event_history_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            worker_ref = "src" + "/worker.py"
+            receipt_dir_ref = "project" + "/verification" + "/worker-run-receipts"
+            logs_dir_ref = "project" + "/verification" + "/logs"
+            smoke_ref = "project" + "/verification" + "/smoke.md"
+            log_ref = "project" + "/verification" + "/logs" + "/launch-2-worker-1.jsonl"
+            receipt_ref = "project" + "/verification" + "/worker-run-receipts" + "/launch-2-worker-1.json"
+            receipt_dir = root / receipt_dir_ref
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / worker_ref).write_text("print('worker output')\n", encoding="utf-8")
+            (root / logs_dir_ref).mkdir(parents=True)
+            (root / log_ref).write_text(
+                '{"event":"queued"}\n{"event":"running"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / smoke_ref).write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / worker_ref).read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / smoke_ref).read_bytes()).hexdigest()
+            (root / receipt_ref).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-2-worker-1",
+                        "launch_id": "launch-2",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, or provider routing",
+                        "event_history_summary": "Repo-visible event stream recorded queued, running, and completed worker events; private SDK traces excluded.",
+                        "event_history_redaction": "private-traces-excluded",
+                        "private_trace_policy": "private SDK traces are excluded; repo-visible evidence only and cannot approve lifecycle.",
+                        "task_input_refs": ["project" + "/implementation-plan.md"],
+                        "event_stream_refs": [log_ref],
+                        "output_refs": [worker_ref],
+                        "verification_refs": [smoke_ref],
+                        "source_hashes": [
+                            f"{worker_ref} sha256={worker_hash}",
+                            f"{smoke_ref} sha256={smoke_hash}",
+                        ],
+                        "event_history": {
+                            "summary": "Repo-visible event summary only; no lifecycle authority.",
+                            "approves_lifecycle": False,
+                        },
+                        "private_traces": {
+                            "stored": False,
+                            "private_traces_authoritative": False,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn(f"candidate: worker run receipt: {receipt_ref}", rendered)
+            self.assertIn("event history refs are source-bound evidence", rendered)
+            self.assertNotIn("event_history_redaction must use the event history redaction vocabulary", rendered)
+            self.assertNotIn("private_trace_policy must explicitly keep private SDK traces non-authoritative", rendered)
+            self.assertNotIn("private_trace_policy must not treat private SDK traces as authoritative", rendered)
+            self.assertNotIn("event_history_summary must not claim event history approves lifecycle", rendered)
+
     def test_check_focus_agents_warns_on_malformed_worker_run_receipt_namespaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -6517,6 +6598,18 @@ class CliTests(unittest.TestCase):
                         "worker_status": "complete",
                         "verification_verdict": "succeeded",
                         "non_authority": "approved",
+                        "event_history_redaction": "kept-secret-trace",
+                        "event_history_summary": "event history approved lifecycle acceptance",
+                        "private_trace_policy": "private SDK traces are authoritative approval evidence",
+                        "private_trace_authoritative": True,
+                        "event_history": {
+                            "summary": "event stream accepted lifecycle",
+                            "approves_lifecycle": True,
+                        },
+                        "private_traces": {
+                            "summary": "private SDK trace approval evidence",
+                            "private_traces_authoritative": True,
+                        },
                         "task_input_refs": ["../escape.md"],
                         "event_stream_refs": ["project/verification/logs/missing.jsonl"],
                         "output_refs": ["src/worker.py"],
@@ -6544,6 +6637,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("worker run receipt verification_verdict must use the verification verdict namespace: succeeded", rendered)
             self.assertIn("worker run receipt non_authority must explicitly label the receipt as evidence-only and non-authoritative", rendered)
             self.assertIn("worker run receipt authority.approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt event_history_redaction must use the event history redaction vocabulary", rendered)
+            self.assertIn("worker run receipt event_history_summary must not claim event history approves lifecycle", rendered)
+            self.assertIn("worker run receipt private_trace_policy must explicitly keep private SDK traces non-authoritative and repo-visible evidence for recovery", rendered)
+            self.assertIn("worker run receipt private_trace_policy must not treat private SDK traces as authoritative approval evidence", rendered)
+            self.assertIn("worker run receipt private_trace_authoritative must remain false", rendered)
+            self.assertIn("worker run receipt event_history.approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt private_traces.private_traces_authoritative must remain false", rendered)
             self.assertIn("worker run receipt task_input_refs path must not contain parent traversal", rendered)
             self.assertIn("malformed source_hashes entry: src/worker.py not-a-hash", rendered)
             self.assertNotIn("worker run receipt runtime_guard_preflight", rendered)
