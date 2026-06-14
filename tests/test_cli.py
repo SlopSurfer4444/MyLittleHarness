@@ -29782,6 +29782,52 @@ class CliTests(unittest.TestCase):
         )
         return state_rel, archive_rel, blocked_rel, succeeded_rel
 
+    def _write_post_closeout_route_package_checkpoint_fixture(self, root: Path) -> tuple[str, str, str]:
+        state_rel = "project/" + "project-state.md"
+        roadmap_rel = "project/" + "roadmap.md"
+        archive_rel = "project/" + "archive/plans/" + "reviewed-closeout.md"
+        (root / archive_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / archive_rel).write_text(
+            "---\n"
+            'plan_id: "reviewed-closeout"\n'
+            'title: "Reviewed Closeout"\n'
+            'status: "complete"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'phase_status: "complete"\n'
+            'docs_decision: "not-needed"\n'
+            "---\n"
+            "# Reviewed Closeout\n\n"
+            "## MLH Closeout Writeback\n\n"
+            "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            "- docs_decision: not-needed\n"
+            "- commit_decision: commit exact route package only\n"
+            "- residual_risk: broad Git, push, release, and lifecycle authority remain blocked\n"
+            "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        (root / roadmap_rel).write_text(
+            "# Roadmap\n\n"
+            f"- Compacted done roadmap item `reviewed-closeout`: archived plan `{archive_rel}`.\n",
+            encoding="utf-8",
+        )
+        state_path = root / state_rel
+        state_text = state_path.read_text(encoding="utf-8")
+        state_text = state_text.replace(
+            'active_plan: ""\n---',
+            f'active_plan: ""\nphase_status: "complete"\nlast_archived_plan: "{archive_rel}"\n---',
+            1,
+        )
+        state_path.write_text(
+            state_text
+            + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            + "- docs_decision: not-needed\n"
+            + "- commit_decision: commit exact route package only\n"
+            + "- residual_risk: broad Git, push, release, and lifecycle authority remain blocked\n"
+            + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        return state_rel, roadmap_rel, archive_rel
+
     def _write_reviewed_worker_receipt_checkpoint_fixture(self, root: Path) -> tuple[str, str, str]:
         receipt_rel = "project/" + "verification/worker-run-receipts/launch-1-worker-1.json"
         log_rel = "project/" + "verification/logs/launch-1-worker-1.jsonl"
@@ -30037,6 +30083,52 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return hook_note_rel, commit_note_rel
+
+    def test_hooks_pre_tool_allows_neighbor_post_closeout_route_package_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = self._write_post_closeout_route_package_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            stage_command = "gi" + "t add -- "
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": stage_command + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": ("gi" + f't -C "{neighbor_root}" add -- ') + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("post-closeout lifecycle route packages", messages)
+
+            state_rel, _roadmap_rel, archive_rel = checkpoint_paths
+            unsafe_payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": stage_command + state_rel + " " + archive_rel}),
+            )
+            unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
+            self.assertTrue(unsafe_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
 
     def test_hooks_pre_tool_allows_neighbor_live_root_reviewed_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

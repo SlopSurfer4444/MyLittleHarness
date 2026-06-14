@@ -1776,7 +1776,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
                     "files in the actual command workdir/root, including deferred research/archive route packages "
-                    "meta-feedback/incubation blocker notes, and reviewed decision-backed verification evidence packages; "
+                    "post-closeout lifecycle route packages, meta-feedback/incubation blocker notes, "
+                    "and reviewed decision-backed verification evidence packages; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
                     "decisions remain blocked"
                 ),
@@ -3798,6 +3799,9 @@ def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventor
 def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
     if _active_plan_ready_for_route_produced_lifecycle_git(inventory) and _coherent_route_produced_lifecycle_paths(inventory, paths):
         return _normalized_route_produced_lifecycle_paths(inventory, paths)
+    post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
+    if post_closeout_route_paths:
+        return post_closeout_route_paths
     post_closeout_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
     if post_closeout_paths:
         return post_closeout_paths
@@ -3826,6 +3830,39 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     if meta_feedback_paths:
         return meta_feedback_paths
     return set()
+
+
+def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    if not any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS):
+        return set()
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return set()
+    state_rel = "project/" + "project-state.md"
+    roadmap_rel = "project/" + "roadmap.md"
+    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    if not last_archive_rel or not _is_deferred_archive_plan_route_path(last_archive_rel):
+        return set()
+    expected = {state_rel, roadmap_rel, last_archive_rel}
+    if normalized != expected:
+        return set()
+    if not _is_reviewed_post_closeout_archive_plan_file(inventory, last_archive_rel):
+        return set()
+    if not _roadmap_references_archived_plan(inventory, last_archive_rel):
+        return set()
+    return normalized
 
 
 def _coherent_verification_decision_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
@@ -4008,6 +4045,48 @@ def _is_reviewed_queue_runner_fixture_file(inventory: Inventory, path: str) -> b
     return bool(content.strip()) and "queue runner" in content and "proof" in content
 
 
+def _is_reviewed_post_closeout_archive_plan_file(inventory: Inventory, path: str) -> bool:
+    if not _is_deferred_archive_plan_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    if str(data.get("status") or "").strip().casefold() != "complete":
+        return False
+    if str(data.get("phase_status") or "").strip().casefold() != "complete":
+        return False
+    content = text.casefold()
+    return (
+        "mylittleharness-closeout-writeback v1" in content
+        and "docs_decision" in content
+        and "commit_decision" in content
+        and "residual_risk" in content
+    )
+
+
+def _roadmap_references_archived_plan(inventory: Inventory, archive_rel: str) -> bool:
+    route_path = _hook_route_file_path(inventory, "project/" + "roadmap.md")
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        content = route_path.read_text(encoding="utf-8").casefold()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _normalize_hook_path(archive_rel).casefold() in content
+
+
 def _route_evidence_grants_authority(value: object) -> bool:
     authority_keys = {
         "archive",
@@ -4090,7 +4169,7 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
-        "worker-run-receipt-refs,verification/decision-evidence-package,"
+        "post-closeout-route-package,worker-run-receipt-refs,verification/decision-evidence-package,"
         "deferred-research/archive-package,meta-feedback/incubation-blocker-notes"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
