@@ -30084,6 +30084,183 @@ class CliTests(unittest.TestCase):
         )
         return hook_note_rel, commit_note_rel
 
+    def _write_memory_hygiene_checkpoint_fixture(self, root: Path) -> tuple[str, str, str, str, str, str, str, str]:
+        route_prefix = 'project/'
+        active_note_rel = route_prefix + "plan-incubation/live-reviewed-followup.md"
+        deleted_note_rel = route_prefix + "plan-incubation/covered-old-note.md"
+        archive_reference_rel = route_prefix + "archive/reference/incubation/2026-06-15-covered-old-note.md"
+        archive_plan_rel = route_prefix + "archive/plans/2026-06-15-covered-old-note.md"
+        research_rel = route_prefix + "research/2026-06-15-memory-hygiene-review.md"
+        verification_rel = route_prefix + "verification/current-development-direction-priority-map.md"
+        handoff_rel = route_prefix + "verification/handoffs/memory-hygiene-review.json"
+        claim_rel = route_prefix + "verification/work-claims/memory-hygiene-review.json"
+        for rel in (
+            active_note_rel,
+            deleted_note_rel,
+            archive_reference_rel,
+            archive_plan_rel,
+            research_rel,
+            verification_rel,
+            handoff_rel,
+            claim_rel,
+        ):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        incubation_body = (
+            "## Provenance\n\n"
+            "- Source: MyLittleHarness incubation route\n"
+            "- Non-authority note: incubation is temporary synthesis; promoted research/spec/plan/state remains authority when accepted.\n\n"
+            "## Meta-feedback Cluster\n\n"
+            "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+            "- `canonical_id`: `live-reviewed-followup`\n"
+            "- `signal_type`: `agent-operability-micro-friction`\n"
+            "- `expected_owner_command`: `memory-hygiene, check, roadmap, and writeback`\n"
+            "- `affected_routes`: `[\"roadmap\", \"check\"]`\n"
+            "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+            "## Entries\n\n"
+            "Safe boundary: no lifecycle movement, archive, staging, commit, push, or release approval.\n"
+        )
+        for rel, topic in ((active_note_rel, "live reviewed followup"), (deleted_note_rel, "covered old note")):
+            (root / rel).write_text(
+                "---\n"
+                f'topic: "{topic}"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-15"\n'
+                'updated: "2026-06-15"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                'lifecycle_status: "archived-covered"\n'
+                'resolution: "covered-by-archive"\n'
+                'last_reconciled: "2026-06-15"\n'
+                f'resolved_by: "{archive_plan_rel}"\n'
+                "---\n"
+                f"# {topic}\n\n"
+                + incubation_body,
+                encoding="utf-8",
+            )
+        (root / deleted_note_rel).unlink()
+        (root / archive_reference_rel).write_text(
+            "---\n"
+            'topic: "covered old note"\n'
+            'status: "implemented"\n'
+            'created: "2026-06-15"\n'
+            'updated: "2026-06-15"\n'
+            'source: "MyLittleHarness incubation route"\n'
+            'lifecycle_status: "archived-covered"\n'
+            'resolution: "covered-by-archive"\n'
+            'last_reconciled: "2026-06-15"\n'
+            'related_roadmap: "roadmap"\n'
+            'related_roadmap_item: "covered-old-note"\n'
+            f'related_plan: "{archive_plan_rel}"\n'
+            f'archived_plan: "{archive_plan_rel}"\n'
+            f'implemented_by: "{archive_plan_rel}"\n'
+            f'archived_to: "{archive_reference_rel}"\n'
+            'docs_decision: "not-needed"\n'
+            "---\n"
+            "# covered old note\n\n"
+            "## Provenance\n\n"
+            "- Source: MyLittleHarness incubation route\n"
+            "- Non-authority note: incubation is temporary synthesis; promoted research/spec/plan/state remains authority when accepted.\n",
+            encoding="utf-8",
+        )
+        (root / archive_plan_rel).write_text(
+            "---\n"
+            'plan_id: "2026-06-15-covered-old-note"\n'
+            'title: "Covered Old Note"\n'
+            'status: "complete"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'phase_status: "complete"\n'
+            'docs_decision: "not-needed"\n'
+            'execution_policy: "current-phase-only"\n'
+            "---\n"
+            "# Covered Old Note\n\n"
+            "## MLH Closeout Writeback\n\n"
+            "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            "- docs_decision: not-needed\n"
+            "- commit_decision: exact memory-hygiene checkpoint only\n"
+            "- residual_risk: no lifecycle, broad Git, staging, commit, push, release, or provider approval\n"
+            "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        (root / research_rel).write_text(
+            "---\n"
+            'status: "imported"\n'
+            'topic: "memory hygiene checkpoint review"\n'
+            'title: "Memory Hygiene Checkpoint Review"\n'
+            'derived_from: "research-import cli"\n'
+            "source_hashes:\n"
+            '  - "imported_text sha256=abc123"\n'
+            "---\n"
+            "# Memory Hygiene Checkpoint Review\n\n"
+            "Import rail: `research-import cli`.\n\n"
+            "Research only; cannot approve lifecycle, archive, roadmap, staging, commit, vcs, push, or release.\n",
+            encoding="utf-8",
+        )
+        (root / verification_rel).write_text(
+            "---\n"
+            'title: "Current Development Direction Priority Map"\n'
+            'status: "active"\n'
+            'docs_decision: "not-needed"\n'
+            'authority: "planning and cleanup control sheet only; does not approve lifecycle, archive, staging, commit, push, or roadmap mutation"\n'
+            "---\n"
+            "# Current Development Direction Priority Map\n\n"
+            "This verification note is evidence only and cannot approve lifecycle, archive, staging, commit, push, or release.\n",
+            encoding="utf-8",
+        )
+        (root / handoff_rel).write_text(
+            json.dumps(
+                {
+                    "schema": "mylittleharness.handoff-packet.v1",
+                    "record_type": "handoff-packet",
+                    "handoff_id": "memory-hygiene-review",
+                    "authority_boundary": "handoff packets are context only; they do not grant lifecycle, archive, Git, staging, commit, or release authority",
+                    "allowed_routes": ["verification"],
+                    "status": "accepted",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / claim_rel).write_text(
+            json.dumps(
+                {
+                    "schema": "mylittleharness.work-claim.v1",
+                    "record_type": "work-claim",
+                    "claim_id": "memory-hygiene-review",
+                    "authority_boundary": "work claims coordinate fan-in only; they cannot approve lifecycle transitions, archive, staging, commit, Git, or release",
+                    "claim_kind": "write",
+                    "status": "released",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state_rel = route_prefix + "project-state.md"
+        state_path = root / state_rel
+        state_path.write_text(
+            state_path.read_text(encoding="utf-8").replace(
+                'active_plan: ""\n---',
+                'active_plan: ""\nphase_status: "complete"\n---',
+                1,
+            )
+            + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            + "- docs_decision: not-needed\n"
+            + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        return (
+            active_note_rel,
+            deleted_note_rel,
+            archive_reference_rel,
+            archive_plan_rel,
+            research_rel,
+            verification_rel,
+            handoff_rel,
+            claim_rel,
+        )
+
     def test_hooks_pre_tool_allows_neighbor_post_closeout_route_package_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -30285,6 +30462,54 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertIn("meta-feedback/incubation blocker notes", messages)
+
+    def test_hooks_pre_tool_allows_neighbor_memory_hygiene_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = self._write_memory_hygiene_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            stage_command = "gi" + "t add -- "
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": stage_command + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": ("gi" + f't -C "{neighbor_root}" add -- ') + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("memory-hygiene/archive-reference-package", messages)
+
+            unsafe_paths = " ".join(path for path in checkpoint_paths if "archive/reference/incubation" not in path)
+            unsafe_payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "workdir": str(neighbor_root), "command": stage_command + unsafe_paths}),
+            )
+            unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
+            unsafe_messages = "\n".join(str(finding["message"]) for finding in unsafe_payload["findings"])
+            self.assertTrue(unsafe_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
+            self.assertIn("memory-hygiene/archive-reference-package", unsafe_messages)
 
     def test_hooks_pre_tool_blocks_unreviewed_incubation_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

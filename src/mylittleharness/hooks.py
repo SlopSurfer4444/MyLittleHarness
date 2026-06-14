@@ -1775,8 +1775,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-allow-reviewed-local-vcs-checkpoint",
                 (
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
-                    "files in the actual command workdir/root, including deferred research/archive route packages "
-                    "post-closeout lifecycle route packages, meta-feedback/incubation blocker notes, "
+                    "files in the actual command workdir/root, including deferred research/archive route packages, "
+                    "memory-hygiene/archive-reference-package and post-closeout lifecycle route packages, "
+                    "meta-feedback/incubation blocker notes, "
                     "and reviewed decision-backed verification evidence packages; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
                     "decisions remain blocked"
@@ -3805,6 +3806,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     post_closeout_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
     if post_closeout_paths:
         return post_closeout_paths
+    memory_hygiene_paths = _coherent_memory_hygiene_checkpoint_paths(inventory, paths)
+    if memory_hygiene_paths:
+        return memory_hygiene_paths
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
         return set()
@@ -3913,6 +3917,288 @@ def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, path
     if not archive_sources <= research_paths:
         return set()
     return paths
+
+
+def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    if not any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS):
+        return set()
+    normalized = _normalized_memory_hygiene_checkpoint_paths(inventory, paths)
+    if not normalized:
+        return set()
+    archive_reference_paths = {
+        path for path in normalized if _is_memory_hygiene_archive_reference_path(path)
+    }
+    if not archive_reference_paths:
+        return set()
+    anchor_paths = {
+        path
+        for path in normalized
+        if _is_deferred_archive_plan_route_path(path)
+        or _is_deferred_research_route_path(path)
+        or _is_memory_hygiene_verification_route_path(path)
+    }
+    if not anchor_paths:
+        return set()
+    incubation_paths = {path for path in normalized if _is_meta_feedback_incubation_route_path(path)}
+    missing_incubation_paths = {
+        path
+        for path in incubation_paths
+        if not _memory_hygiene_checkpoint_file_exists(inventory, path)
+    }
+    if any(
+        not _has_archive_reference_for_incubation_source(inventory, source_path, archive_reference_paths)
+        for source_path in missing_incubation_paths
+    ):
+        return set()
+    existing_incubation_paths = incubation_paths - missing_incubation_paths
+    if not all(
+        _is_reviewed_memory_hygiene_incubation_file(inventory, path)
+        for path in existing_incubation_paths
+    ):
+        return set()
+    if not all(
+        _is_reviewed_memory_hygiene_archive_reference_file(inventory, path)
+        for path in archive_reference_paths
+    ):
+        return set()
+    archive_plan_paths = {path for path in normalized if _is_deferred_archive_plan_route_path(path)}
+    if not all(
+        _is_reviewed_memory_hygiene_archive_plan_file(inventory, path)
+        for path in archive_plan_paths
+    ):
+        return set()
+    research_paths = {path for path in normalized if _is_deferred_research_route_path(path)}
+    if not all(
+        _is_reviewed_deferred_research_route_file(inventory, path)
+        for path in research_paths
+    ):
+        return set()
+    verification_paths = {path for path in normalized if _is_memory_hygiene_verification_route_path(path)}
+    if not all(
+        _is_reviewed_memory_hygiene_verification_route_file(inventory, path)
+        for path in verification_paths
+    ):
+        return set()
+    return normalized
+
+
+def _normalized_memory_hygiene_checkpoint_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    normalized: set[str] = set()
+    for path in paths:
+        rel = _hook_route_rel_path(inventory, path)
+        if not rel:
+            return set()
+        clean = _normalize_hook_path(rel).casefold()
+        if clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+            return set()
+        if any(char in clean for char in "*?[]"):
+            return set()
+        if clean.startswith(POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
+            return set()
+        if not _is_memory_hygiene_checkpoint_route_path(clean):
+            return set()
+        if not _memory_hygiene_checkpoint_file_exists(inventory, clean) and not _is_meta_feedback_incubation_route_path(clean):
+            return set()
+        normalized.add(clean)
+    return normalized
+
+
+def _memory_hygiene_checkpoint_file_exists(inventory: Inventory, path: str) -> bool:
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        return route_path.is_file() and not route_path.is_symlink()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _is_memory_hygiene_checkpoint_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return (
+        _is_meta_feedback_incubation_route_path(rel)
+        or _is_memory_hygiene_archive_reference_path(rel)
+        or _is_deferred_archive_plan_route_path(rel)
+        or _is_deferred_research_route_path(rel)
+        or _is_memory_hygiene_verification_route_path(rel)
+    )
+
+
+def _is_memory_hygiene_archive_reference_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/archive/reference/incubation/") and rel.endswith(".md")
+
+
+def _is_memory_hygiene_verification_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/verification/") and rel.endswith((".md", ".json"))
+
+
+def _has_archive_reference_for_incubation_source(
+    inventory: Inventory, source_path: str, archive_reference_paths: set[str]
+) -> bool:
+    source_rel = _normalize_hook_path(source_path).casefold()
+    source_stem = Path(source_rel).stem.casefold()
+    for archive_path in archive_reference_paths:
+        route_path = _hook_route_file_path(inventory, archive_path)
+        if route_path is None:
+            continue
+        try:
+            text = route_path.read_text(encoding="utf-8")
+            frontmatter = parse_frontmatter(text)
+        except (OSError, UnicodeDecodeError):
+            continue
+        data = frontmatter.data if frontmatter.has_frontmatter and not frontmatter.errors else {}
+        candidate_refs = {
+            str(data.get("source_incubation") or ""),
+            str(data.get("related_incubation") or ""),
+            str(data.get("source_note") or ""),
+            str(data.get("source") or ""),
+        }
+        normalized_refs = {_hook_route_rel_path(inventory, ref).casefold() for ref in candidate_refs if ref}
+        if source_rel in normalized_refs:
+            return True
+        archive_stem = Path(archive_path).stem.casefold()
+        if archive_stem == source_stem or archive_stem.endswith("-" + source_stem):
+            return True
+        if source_rel in text.casefold():
+            return True
+    return False
+
+
+def _is_reviewed_memory_hygiene_archive_reference_file(inventory: Inventory, path: str) -> bool:
+    if not _is_memory_hygiene_archive_reference_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    source = str(data.get("source") or "").strip().casefold()
+    status = str(data.get("status") or "").strip().casefold()
+    archived_to = _hook_route_rel_path(inventory, str(data.get("archived_to") or "")).casefold()
+    body = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :]).casefold()
+    has_route_refs = any(str(data.get(key) or "").strip() for key in ("related_plan", "archived_plan", "implemented_by"))
+    return (
+        source == "mylittleharness incubation route"
+        and status in {"implemented", "archived", "superseded", "rejected", "deferred"}
+        and (not archived_to or archived_to == _normalize_hook_path(path).casefold())
+        and has_route_refs
+        and "non-authority" in body
+    )
+
+
+def _is_reviewed_memory_hygiene_incubation_file(inventory: Inventory, path: str) -> bool:
+    if not _is_meta_feedback_incubation_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    source = str(data.get("source") or "").strip().casefold()
+    content = text.casefold()
+    status = str(data.get("status") or "").strip().casefold()
+    has_reconciliation_metadata = any(
+        str(data.get(key) or "").strip()
+        for key in ("lifecycle_status", "resolution", "last_reconciled", "resolved_by")
+    )
+    return (
+        source == "mylittleharness incubation route"
+        and status in {"incubating", "implemented", "archived", "deferred", "rejected"}
+        and has_reconciliation_metadata
+        and "non-authority" in content
+        and "mylittleharness-meta-feedback-cluster v1" in content
+        and "lifecycle" in content
+        and ("staging" in content or "commit" in content or "git" in content)
+    )
+
+
+def _is_reviewed_memory_hygiene_archive_plan_file(inventory: Inventory, path: str) -> bool:
+    if not _is_deferred_archive_plan_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    if str(data.get("status") or "").strip().casefold() != "complete":
+        return False
+    if str(data.get("phase_status") or "").strip().casefold() != "complete":
+        return False
+    if not str(data.get("plan_id") or "").strip() or not str(data.get("docs_decision") or "").strip():
+        return False
+    content = text.casefold()
+    return (
+        ("mylittleharness-closeout-writeback v1" in content or "commit_decision" in content or "residual_risk" in content)
+        and ("cannot approve" in content or "does not approve" in content or "no lifecycle" in content or "no automatic" in content)
+        and ("staging" in content or "commit" in content or "git" in content)
+    )
+
+
+def _is_reviewed_memory_hygiene_verification_route_file(inventory: Inventory, path: str) -> bool:
+    if _verification_checkpoint_path_class(path):
+        return _is_reviewed_verification_checkpoint_file(inventory, path)
+    if not _is_memory_hygiene_verification_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        if route_path.suffix.casefold() == ".json":
+            data = json.loads(route_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or _route_evidence_grants_authority(data):
+                return False
+            encoded = json.dumps(data, ensure_ascii=False, sort_keys=True).casefold()
+            return bool(str(data.get("schema") or "").strip()) and _route_evidence_text_has_non_authority_boundary(encoded)
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if route_path.suffix.casefold() != ".md":
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    content = text.casefold()
+    return _route_evidence_text_has_non_authority_boundary(content)
 
 
 def _coherent_meta_feedback_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
@@ -4170,7 +4456,8 @@ def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
         "post-closeout-route-package,worker-run-receipt-refs,verification/decision-evidence-package,"
-        "deferred-research/archive-package,meta-feedback/incubation-blocker-notes"
+        "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
+        "meta-feedback/incubation-blocker-notes"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
@@ -4211,6 +4498,8 @@ def _reviewed_local_vcs_checkpoint_path_classes(paths: set[str]) -> str:
     classes.extend(verification_classes)
     if any(_is_deferred_research_route_path(path) for path in paths):
         classes.append("research")
+    if any(_is_memory_hygiene_archive_reference_path(path) for path in paths):
+        classes.append("archive-reference")
     if any(_is_meta_feedback_incubation_route_path(path) for path in paths):
         classes.append("incubation")
     if len(classes) == 0:
