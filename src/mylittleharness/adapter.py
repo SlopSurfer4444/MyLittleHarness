@@ -355,7 +355,7 @@ def mcp_read_projection_payload(
     )
     from .dashboard import connect_readiness_packet, dashboard_agent_packet, mlhd_freshness_payload
 
-    agent_packet = dashboard_agent_packet(inventory)
+    agent_packet = dashboard_agent_packet(inventory, cache_posture=cache_posture)
     mlhd = mlhd_freshness_payload(inventory)
     return {
         "adapter": {
@@ -435,7 +435,7 @@ def _mcp_read_projection_degraded_payload(
     from .dashboard import connect_readiness_packet, dashboard_agent_packet, mlhd_freshness_payload
 
     source_summary = _degraded_source_summary(inventory)
-    agent_packet = dashboard_agent_packet(inventory)
+    agent_packet = dashboard_agent_packet(inventory, cache_posture=cache_posture)
     mlhd = mlhd_freshness_payload(inventory)
     sections = [
         ("Adapter", _adapter_findings(inventory, root_selection=root_selection)),

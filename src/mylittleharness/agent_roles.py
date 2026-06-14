@@ -56,6 +56,7 @@ class RoleProfile:
     work_claim_required: bool = False
     work_claim_contract: tuple[str, ...] = ()
     route_receipt_contract: tuple[str, ...] = ()
+    provider_runtime_config_contract: tuple[str, ...] = ()
     fan_in_authority: str = "coordinator retains lifecycle authority; worker packets are evidence only"
     runtime_boundary: str = "protocol/report data only; no worker lifecycle writes, hidden daemons, or model calls"
     coordination_budget: str = "single assigned packet; no hidden retry loop"
@@ -92,6 +93,7 @@ class RoleProfile:
             "work_claim_required": self.work_claim_required,
             "work_claim_contract": list(self.work_claim_contract or COMMON_WORK_CLAIM_CONTRACT),
             "route_receipt_contract": list(self.route_receipt_contract or COMMON_ROUTE_RECEIPT_CONTRACT),
+            "provider_runtime_config_contract": list(self.provider_runtime_config_contract),
             "fan_in_authority": self.fan_in_authority,
             "runtime_boundary": self.runtime_boundary,
             "coordination_budget": self.coordination_budget,
@@ -156,6 +158,12 @@ COMMON_ROUTE_RECEIPT_CONTRACT = (
     "source_hashes",
     "review_token_status",
     "boundary_statement",
+)
+COMMON_PROVIDER_RUNTIME_CONFIG_CONTRACT = (
+    "runtime backend and provider refs are explicit operator inputs, not auto-selection authority",
+    "secret environment variables may be named and checked for boolean presence only; values are never persisted",
+    "provider launcher reports cannot call providers, create queue items, or start workers",
+    "worker launch still requires repo-visible task-session receipt, handoff, active claim, agent-run evidence, and fan-in inspect",
 )
 COMMON_ROLE_AUTHORITY_BOUNDARY = (
     "role profiles describe permission, context, and output packet shape only; they do not encode domain reasoning "
@@ -522,6 +530,7 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("handoff_ref", "claim_ref", "evidence_ref", "launch_boundary"),
         work_claim_required=True,
         work_claim_contract=COMMON_WORK_CLAIM_CONTRACT + ("coordination_root", "edit_worktree_root"),
+        provider_runtime_config_contract=COMMON_PROVIDER_RUNTIME_CONFIG_CONTRACT,
         fan_in_authority="dispatcher launch packets are evidence only; coordinator/governor retains lifecycle and fan-in authority",
         runtime_boundary=DISPATCHER_LAUNCH_BOUNDARY,
         coordination_budget="one reviewed handoff at a time; no hidden queue authority or autonomous retry loop",

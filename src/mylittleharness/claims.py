@@ -16,6 +16,7 @@ from .root_boundary import record_id_conflict, root_relative_path_conflict, sour
 
 
 WORK_CLAIM_SCHEMA = "mylittleharness.work-claim.v1"
+WORK_CLAIM_COMPLETION_POLICY_SCHEMA = "mylittleharness.work-claim.completion-policy.v1"
 WORK_CLAIMS_DIR_REL = "project/verification/work-claims"
 WORK_CLAIM_STATUSES = {"active", "released", "stale", "conflicted"}
 WORK_CLAIM_KINDS = {
@@ -33,8 +34,21 @@ WORK_CLAIM_KINDS = {
 EXCLUSIVE_CLAIM_KINDS = {"write", "lifecycle", "route", "path", "resource", "port", "database", "external_service"}
 WORK_CLAIM_REQUIRED_SCALARS = ("claim_id", "claim_kind", "owner_role", "owner_actor", "execution_slice", "status")
 WORK_CLAIM_SCOPE_FIELDS = ("claimed_routes", "claimed_paths", "claimed_resources")
+WORK_CLAIM_COMPLETION_POLICY_AUTHORITY_FIELDS = (
+    "external_done_claims_authoritative",
+    "external_tracker_status_authoritative",
+    "linear_status_authority",
+    "runtime_memory_authority",
+    "approves_lifecycle",
+    "approves_roadmap_done",
+    "approves_archive",
+    "approves_git",
+)
+WORK_CLAIM_COMPLETION_REQUIRED_EVIDENCE = ("release_condition", "work-claim", "handoff", "agent-run")
+WORK_CLAIM_COMPLETION_REQUIRED_ROUTES = ("claim", "handoff", "evidence")
 WORK_CLAIM_MUTATION_LOCK_NAME = ".work-claim-mutation.lock"
 ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+COMPLETION_EVIDENCE_REF_RE = re.compile(r"(project/verification/(?:work-claims|handoffs|agent-runs|task-sessions)/[A-Za-z0-9._/-]+(?:\.(?:json|md))?)")
 FAN_IN_HANDOFFS_DIR_REL = "project/verification/handoffs"
 FAN_IN_AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
 FAN_IN_HANDOFF_SCHEMA = "mylittleharness.handoff-packet.v1"
@@ -230,6 +244,26 @@ def make_work_claim_request(args: object) -> WorkClaimRequest:
     )
 
 
+def work_claim_completion_policy_payload() -> dict[str, object]:
+    return {
+        "schema": WORK_CLAIM_COMPLETION_POLICY_SCHEMA,
+        "decision": "repo-visible-evidence-only",
+        "external_done_claims_authoritative": False,
+        "external_tracker_status_authoritative": False,
+        "external_tracker_mutation": False,
+        "linear_status_authority": False,
+        "runtime_memory_authority": False,
+        "requires_release_condition": True,
+        "requires_repo_visible_evidence": True,
+        "required_evidence": list(WORK_CLAIM_COMPLETION_REQUIRED_EVIDENCE),
+        "required_routes": list(WORK_CLAIM_COMPLETION_REQUIRED_ROUTES),
+        "approves_lifecycle": False,
+        "approves_roadmap_done": False,
+        "approves_archive": False,
+        "approves_git": False,
+    }
+
+
 def work_claim_dry_run_findings(inventory: Inventory, request: WorkClaimRequest) -> list[Finding]:
     findings = [
         Finding("info", "work-claim-dry-run", "work claim proposal only; no files were written"),
@@ -414,6 +448,7 @@ def work_claim_status_findings(inventory: Inventory, code_prefix: str = "work-cl
             )
         )
         findings.extend(_record_metadata_findings(record, code_prefix))
+        findings.extend(_record_completion_policy_findings(record, code_prefix))
     findings.extend(work_claim_active_overlap_findings(records, code_prefix))
     findings.extend(_boundary_findings(code_prefix))
     return findings
@@ -484,6 +519,7 @@ def work_claim_record_metadata_findings(data: dict[str, object], rel_path: str, 
     lease = str(data.get("lease_expires_at") or "").strip()
     if lease and _parse_utc_timestamp(lease) is None:
         findings.append(Finding("warn", f"{code_prefix}-malformed", "work claim lease_expires_at is not a valid UTC timestamp", rel_path))
+    findings.extend(_completion_policy_metadata_findings(data, rel_path, code_prefix))
     return findings
 
 
@@ -785,6 +821,8 @@ def _release_fields(request: WorkClaimRequest) -> dict[str, object]:
         "status": "released",
         "released_at_utc": _utc_timestamp(),
         "release_condition": request.release_condition,
+        "completion_policy": work_claim_completion_policy_payload(),
+        "completion_evidence": _completion_evidence_payload(request.release_condition),
     }
 
 
@@ -797,8 +835,8 @@ def _completion_policy_findings(request: WorkClaimRequest) -> list[Finding]:
             "info",
             "work-claim-completion-policy",
             (
-                "work claim release records reviewed evidence only; external completion claims require repo-visible "
-                "handoff, work-claim, and agent-run evidence and do not approve MLH closeout"
+                "work claim release records reviewed evidence only; completion_policy=repo-visible-evidence-only; "
+                "required_routes=claim,handoff,evidence; external Linear/Symphony done state is report-only and does not approve MLH closeout"
             ),
             source,
         )
@@ -834,6 +872,103 @@ def _scope_findings(request: WorkClaimRequest) -> list[Finding]:
 
 def _record_metadata_findings(record: WorkClaimRecord, code_prefix: str) -> list[Finding]:
     return work_claim_record_metadata_findings(record.data, record.rel_path, code_prefix)
+
+
+def _record_completion_policy_findings(record: WorkClaimRecord, code_prefix: str) -> list[Finding]:
+    if record.status != "released":
+        return []
+    policy = record.data.get("completion_policy")
+    evidence = record.data.get("completion_evidence")
+    ref_count = 0
+    if isinstance(evidence, dict):
+        ref_count = len(_string_tuple(evidence.get("repo_visible_refs")))
+    policy_summary = "legacy-release-no-policy"
+    if isinstance(policy, dict):
+        policy_summary = str(policy.get("decision") or "repo-visible-evidence-only")
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-completion-policy",
+            (
+                f"claim_id={record.claim_id or '<missing>'}; completion_policy={policy_summary}; "
+                f"repo_visible_refs={ref_count}; external_done_claims_authoritative=false; read-only claim evidence only"
+            ),
+            record.rel_path,
+        )
+    ]
+
+
+def _completion_policy_metadata_findings(data: dict[str, object], rel_path: str, code_prefix: str) -> list[Finding]:
+    findings: list[Finding] = []
+    policy = data.get("completion_policy")
+    if policy in (None, ""):
+        return findings
+    if not isinstance(policy, dict):
+        return [Finding("warn", f"{code_prefix}-malformed", "work claim completion_policy must be an object when present", rel_path)]
+    if policy.get("schema") != WORK_CLAIM_COMPLETION_POLICY_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-malformed",
+                f"work claim completion_policy schema should be {WORK_CLAIM_COMPLETION_POLICY_SCHEMA}",
+                rel_path,
+            )
+        )
+    for field in WORK_CLAIM_COMPLETION_POLICY_AUTHORITY_FIELDS:
+        if _metadata_truthy(policy.get(field)):
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-completion-policy-authority",
+                    f"work claim completion_policy {field} must remain false; external completion claims are evidence only",
+                    rel_path,
+                )
+            )
+    evidence = data.get("completion_evidence")
+    if evidence in (None, ""):
+        return findings
+    if not isinstance(evidence, dict):
+        findings.append(Finding("warn", f"{code_prefix}-malformed", "work claim completion_evidence must be an object when present", rel_path))
+        return findings
+    refs = evidence.get("repo_visible_refs")
+    if refs not in (None, "") and not isinstance(refs, list):
+        findings.append(Finding("warn", f"{code_prefix}-malformed", "work claim completion_evidence.repo_visible_refs must be a list of strings", rel_path))
+    for ref in _string_tuple(refs):
+        conflict = _root_relative_path_conflict(ref)
+        if conflict:
+            findings.append(Finding("warn", f"{code_prefix}-malformed", f"work claim completion_evidence repo_visible_ref {conflict}", rel_path))
+    if _metadata_truthy(evidence.get("external_tracker_status_authoritative")):
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-completion-policy-authority",
+                "work claim completion_evidence external_tracker_status_authoritative must remain false",
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _completion_evidence_payload(release_condition: str) -> dict[str, object]:
+    refs = tuple(
+        dict.fromkeys(
+            match.group(1).rstrip(").,;:")
+            for match in COMPLETION_EVIDENCE_REF_RE.finditer(_normalize_ref(release_condition))
+        )
+    )
+    return {
+        "release_condition": release_condition,
+        "repo_visible_refs": list(refs),
+        "ref_count": len(refs),
+        "required_evidence": list(WORK_CLAIM_COMPLETION_REQUIRED_EVIDENCE),
+        "external_tracker_status_authoritative": False,
+        "reviewed_abandonment": _release_condition_mentions_abandonment(release_condition),
+    }
+
+
+def _release_condition_mentions_abandonment(release_condition: str) -> bool:
+    text = release_condition.casefold()
+    return any(term in text for term in ("abandon", "abandoned", "abandonment"))
 
 
 def _claim_is_stale(record: WorkClaimRecord) -> bool:

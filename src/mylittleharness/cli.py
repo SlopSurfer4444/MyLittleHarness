@@ -164,7 +164,7 @@ from .projection_index import (
 from .preflight import orchestrator_workspace_preflight_sections, preflight_sections, render_git_pre_commit_template
 from .vcs import dispatcher_worktree_coordination_findings, worktree_coordination_findings
 from .reconcile import reconcile_findings
-from .reporting import emit_text, render_intelligence_report, render_json_report, render_report, render_sectioned_report
+from .reporting import emit_text, render_intelligence_report, render_json_report, render_quick_check_report, render_report, render_sectioned_report
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .relationship_drift import (
     make_relationship_drift_request,
@@ -199,6 +199,18 @@ from .roadmap import (
 )
 from .semantic import semantic_evaluate_sections, semantic_inspect_sections
 from .tasks import tasks_sections
+from .task_session import (
+    make_task_session_receipt_request,
+    register_task_session_parser,
+    task_session_conductor_payload,
+    task_session_conductor_sections,
+    task_session_fan_in_payload,
+    task_session_fan_in_sections,
+    task_session_payload,
+    task_session_receipt_apply_findings,
+    task_session_receipt_dry_run_findings,
+    task_session_sections,
+)
 from .writeback import make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
 from .cli_parser import build_parser
 
@@ -221,6 +233,7 @@ COMMANDS = (
     "preflight",
     "hooks",
     "tasks",
+    "task-session",
     "bootstrap",
     "semantic",
     "intelligence",
@@ -240,6 +253,7 @@ COMMANDS = (
     "incubate",
     "incubation-reconcile",
     "plan",
+    "plan-cancel",
     "writeback",
     "transition",
     "memory-hygiene",
@@ -254,6 +268,7 @@ COMMANDS = (
 )
 CACHE_DIRTY_APPLY_COMMANDS = {
     "evidence",
+    "task-session",
     "claim",
     "handoff",
     "approval-packet",
@@ -267,6 +282,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "meta-feedback",
     "migrate",
     "plan",
+    "plan-cancel",
     "research-compare",
     "research-import",
     "research-distill",
@@ -344,6 +360,7 @@ def _underscore_option_typo_hint(argv: list[str], parser: argparse.ArgumentParse
 def main(argv: list[str] | None = None) -> int:
     argv = _normalize_argv(argv)
     parser = build_parser()
+    register_task_session_parser(parser)
     option_hint = _underscore_option_typo_hint(argv, parser)
     if option_hint is not None:
         unknown, suggested = option_hint
@@ -472,14 +489,23 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "dashboard":
-        sections = dashboard_sections(inventory)
+        detail = str(getattr(args, "detail", "auto") or "auto")
+        if args.json:
+            payload = dashboard_payload(inventory, detail=detail)
+            emit_text(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True))
+            error = any(
+                finding.get("severity") == "error"
+                for section in payload.get("sections", [])
+                if isinstance(section, dict)
+                for finding in section.get("findings", [])
+                if isinstance(finding, dict)
+            )
+            return 1 if error else 0
+        sections = dashboard_sections(inventory, detail=detail)
         findings = flatten_sections(sections)
         result = _result_for(findings)
         suggestions = _suggestions(command, findings)
-        if args.json:
-            emit_text(json.dumps(dashboard_payload(inventory, sections), sort_keys=True, indent=2, ensure_ascii=True))
-        else:
-            emit_text(render_sectioned_report("dashboard --inspect", inventory.root, result, inventory.sources_for_report(), sections, suggestions))
+        emit_text(render_sectioned_report("dashboard --inspect", inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         return 1 if any(finding.severity == "error" for finding in findings) else 0
     if command == "mlhd":
         action = str(getattr(args, "mlhd_action", "") or "status")
@@ -521,7 +547,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.focus:
                 payload["report_scope"] = _focused_report_scope(args.focus, sections)
+            if getattr(args, "quick", False):
+                payload["report_scope"] = _quick_report_scope(sections)
             emit_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
+        elif getattr(args, "quick", False):
+            emit_text(render_quick_check_report(inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         else:
             emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         return 1 if any(finding.severity == "error" for finding in findings) else 0
@@ -629,6 +659,55 @@ def main(argv: list[str] | None = None) -> int:
         result = _result_for(findings)
         emit_text(render_sectioned_report("tasks --inspect", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
+    if command == "task-session":
+        if args.inspect:
+            fan_in = bool(getattr(args, "fan_in", False))
+            conductor = bool(getattr(args, "conductor", False))
+            provider_launcher = bool(getattr(args, "provider_launcher", False))
+            if fan_in and conductor:
+                parser.error("task-session --fan-in and --conductor cannot be combined")
+            if provider_launcher and not conductor:
+                parser.error("task-session --provider-launcher is only valid with --inspect --conductor")
+            sections = (
+                task_session_conductor_sections(inventory, include_provider_launcher=provider_launcher)
+                if conductor
+                else task_session_fan_in_sections(inventory) if fan_in else task_session_sections(inventory)
+            )
+            findings = flatten_sections(sections)
+            result = _result_for(findings)
+            suggestions = _suggestions(command, findings)
+            report_name = (
+                "task-session --inspect --conductor --provider-launcher"
+                if conductor and provider_launcher
+                else "task-session --inspect --conductor"
+                if conductor
+                else "task-session --inspect --fan-in" if fan_in else "task-session --inspect"
+            )
+            if args.json:
+                payload = (
+                    task_session_conductor_payload(inventory, sections, include_provider_launcher=provider_launcher)
+                    if conductor
+                    else task_session_fan_in_payload(inventory, sections) if fan_in else task_session_payload(inventory, sections)
+                )
+                emit_text(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True))
+            else:
+                emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, suggestions))
+            return 1 if any(finding.severity == "error" for finding in findings) else 0
+        if getattr(args, "fan_in", False):
+            parser.error("task-session --fan-in is only valid with --inspect")
+        if getattr(args, "conductor", False):
+            parser.error("task-session --conductor is only valid with --inspect")
+        if getattr(args, "provider_launcher", False):
+            parser.error("task-session --provider-launcher is only valid with --inspect --conductor")
+        if args.json:
+            parser.error("task-session --json is only valid with --inspect")
+        request = make_task_session_receipt_request(args)
+        report_name = "task-session --apply" if args.apply else "task-session --dry-run"
+        findings = task_session_receipt_apply_findings(inventory, request) if args.apply else task_session_receipt_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "bootstrap":
         if args.package_smoke:
             sections = package_smoke_sections(inventory)
@@ -655,7 +734,7 @@ def main(argv: list[str] | None = None) -> int:
         sections = (
             intelligence_route_sections(inventory)
             if args.focus == "routes"
-            else intelligence_sections(inventory, args.search, args.path, args.full_text, args.limit, args.query)
+            else intelligence_sections(inventory, args.search, args.path, args.full_text, args.limit, args.query, focus=args.focus)
         )
         findings = flatten_sections(sections)
         result = _result_for(findings)
@@ -990,28 +1069,28 @@ def main(argv: list[str] | None = None) -> int:
             emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
             return 2 if args.apply and result == "error" else 0
         if not args.action:
-            parser.error("roadmap requires --action add/update or the normalize operation")
-        if args.action == "add-many":
+            parser.error("roadmap requires --action add/update/add-many/update-many or the normalize operation")
+        if args.action in {"add-many", "update-many"}:
             if not args.items_file:
-                parser.error("roadmap --action add-many requires --items-file")
+                parser.error(f"roadmap --action {args.action} requires --items-file")
             if args.item_id or _roadmap_item_mutation_args_present(args):
-                parser.error("roadmap --action add-many reads item fields from --items-file only")
+                parser.error(f"roadmap --action {args.action} reads item fields from --items-file only")
             manifest_result = _read_text_argument("--items-file", args.items_file)
             if manifest_result[1]:
                 emit_text(f"mylittleharness: {manifest_result[1]}", stream=sys.stderr)
                 return 2
-            report_name = "roadmap add-many --apply" if args.apply else "roadmap add-many --dry-run"
+            report_name = f"roadmap {args.action} --apply" if args.apply else f"roadmap {args.action} --dry-run"
             findings = (
-                roadmap_batch_apply_findings(inventory, manifest_result[0] or "", args.items_file)
+                roadmap_batch_apply_findings(inventory, manifest_result[0] or "", args.items_file, action=args.action)
                 if args.apply
-                else roadmap_batch_dry_run_findings(inventory, manifest_result[0] or "", args.items_file)
+                else roadmap_batch_dry_run_findings(inventory, manifest_result[0] or "", args.items_file, action=args.action)
             )
             findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
             result = _result_for(findings)
             emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
             return 2 if args.apply and result == "error" else 0
         if args.items_file:
-            parser.error("roadmap --items-file is valid only with --action add-many")
+            parser.error("roadmap --items-file is valid only with --action add-many or --action update-many")
         if not args.item_id:
             parser.error("roadmap --action add/update requires --item-id")
         request = make_roadmap_request(
@@ -2345,6 +2424,10 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         boundary_section.append(Finding("info", "check-deep-read-only", "check --deep composes links, context, hygiene, and grain diagnostics without writing files"))
         return "check --deep", [*sections, ("Boundary", boundary_section)]
 
+    if getattr(args, "quick", False):
+        boundary_section.append(Finding("info", "check-quick-read-only", "check --quick renders a compact routine report without writing files or hiding JSON authority boundaries"))
+        return "check --quick", [*sections, ("Boundary", boundary_section)]
+
     boundary_section.append(Finding("info", "check-compatibility-diagnostics", "use check --deep or check --focus for consolidated links, context, and hygiene diagnostics; compatibility commands remain available"))
     return "check", [*sections, ("Boundary", boundary_section)]
 
@@ -2371,6 +2454,19 @@ def _focused_report_scope(focus: str, sections: list[tuple[str, list[Finding]]])
         "boundary": (
             "focused JSON reports include only the selected diagnostic and boundary findings; "
             "they do not compute whole-root clean posture or approve lifecycle, archive, staging, commit, or push"
+        ),
+    }
+
+
+def _quick_report_scope(sections: list[tuple[str, list[Finding]]]) -> dict[str, object]:
+    return {
+        "scope": "quick",
+        "included_sections": [name for name, _findings in sections],
+        "text_report_omits_source_inventory": True,
+        "json_report_keeps_full_sources_and_findings": True,
+        "boundary": (
+            "quick text reports compact the display only; they do not skip check sections, "
+            "write files, approve lifecycle, archive, staging, commit, or push"
         ),
     }
 
@@ -2684,7 +2780,7 @@ def _section_named(sections: list[tuple[str, list[Finding]]], name: str) -> tupl
 def _suggestions(command: str, findings) -> list[str]:
     errors = [finding for finding in findings if finding.severity == "error"]
     warnings = [finding for finding in findings if finding.severity == "warn"]
-    dry_run_refusal = "" if command in {"approval-packet", "claim", "handoff"} else _dry_run_refusal_suggestion(command, findings)
+    dry_run_refusal = "" if command in {"approval-packet", "claim", "handoff", "task-session"} else _dry_run_refusal_suggestion(command, findings)
     if dry_run_refusal:
         return [dry_run_refusal]
     if command == "check":
@@ -2692,6 +2788,8 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["check found validation errors; inspect the validation section before running repair."]
         if any(finding.code == "check-deep-read-only" for finding in findings):
             return ["check --deep completed as a read-only status, validation, drift, links, context, hygiene, and grain report."]
+        if any(finding.code == "check-quick-read-only" for finding in findings):
+            return ["check --quick completed as a compact read-only report; rerun without --quick for full source inventory and section details."]
         focus_finding = next((finding for finding in findings if finding.code == "check-focus-read-only"), None)
         if focus_finding:
             return [f"{focus_finding.message}."]
@@ -2757,6 +2855,29 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.severity == "warn" for finding in findings):
             return ["Use evidence findings as closeout assembly prompts; source files and observed verification remain authority."]
         return ["evidence completed as a terminal-only read-only report; it did not approve lifecycle, archive, commit, or repair actions."]
+    if command == "task-session":
+        if any(finding.code.startswith("task-session-provider-launcher") for finding in findings):
+            return ["task-session provider-launcher inspect reported secret-safe runtime config readiness only; provider calls, worker launch, lifecycle movement, and Git remain separate explicit decisions."]
+        if any(finding.code.startswith("task-session-fan-in") for finding in findings):
+            if any(finding.code == "task-session-fan-in-ready" for finding in findings):
+                return ["task-session fan-in inspect reports the session graph ready as evidence only; writeback, archive, Git, provider routing, and worker launch remain separate explicit decisions."]
+            if any(finding.code == "task-session-fan-in-blocked" for finding in findings):
+                return ["task-session fan-in inspect found blocking session-graph evidence gaps; add or repair repo-visible receipts, claims, handoffs, or agent-run evidence before closeout."]
+            if any(finding.code == "task-session-fan-in-refused" for finding in findings):
+                return ["task-session fan-in inspect refused this root posture; use a live operating root and rerun the read-only report."]
+            return ["task-session fan-in inspect completed as read-only readiness evidence; it did not approve lifecycle, writeback, archive, Git, provider routing, or worker launch."]
+        is_dry_run = any(finding.code == "task-session-receipt-dry-run" for finding in findings)
+        if any(finding.severity == "error" for finding in findings):
+            if is_dry_run:
+                return ["task-session receipt dry-run was refused before any receipt evidence was written."]
+            return ["task-session receipt apply was refused before any receipt evidence was written."]
+        if is_dry_run:
+            return ["task-session receipt dry-run reported the receipt target, scope, runtime owner, and route-write preview without writing files."]
+        if any(finding.code == "task-session-receipt-written" for finding in findings):
+            return ["task-session receipt apply wrote only one repo-visible receipt; worker launch, fan-in, lifecycle, archive, staging, commit, and provider-routing decisions remain explicit."]
+        if any(finding.severity == "warn" for finding in findings):
+            return ["Review task-session warnings manually; receipt evidence records runtime intent but cannot approve lifecycle or fan-in."]
+        return ["task-session inspect completed as a terminal-only read-only preflight report; it did not write receipts, spawn workers, or approve lifecycle movement."]
     if command == "claim":
         is_dry_run = any(finding.code == "work-claim-dry-run" for finding in findings)
         if any(finding.severity == "error" for finding in findings):

@@ -199,6 +199,8 @@ Use it as the first command for a new session, new agent, or suspicious repo sta
 mylittleharness --root /path/to/target check
 ```
 
+Use `check --quick` for the same routine read-only posture with a compact text report that hides the full source inventory. Rerun plain `check` for full section detail, or `check --deep` for broader link, context, hygiene, and grain diagnostics.
+
 ### `migrate`
 
 Copies a legacy `.codex/project-workflow.toml` manifest to `.mylittleharness/project-workflow.toml`.

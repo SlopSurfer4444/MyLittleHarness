@@ -18,6 +18,7 @@ from .projection_artifacts import (
     PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
     inspect_projection_artifacts,
     projection_cache_posture_payload,
+    quick_projection_cache_posture_findings,
 )
 from .projection_index import inspect_projection_index
 from .roadmap import roadmap_items_for_diagnostics
@@ -29,6 +30,9 @@ from .vcs import worktree_coordination_findings
 
 DASHBOARD_SCHEMA = "mylittleharness.dashboard.v1"
 CONNECT_READINESS_SCHEMA = "mylittleharness.connect-readiness-action-packet.v1"
+DASHBOARD_DETAIL_MODES = ("auto", "full", "degraded")
+DASHBOARD_DEGRADED_SOURCE_THRESHOLD = 120
+DASHBOARD_DEGRADED_SOURCE_SAMPLE_LIMIT = 40
 MLHD_RUNTIME_DIR_REL = ".mylittleharness/runtime/mlhd"
 MLHD_RUN_ONCE_APPLY_COMMAND = "mylittleharness --root <root> mlhd run-once --apply"
 PROJECT_ROUTE_DIR = "project"
@@ -40,42 +44,103 @@ DOCS_GLOB_REL = "docs/**/*.md"
 WORKFLOW_SPECS_GLOB_REL = f"{PROJECT_ROUTE_DIR}/specs/**/*.md"
 
 
-def dashboard_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
+def dashboard_sections(
+    inventory: Inventory,
+    *,
+    detail: str = "auto",
+    projection=None,
+    cache_posture: dict[str, object] | None = None,
+) -> list[tuple[str, list[Finding]]]:
+    detail_mode = _dashboard_detail_mode(detail)
+    projection_mode = _dashboard_projection_mode(inventory, detail_mode)
+    if projection_mode == "full" and projection is None:
+        projection = build_projection(inventory)
+    cache_posture = cache_posture or _cache_posture_payload(inventory, projection=projection, detail=projection_mode)
+    accelerator_adoption = _accelerator_adoption_payload(inventory)
     coordination = _coordination_findings(inventory)
     runtime = [*mlhd_runtime_findings(inventory), *_mlhd_freshness_findings(inventory)]
     return [
         ("Dashboard", _dashboard_summary_findings(inventory)),
-        ("Connect Readiness", connect_readiness_findings(inventory, "dashboard-connect-readiness")),
+        (
+            "Connect Readiness",
+            connect_readiness_findings(
+                inventory,
+                "dashboard-connect-readiness",
+                cache_posture=cache_posture,
+                accelerator_adoption=accelerator_adoption,
+            ),
+        ),
         ("Lifecycle", _lifecycle_findings(inventory)),
         ("Roadmap", _roadmap_findings(inventory)),
         ("Coordination", coordination),
         ("mlhd Runtime", runtime),
         ("Context Memory", context_memory_capsule_findings(inventory, "dashboard-context-memory")),
-        ("Projection", _projection_findings(inventory)),
+        (
+            "Projection",
+            _projection_findings(
+                inventory,
+                detail=projection_mode,
+                requested_detail=detail_mode,
+                projection=projection,
+                cache_posture=cache_posture,
+            ),
+        ),
         ("Lifecycle Provenance", lifecycle_mutation_provenance_findings(inventory, "dashboard-lifecycle-provenance")),
         ("Alerts", _alert_findings([*coordination, *runtime])),
         ("Boundary", _boundary_findings()),
     ]
 
 
-def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Finding]]] | None = None) -> dict[str, object]:
-    sections = dashboard_sections(inventory) if sections is None else sections
+def dashboard_payload(
+    inventory: Inventory,
+    sections: list[tuple[str, list[Finding]]] | None = None,
+    *,
+    detail: str = "auto",
+    projection=None,
+    cache_posture: dict[str, object] | None = None,
+) -> dict[str, object]:
+    detail_mode = _dashboard_detail_mode(detail)
+    projection_mode = _dashboard_projection_mode(inventory, detail_mode)
+    if projection_mode == "full" and projection is None:
+        projection = build_projection(inventory)
+    cache_posture = cache_posture or _cache_posture_payload(inventory, projection=projection, detail=projection_mode)
+    sections = (
+        dashboard_sections(
+            inventory,
+            detail=detail_mode,
+            projection=projection,
+            cache_posture=cache_posture,
+        )
+        if sections is None
+        else sections
+    )
     findings = [finding for _section, section_findings in sections for finding in section_findings]
     alert_findings = next((section_findings for section_name, section_findings in sections if section_name == "Alerts"), [])
-    cache_posture = _cache_posture_payload(inventory)
-    agent_packet = dashboard_agent_packet(inventory)
     accelerator_adoption = _accelerator_adoption_payload(inventory)
+    agent_packet = dashboard_agent_packet(
+        inventory,
+        cache_posture=cache_posture,
+        accelerator_adoption=accelerator_adoption,
+    )
     return {
         "schema": DASHBOARD_SCHEMA,
         "root": str(inventory.root),
         "root_kind": inventory.root_kind,
         "read_only": True,
+        "detail": detail_mode,
+        "mode": projection_mode,
+        "degraded": projection_mode == "degraded",
         "source_refs": _dashboard_source_refs(inventory, sections),
         "lifecycle": _lifecycle_payload(inventory),
         "roadmap": _roadmap_payload(inventory),
         "mlhd": mlhd_freshness_payload(inventory),
         "contextMemory": context_memory_capsule_payload(inventory),
-        "projection": projection_summary_to_dict(build_projection(inventory)),
+        "projection": _dashboard_projection_payload(
+            inventory,
+            detail=projection_mode,
+            requested_detail=detail_mode,
+            projection=projection,
+        ),
         "cachePosture": cache_posture,
         "agentPacket": agent_packet,
         "authorityCards": agent_packet.get("authorityCards", []),
@@ -209,9 +274,146 @@ def _coordination_findings(inventory: Inventory) -> list[Finding]:
     ]
 
 
-def _projection_findings(inventory: Inventory) -> list[Finding]:
-    projection = build_projection(inventory)
-    posture = _cache_posture_payload(inventory, projection)
+def _dashboard_detail_mode(value: str) -> str:
+    detail = str(value or "auto").strip().casefold()
+    return detail if detail in DASHBOARD_DETAIL_MODES else "auto"
+
+
+def _dashboard_projection_mode(inventory: Inventory, detail: str) -> str:
+    if detail == "full":
+        return "full"
+    if detail == "degraded":
+        return "degraded"
+    return "degraded" if len(inventory.surfaces) >= DASHBOARD_DEGRADED_SOURCE_THRESHOLD else "full"
+
+
+def _dashboard_degraded_source_summary(inventory: Inventory) -> dict[str, object]:
+    rows = inventory.sources_for_report()
+    present = sum(1 for source in inventory.surfaces if source.exists)
+    readable = sum(1 for source in inventory.surfaces if source.exists and not source.read_error)
+    total_bytes = sum(source.byte_count for source in inventory.surfaces if source.exists and source.byte_count)
+    return {
+        "sourceCount": len(inventory.surfaces),
+        "presentSourceCount": present,
+        "readableSourceCount": readable,
+        "totalBytes": total_bytes,
+        "sampleLimit": DASHBOARD_DEGRADED_SOURCE_SAMPLE_LIMIT,
+        "sample": rows[:DASHBOARD_DEGRADED_SOURCE_SAMPLE_LIMIT],
+        "truncated": len(rows) > DASHBOARD_DEGRADED_SOURCE_SAMPLE_LIMIT,
+    }
+
+
+def _dashboard_projection_payload(
+    inventory: Inventory,
+    *,
+    detail: str,
+    requested_detail: str,
+    projection=None,
+) -> dict[str, object]:
+    if detail == "full":
+        projection = projection or build_projection(inventory)
+        return {
+            **projection_summary_to_dict(projection),
+            "mode": "full",
+            "detail": requested_detail,
+            "degraded": False,
+            "full_projection_skipped": False,
+        }
+
+    source_summary = _dashboard_degraded_source_summary(inventory)
+    return {
+        "rebuild_status": "skipped-degraded-dashboard",
+        "storage_boundary": "none",
+        "source_count": source_summary["sourceCount"],
+        "present_source_count": source_summary["presentSourceCount"],
+        "readable_source_count": source_summary["readableSourceCount"],
+        "hashed_source_count": 0,
+        "missing_required_count": sum(1 for source in inventory.surfaces if source.required and not source.exists),
+        "link_record_count": 0,
+        "fan_in_record_count": 0,
+        "relationship_node_count": 0,
+        "relationship_edge_count": 0,
+        "mode": "degraded",
+        "detail": requested_detail,
+        "degraded": True,
+        "full_projection_skipped": True,
+        "degraded_reason": {
+            "detail": requested_detail,
+            "reason": "bounded-degraded-default" if requested_detail == "auto" else "explicit-degraded",
+            "source_threshold": DASHBOARD_DEGRADED_SOURCE_THRESHOLD,
+            "full_projection_skipped": True,
+        },
+        "sourceSummary": source_summary,
+    }
+
+
+def _projection_findings(
+    inventory: Inventory,
+    *,
+    detail: str,
+    requested_detail: str,
+    projection=None,
+    cache_posture: dict[str, object] | None = None,
+) -> list[Finding]:
+    if detail == "full":
+        projection = projection or build_projection(inventory)
+        posture = cache_posture or _cache_posture_payload(inventory, projection, detail=detail)
+        return _full_projection_findings(inventory, projection, posture)
+
+    posture = cache_posture or _cache_posture_payload(inventory, detail=detail)
+    source_summary = _dashboard_degraded_source_summary(inventory)
+    refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
+    runtime_dir = inventory.root / ".mylittleharness" / "runtime"
+    return [
+        Finding(
+            "warn",
+            "dashboard-projection-degraded",
+            (
+                "dashboard returned a bounded degraded projection cockpit without rebuilding the full in-memory projection; "
+                f"detail={requested_detail}; request --detail full when complete source/link/fan-in rows are needed"
+            ),
+            ".mylittleharness/generated/projection",
+        ),
+        Finding(
+            "info",
+            "dashboard-projection-summary-degraded",
+            (
+                f"bounded source summary: sources={source_summary['sourceCount']}; "
+                f"present={source_summary['presentSourceCount']}; readable={source_summary['readableSourceCount']}; "
+                f"sample_limit={source_summary['sampleLimit']}; truncated={str(source_summary['truncated']).lower()}"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+        _runtime_cache_finding(inventory.root, runtime_dir),
+        Finding(
+            "info",
+            "dashboard-projection-authority",
+            "degraded dashboard projection skips source/link/fan-in rebuild; source files remain truth and full detail is explicit opt-in",
+            ".mylittleharness/generated/projection",
+        ),
+        Finding(
+            "info",
+            "dashboard-cache-posture",
+            (
+                "cache_posture schema=mylittleharness.projection-cache-posture.v1; "
+                "refresh_by_dashboard=false; commands_are_suggestions_only=true; "
+                f"displayed_refresh_commands={refresh_commands}"
+            ),
+            ".mylittleharness/generated/projection",
+        ),
+        Finding(
+            "info",
+            "dashboard-agent-packet",
+            (
+                "default first context path: dashboard packet, intelligence query, MCP read/search/bundle, then rg exact verification; "
+                "dashboard remains read-only"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+    ]
+
+
+def _full_projection_findings(inventory: Inventory, projection, posture: dict[str, object]) -> list[Finding]:
     refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
     runtime_dir = inventory.root / ".mylittleharness" / "runtime"
     return [
@@ -430,7 +632,7 @@ def _runtime_cache_finding(root: Path, runtime_dir: Path) -> Finding:
     return Finding(
         "info",
         "dashboard-runtime-cache-absent",
-        "optional dashboard/mlhd runtime cache is absent; cockpit rebuilds from repo-visible routes and in-memory projection",
+        "optional dashboard/mlhd runtime cache is absent; cockpit rebuilds from repo-visible routes and selected projection detail",
         rel_path,
     )
 
@@ -445,14 +647,23 @@ def _value(data: dict[str, object], key: str) -> str:
     return str(data.get(key) or "<none>")
 
 
-def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
+def dashboard_agent_packet(
+    inventory: Inventory,
+    *,
+    cache_posture: dict[str, object] | None = None,
+    accelerator_adoption: dict[str, object] | None = None,
+) -> dict[str, object]:
     data = _state_data(inventory)
     manifest_rel = _selected_manifest_rel(inventory)
-    adoption = _accelerator_adoption_payload(inventory)
+    adoption = accelerator_adoption or _accelerator_adoption_payload(inventory)
     mcp_tool_coverage = _mcp_tool_coverage_payload()
     exact_verification = _exact_verification_payload()
     next_legal = _next_legal_dry_run_payload(inventory)
     authority_cards = _authority_cards_payload(inventory, next_legal)
+    cache = cache_posture or _cache_posture_payload(
+        inventory,
+        detail=_dashboard_projection_mode(inventory, "auto"),
+    )
     recommended_commands = [
         "mylittleharness --root <root> dashboard --inspect --json",
         "mylittleharness --root <root> intelligence --query \"<task or route question>\"",
@@ -503,6 +714,7 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
         "acceleratorAdoption": adoption,
         "connectReadiness": connect_readiness_packet(
             inventory,
+            cache_posture=cache,
             agent_packet={"nextLegalDryRun": next_legal, "authorityCards": authority_cards},
             accelerator_adoption=adoption,
         ),
@@ -519,7 +731,10 @@ def connect_readiness_packet(
     accelerator_adoption: dict[str, object] | None = None,
 ) -> dict[str, object]:
     data = _state_data(inventory)
-    cache = cache_posture or _cache_posture_payload(inventory)
+    cache = cache_posture or _cache_posture_payload(
+        inventory,
+        detail=_dashboard_projection_mode(inventory, "auto"),
+    )
     components = cache.get("components", {}) if isinstance(cache, dict) else {}
     adoption = accelerator_adoption or _accelerator_adoption_payload(inventory)
     mcp = adoption.get("mcp", {}) if isinstance(adoption.get("mcp"), dict) else {}
@@ -644,8 +859,18 @@ def connect_readiness_packet(
     }
 
 
-def connect_readiness_findings(inventory: Inventory, code_prefix: str = "connect-readiness") -> list[Finding]:
-    packet = connect_readiness_packet(inventory)
+def connect_readiness_findings(
+    inventory: Inventory,
+    code_prefix: str = "connect-readiness",
+    *,
+    cache_posture: dict[str, object] | None = None,
+    accelerator_adoption: dict[str, object] | None = None,
+) -> list[Finding]:
+    packet = connect_readiness_packet(
+        inventory,
+        cache_posture=cache_posture,
+        accelerator_adoption=accelerator_adoption,
+    )
     lifecycle = packet["lifecycle"]
     cache = packet["cache"]
     repair = packet["repairTargets"]
@@ -904,7 +1129,15 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
     )
 
 
-def _cache_posture_payload(inventory: Inventory, projection=None) -> dict[str, object]:
+def _cache_posture_payload(inventory: Inventory, projection=None, *, detail: str = "full") -> dict[str, object]:
+    if detail != "full":
+        artifact_findings, index_findings = quick_projection_cache_posture_findings(inventory)
+        return projection_cache_posture_payload(
+            artifact_findings,
+            index_findings,
+            runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
+        )
+
     projection = projection or build_projection(inventory)
     return projection_cache_posture_payload(
         inspect_projection_artifacts(inventory, projection),

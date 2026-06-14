@@ -62,6 +62,8 @@ DEFAULT_STATE_REL = "project/" + "project-state.md"
 DEFAULT_PHASE_STATUS = "pending"
 DEFAULT_DOCS_DECISION = "uncertain"
 DEFAULT_EXECUTION_POLICY = "current-phase-only"
+COMPLETION_POLICY_THROUGH_CLOSEOUT = "through-closeout"
+COMPLETION_POLICY_PHASE_ONLY = "phase-only"
 DEFAULT_CLOSEOUT_BOUNDARY = "explicit-closeout-required"
 DEFAULT_AUTO_CONTINUE = False
 PLAN_ELIGIBLE_ROADMAP_STATUSES = {"accepted", "active"}
@@ -220,6 +222,7 @@ def render_implementation_plan(
     interrupt_section = _scoped_interrupt_contract_section(request, slice_contract)
     synthesis_section = _plan_synthesis_section(synthesis_report, slice_contract, verification_profile)
     roadmap_authority_input = "- `project/roadmap.md`\n" if request.roadmap_item else ""
+    completion_policy = _completion_policy_for_request(request, slice_contract)
 
     return (
         "---\n"
@@ -229,7 +232,7 @@ def render_implementation_plan(
         f'active_phase: "{_yaml_double_quoted_value(active_phase)}"\n'
         f'phase_status: "{DEFAULT_PHASE_STATUS}"\n'
         f'docs_decision: "{DEFAULT_DOCS_DECISION}"\n'
-        f"{_execution_policy_frontmatter(slice_contract)}"
+        f"{_execution_policy_frontmatter(slice_contract, completion_policy)}"
         f"{relationship_frontmatter}"
         f'created: "{current_date}"\n'
         f'updated: "{current_date}"\n'
@@ -261,8 +264,9 @@ def render_implementation_plan(
         "- Docs decision must be recorded as `updated`, `not-needed`, or `uncertain` before confident closeout.\n"
         "\n## Execution Policy\n\n"
         f"- execution_policy: `{slice_contract.execution_policy if slice_contract and slice_contract.execution_policy else DEFAULT_EXECUTION_POLICY}`\n"
+        f"- completion_policy: `{completion_policy}`\n"
         f"- auto_continue: `{str(DEFAULT_AUTO_CONTINUE).lower()}`\n"
-        f"- default continuation: execute only `{active_phase}`, record repo-visible evidence/state, then stop.\n"
+        f"{_completion_policy_body_line(completion_policy, active_phase)}\n"
         f"{_stop_conditions_body()}"
         "\n## File Ownership\n\n"
         "- Write scope: declare exact files before editing them.\n"
@@ -428,14 +432,77 @@ def _slice_frontmatter(
     return "".join(lines)
 
 
-def _execution_policy_frontmatter(slice_contract: RoadmapSliceContract | None) -> str:
+def _execution_policy_frontmatter(slice_contract: RoadmapSliceContract | None, completion_policy: str) -> str:
     policy = slice_contract.execution_policy if slice_contract and slice_contract.execution_policy else DEFAULT_EXECUTION_POLICY
     closeout_boundary = slice_contract.closeout_boundary if slice_contract and slice_contract.closeout_boundary else DEFAULT_CLOSEOUT_BOUNDARY
     return (
         f'execution_policy: "{_yaml_double_quoted_value(policy)}"\n'
+        f'completion_policy: "{_yaml_double_quoted_value(completion_policy)}"\n'
         f"auto_continue: {str(DEFAULT_AUTO_CONTINUE).lower()}\n"
         f"{_yaml_frontmatter_list('stop_conditions', DEFAULT_STOP_CONDITIONS)}"
         f'closeout_boundary: "{_yaml_double_quoted_value(closeout_boundary)}"\n'
+    )
+
+
+def _completion_policy_for_request(
+    request: PlanRequest,
+    slice_contract: RoadmapSliceContract | None,
+) -> str:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            request.title,
+            request.objective,
+            request.task,
+            getattr(slice_contract, "slice_goal", ""),
+            getattr(slice_contract, "domain_context", ""),
+            getattr(slice_contract, "closeout_boundary", ""),
+        )
+    ).casefold()
+    phase_only_markers = (
+        "only phase",
+        "phase only",
+        "phase-only",
+        "only current phase",
+        "current phase only",
+        "only do phase",
+        "do phase 1 only",
+        "stop after current phase",
+        "stop after phase",
+        "audit only",
+        "diagnostic only",
+        "investigation only",
+        "read-only",
+        "review only",
+    )
+    if any(marker in text for marker in phase_only_markers):
+        return COMPLETION_POLICY_PHASE_ONLY
+    if request.roadmap_item:
+        return COMPLETION_POLICY_THROUGH_CLOSEOUT
+    implementation_patterns = (
+        r"\bimplement(?:ed|ing|s)?\b",
+        r"\brealize(?:d|s)?\b",
+        r"\bcomplete(?:d|s)?\b",
+        r"\bfinish(?:ed|es)?\b",
+        r"\bthrough[- ]closeout\b",
+        r"до конца",
+        r"реализ",
+        r"заверш",
+    )
+    if any(re.search(pattern, text) for pattern in implementation_patterns):
+        return COMPLETION_POLICY_THROUGH_CLOSEOUT
+    return COMPLETION_POLICY_PHASE_ONLY
+
+
+def _completion_policy_body_line(completion_policy: str, active_phase: str) -> str:
+    if completion_policy == COMPLETION_POLICY_THROUGH_CLOSEOUT:
+        return (
+            f"- default continuation: execute only `{active_phase}` before the next explicit lifecycle writeback; "
+            "after repo-visible phase evidence, continue pending phases through closeout via legal dry-run/apply routes."
+        )
+    return (
+        f"- default continuation: execute only `{active_phase}`, record repo-visible evidence/state, "
+        "then stop with a handoff or next safe command."
     )
 
 
@@ -1842,6 +1909,7 @@ def plan_cancel_dry_run_findings(inventory: Inventory, request: PlanCancelReques
             "plan-cancel can clear accidental activation and optionally restore one roadmap item to accepted; it cannot close out, archive, repair, stage, commit, or open the next plan",
             DEFAULT_PLAN_REL,
         ),
+        _plan_cancel_command_registry_owner_finding(),
     ]
     errors = _plan_cancel_preflight_errors(inventory, request, apply=False)
     roadmap_plans, roadmap_errors = _plan_cancel_roadmap_plans(inventory, request)
@@ -1948,6 +2016,7 @@ def plan_cancel_apply_findings(inventory: Inventory, request: PlanCancelRequest)
         Finding("info", "plan-cancel-apply", "plan activation cancel/rollback apply started"),
         _root_posture_finding(inventory),
         Finding("info", "plan-cancel-lifecycle-updated", "cleared project-state active plan pointer and set plan_status to none", state.rel_path),
+        _plan_cancel_command_registry_owner_finding(),
         *route_write_findings("plan-cancel-route-write", route_writes, apply=True),
         *guard_findings,
         Finding(
@@ -1966,6 +2035,19 @@ def plan_cancel_apply_findings(inventory: Inventory, request: PlanCancelRequest)
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "plan-cancel-backup-cleanup", warning, DEFAULT_PLAN_REL))
     return findings
+
+
+def _plan_cancel_command_registry_owner_finding() -> Finding:
+    return Finding(
+        "info",
+        "plan-cancel-command-registry-owner",
+        (
+            "plan-cancel safe command contract is source-bound through "
+            "src/mylittleharness/command_discovery.py and the CLI command surface; "
+            "suggest --intent \"cancel plan\" should keep this route discoverable"
+        ),
+        "src/mylittleharness/command_discovery.py",
+    )
 
 
 def _render_plan_text_for_request(inventory: Inventory, request: PlanRequest) -> str:
@@ -3163,11 +3245,45 @@ def _plan_target_artifacts(
     contract_target_artifacts: tuple[str, ...],
 ) -> tuple[str, ...]:
     explicit = tuple(_dedupe_nonempty(_field_list(fields.get("target_artifacts"))))
+    source_couplings = _source_context_target_artifact_couplings(source_excerpt)
     if explicit:
-        return explicit
+        return tuple(_dedupe_nonempty((*explicit, *source_couplings)))
     if contract_target_artifacts:
-        return contract_target_artifacts
-    return tuple(_dedupe_nonempty(_target_artifacts_from_source_context(source_excerpt)))
+        return tuple(_dedupe_nonempty((*contract_target_artifacts, *source_couplings)))
+    return tuple(_dedupe_nonempty((*_target_artifacts_from_source_context(source_excerpt), *source_couplings)))
+
+
+def _source_context_target_artifact_couplings(value: str) -> tuple[str, ...]:
+    if not _source_context_has_target_scope_coupling_signal(value):
+        return ()
+    targets = list(_target_artifacts_from_source_context(value))
+    if _source_context_needs_cli_parser_help_coupling(value):
+        targets.append("src/mylittleharness/cli_parser.py")
+    return tuple(_dedupe_nonempty(targets))
+
+
+def _source_context_has_target_scope_coupling_signal(value: str) -> bool:
+    text = str(value or "").casefold()
+    return any(
+        marker in text
+        for marker in (
+            "target_artifacts/write_scope omitted",
+            "target_artifacts omitted",
+            "write_scope omitted",
+            "include cli parser/help artifacts",
+            "include cli-parser/help artifacts",
+            "cli parser/help artifacts",
+            "help text coupling",
+            "scope-widening route",
+        )
+    )
+
+
+def _source_context_needs_cli_parser_help_coupling(value: str) -> bool:
+    text = str(value or "").casefold()
+    if not any(marker in text for marker in ("cli_parser.py", "cli parser", "cli-parser", "help text", "help artifacts")):
+        return False
+    return any(marker in text for marker in ("--", "next_state", "next-state", "token migration"))
 
 
 def _target_artifacts_from_source_context(value: str) -> tuple[str, ...]:
@@ -3201,8 +3317,7 @@ def _parse_route_hint_list(value: str) -> tuple[str, ...]:
 def _normalize_route_hint(value: object) -> str:
     route = str(value or "").strip().strip("`\"'")
     route = route.strip()
-    if route.endswith("."):
-        route = route[:-1].rstrip()
+    route = route.rstrip(".,;:")
     return _normalize_rel(route.strip("[] "))
 
 
@@ -3309,6 +3424,18 @@ def _plan_roadmap_findings(plans: tuple[RoadmapPlan, ...], apply: bool) -> list[
         Finding("info", "plan-roadmap-sync", f"{action} roadmap item(s) {list(item_ids)!r} with active plan relationship", target_rel),
         Finding("info", "plan-roadmap-target", f"{prefix}write roadmap sync target: {target_rel}", target_rel),
     ]
+    if len(item_ids) > 1:
+        findings.append(
+            Finding(
+                "info",
+                "plan-roadmap-atomic-marker-sync",
+                (
+                    f"{prefix}sync bundled active related_plan markers for covered roadmap item(s) "
+                    f"{list(item_ids)!r} through one roadmap route write"
+                ),
+                target_rel,
+            )
+        )
     if changed_plans:
         for item_plan in plans:
             findings.extend(

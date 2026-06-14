@@ -306,6 +306,72 @@ def render_sectioned_report(
     return "\n".join(lines)
 
 
+QUICK_ACTIONABLE_FINDING_LIMIT = 30
+QUICK_POSTURE_FINDING_LIMIT = 8
+
+
+def render_quick_check_report(
+    root: Path,
+    result: str,
+    sources: list[str],
+    sections: list[tuple[str, list[Finding]]],
+    suggestions: list[str],
+    *,
+    actionable_limit: int = QUICK_ACTIONABLE_FINDING_LIMIT,
+) -> str:
+    flat_findings = [finding for _section_name, findings in sections for finding in findings]
+    errors = [finding for finding in flat_findings if finding.severity == "error"]
+    warnings = [finding for finding in flat_findings if finding.severity == "warn"]
+    infos = [finding for finding in flat_findings if finding.severity == "info"]
+    actionable = [finding for finding in flat_findings if finding.severity in {"error", "warn"}]
+    posture_findings = [
+        finding
+        for finding in flat_findings
+        if finding.code == "git-status"
+        or "worktree-coordination" in finding.code
+        or finding.code.startswith("route-metadata-changed")
+    ]
+
+    lines: list[str] = ["MyLittleHarness check --quick", ""]
+    lines.extend(["Root", f"- {root}", ""])
+    lines.extend(["Result", f"- status: {result}", ""])
+    lines.extend(_render_work_result_section("check --quick", result, flat_findings, suggestions))
+    lines.append("Quick Summary")
+    lines.append(f"- findings: {len(flat_findings)} total; {len(errors)} error(s); {len(warnings)} warning(s); {len(infos)} info finding(s)")
+    lines.append(f"- sections: {len(sections)} checked")
+    lines.append(f"- source_inventory_hidden: {len(sources)} inventory source(s); rerun without --quick for the full source list")
+    lines.append("")
+
+    lines.append("Dirty Route Summary")
+    if posture_findings:
+        for finding in posture_findings[:QUICK_POSTURE_FINDING_LIMIT]:
+            lines.append(f"- {finding.render()}")
+        remaining = len(posture_findings) - QUICK_POSTURE_FINDING_LIMIT
+        if remaining > 0:
+            lines.append(f"- ... {remaining} more posture finding(s) hidden by --quick")
+    else:
+        lines.append("- [INFO] none: no Git, worktree, or changed-route posture findings")
+    lines.append("")
+
+    lines.append("Actionable Findings")
+    if actionable:
+        for finding in actionable[:actionable_limit]:
+            lines.append(f"- {finding.render()}")
+        remaining = len(actionable) - actionable_limit
+        if remaining > 0:
+            lines.append(f"- ... {remaining} more error/warning finding(s) hidden by --quick")
+    else:
+        lines.append("- [INFO] none: no error or warning findings")
+    lines.append("")
+
+    lines.append("Suggestions")
+    if suggestions:
+        lines.extend(f"- {suggestion}" for suggestion in suggestions)
+    else:
+        lines.append("- No suggestions.")
+    return "\n".join(lines)
+
+
 def render_json_report(
     command: str,
     root: Path,
@@ -614,7 +680,7 @@ def work_result_capsule_from_closeout_values(values: dict[str, str]) -> WorkResu
     if carry := _plain_text(values.get("carry_forward", "")):
         remains.append(carry)
     if next_state := _plain_text(values.get("next_state", "")):
-        remains.append(f"Next/no-next action recorded as {next_state}.")
+        remains.append(f"Next/no-next action recorded as {_closeout_next_state_display(next_state)}.")
     if commit := _plain_text(values.get("commit_decision", "")):
         remains.append(commit)
     if docs_decision == "uncertain":
@@ -635,6 +701,13 @@ def work_result_capsule_from_closeout_values(values: dict[str, str]) -> WorkResu
         checked=verification or "Verification was not recorded in the closeout facts.",
         remains=tuple(remains),
     )
+
+
+def _closeout_next_state_display(value: str) -> str:
+    normalized = " ".join(str(value or "").strip().casefold().split())
+    if normalized == "human-decision-required":
+        return "explicit-decision-required (legacy alias: human-decision-required)"
+    return value
 
 
 def render_work_result_capsule(capsule: WorkResultCapsule) -> list[str]:

@@ -45,13 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--project", help="Project name to use when creating project/project-state.md.")
     check = subparsers.add_parser("check", help="Run read-only status and validation checks without writing files.")
     check_mode = check.add_mutually_exclusive_group()
+    check_mode.add_argument("--quick", action="store_true", help="Render a compact routine check report without the full source inventory.")
     check_mode.add_argument("--deep", action="store_true", help="Include links, context, and hygiene diagnostics in the read-only check report.")
     check_mode.add_argument(
         "--focus",
         choices=("validation", "links", "context", "hygiene", "grain", "archive-context", "route-references", "agents"),
         help="Run one focused read-only diagnostic through check.",
     )
-    check.add_argument("--json", action="store_true", help="Emit a structured JSON report while preserving the default text report.")
+    check.add_argument("--json", action="store_true", help="Emit a structured JSON report.")
     manifest = subparsers.add_parser(
         "manifest",
         help=argparse.SUPPRESS,
@@ -74,6 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.add_argument("--inspect", action="store_true", required=True, help="Inspect dashboard data without writing files or starting a server.")
     dashboard.add_argument("--json", action="store_true", help="Emit the dashboard cockpit payload as structured JSON.")
+    dashboard.add_argument(
+        "--detail",
+        choices=("auto", "degraded", "full"),
+        default="auto",
+        help="Projection detail for dashboard inspect; auto degrades large roots, full opts into complete projection rebuild.",
+    )
     mlhd = subparsers.add_parser(
         "mlhd",
         help=argparse.SUPPRESS,
@@ -518,14 +525,14 @@ def build_parser() -> argparse.ArgumentParser:
     roadmap = subparsers.add_parser(
         "roadmap",
         help=argparse.SUPPRESS,
-        description="Advanced mutating command: add, batch-add, update, or normalize explicit accepted-work roadmap items.",
+        description="Advanced mutating command: add, batch-add, batch-update, update, or normalize explicit accepted-work roadmap items.",
     )
     roadmap.add_argument("operation", nargs="?", choices=("normalize",), help="Run a whole-roadmap housekeeping operation, such as normalize.")
     roadmap_mode = roadmap.add_mutually_exclusive_group(required=True)
     roadmap_mode.add_argument("--dry-run", action="store_true", help="Preview roadmap item changes without writing files.")
     roadmap_mode.add_argument("--apply", action="store_true", help="Write one bounded roadmap change in an eligible live operating root.")
-    roadmap.add_argument("--action", choices=("add", "add-many", "update", "normalize"), help="Roadmap mutation action.")
-    roadmap.add_argument("--items-file", dest="items_file", help="Read add-many roadmap items from a UTF-8 JSON or YAML manifest; use - for stdin.")
+    roadmap.add_argument("--action", choices=("add", "add-many", "update", "update-many", "normalize"), help="Roadmap mutation action.")
+    roadmap.add_argument("--items-file", dest="items_file", help="Read add-many or update-many roadmap items from a UTF-8 JSON or YAML manifest; use - for stdin.")
     roadmap.add_argument("--item-id", help="Stable roadmap item id to add or update.")
     roadmap.add_argument("--title", help="Roadmap item heading. Required for --action add.")
     roadmap.add_argument("--status", help="Roadmap item status.")

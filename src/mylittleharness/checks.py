@@ -22,7 +22,13 @@ from .attachments import attachment_validation_findings
 from .dashboard import connect_readiness_findings, dashboard_check_findings
 from .daemon import mlhd_runtime_findings
 from .approval_packets import APPROVAL_PACKET_SCHEMA, APPROVAL_PACKETS_DIR_REL, APPROVAL_STATUSES
-from .claims import WORK_CLAIM_SCHEMA, WORK_CLAIMS_DIR_REL, WORK_CLAIM_STATUSES
+from .claims import (
+    WORK_CLAIM_COMPLETION_POLICY_AUTHORITY_FIELDS,
+    WORK_CLAIM_COMPLETION_POLICY_SCHEMA,
+    WORK_CLAIM_SCHEMA,
+    WORK_CLAIMS_DIR_REL,
+    WORK_CLAIM_STATUSES,
+)
 from .context_memory import context_memory_capsule_findings
 from .evidence import (
     AGENT_RUNS_DIR_REL,
@@ -69,6 +75,7 @@ from .roadmap import (
     ROADMAP_REL,
     active_plan_roadmap_item_ids,
     roadmap_acceptance_readiness_findings,
+    roadmap_archived_history_stale_tail_findings,
     roadmap_batch_slice_gate_findings,
     roadmap_items_for_diagnostics,
     roadmap_order_namespace_findings,
@@ -125,6 +132,8 @@ from .routes import (
 )
 from .writeback import (
     CLOSEOUT_WRITEBACK_FIELDS,
+    NEXT_STATE_EXPLICIT_DECISION_REQUIRED,
+    NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED,
     STATE_COMPACTION_CHAR_THRESHOLD,
     WRITEBACK_BEGIN,
     WRITEBACK_END,
@@ -602,6 +611,60 @@ def _coordination_work_claim_identity_findings(root: Path, code_prefix: str) -> 
         lease = str(data.get("lease_expires_at") or "").strip()
         if lease and _coordination_parse_utc_timestamp(lease) is None:
             findings.append(Finding("warn", f"{code_prefix}-work-claim-provenance", "work claim lease_expires_at is not a valid UTC timestamp", rel_path))
+        completion_policy = data.get("completion_policy")
+        if isinstance(completion_policy, dict):
+            if completion_policy.get("schema") != WORK_CLAIM_COMPLETION_POLICY_SCHEMA:
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-work-claim-completion-policy-schema",
+                        f"work claim completion_policy schema should be {WORK_CLAIM_COMPLETION_POLICY_SCHEMA}",
+                        rel_path,
+                    )
+                )
+            for field in WORK_CLAIM_COMPLETION_POLICY_AUTHORITY_FIELDS:
+                if _coordination_truthy(completion_policy.get(field)):
+                    findings.append(
+                        Finding(
+                            "warn",
+                            f"{code_prefix}-work-claim-completion-policy-authority",
+                            f"work claim completion_policy {field} must remain false; external completion claims are evidence only",
+                            rel_path,
+                        )
+                    )
+            findings.append(
+                Finding(
+                    "info",
+                    f"{code_prefix}-work-claim-completion-policy",
+                    "work claim completion_policy is repo-visible evidence only and cannot approve lifecycle, roadmap done-state, archive, or Git",
+                    rel_path,
+                )
+            )
+        elif completion_policy not in (None, ""):
+            findings.append(Finding("warn", f"{code_prefix}-work-claim-completion-policy-schema", "work claim completion_policy must be an object when present", rel_path))
+        completion_evidence = data.get("completion_evidence")
+        if isinstance(completion_evidence, dict):
+            findings.extend(
+                _coordination_ref_list_findings(
+                    root,
+                    completion_evidence.get("repo_visible_refs"),
+                    rel_path,
+                    code_prefix,
+                    "work-claim-completion-evidence-ref",
+                    require_existing=False,
+                )
+            )
+            if _coordination_truthy(completion_evidence.get("external_tracker_status_authoritative")):
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-work-claim-completion-policy-authority",
+                        "work claim completion_evidence external_tracker_status_authoritative must remain false",
+                        rel_path,
+                    )
+                )
+        elif completion_evidence not in (None, ""):
+            findings.append(Finding("warn", f"{code_prefix}-work-claim-completion-policy-schema", "work claim completion_evidence must be an object when present", rel_path))
     return findings
 
 
@@ -864,6 +927,16 @@ def _coordination_string_list(value: object) -> tuple[str, ...]:
     if isinstance(value, str) and value.strip():
         return (value.strip(),)
     return ()
+
+
+def _coordination_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, list):
+        return any(_coordination_truthy(item) for item in value)
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "required", "enabled", "on"}
 
 
 def _coordination_normalize_ref(value: str) -> str:
@@ -1258,6 +1331,26 @@ ROUTE_REFERENCE_OPTIONAL_EVIDENCE_ROUTES = {
     "project/verification/approval-packets",
     "project/verification/work-claims",
 }
+PRODUCT_DOC_EVIDENCE_POSTURE_PATH_MARKERS = (
+    "verification",
+    "verified",
+    "evidence",
+    "runbook",
+    "smoke",
+    "handoff",
+    "approval",
+    "audit",
+)
+PRODUCT_DOC_EVIDENCE_POSTURE_TEXT_MARKERS = (
+    "verification",
+    "verification evidence",
+    "evidence",
+    "runbook",
+    "smoke check",
+    "handoff",
+    "approval",
+    "audit",
+)
 ROUTE_REFERENCE_SAMPLE_LIMIT = 12
 ARCHIVE_CONTEXT_RECONSTRUCTED_MARKERS = (
     "reconstructed",
@@ -1899,6 +1992,7 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_nonroute_project_markdown_findings(inventory))
     findings.extend(roadmap_order_namespace_findings(inventory))
     findings.extend(roadmap_terminal_related_plan_findings(inventory))
+    findings.extend(roadmap_archived_history_stale_tail_findings(inventory))
     findings.extend(roadmap_source_incubation_evidence_findings(inventory))
     findings.extend(roadmap_related_specs_evidence_findings(inventory))
     findings.extend(roadmap_human_review_gate_findings(inventory))
@@ -2451,7 +2545,7 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
             "projection-cache-posture",
             (
                 f"structured cache posture: artifacts={artifact_status}; sqlite_index={index_status}; "
-                f"stale_reason={reason}; refresh_by_adapter=false; next_safe={refresh_commands}"
+                f"detail={reason}; refresh_by_adapter=false; next_safe={refresh_commands}"
             ),
             ARTIFACT_DIR_REL,
         ),
@@ -2848,29 +2942,69 @@ def intelligence_sections(
     full_text: str | None = None,
     limit: int = 10,
     query_text: str | None = None,
+    *,
+    focus: str | None = None,
 ) -> list[tuple[str, list[Finding]]]:
+    stage_full_text = _stage_unified_query_full_text(inventory, focus, full_text, query_text)
     search_text, path_text, full_text, query_expansion = _expanded_intelligence_queries(
         search_text,
         path_text,
         full_text,
         query_text,
+        stage_full_text=stage_full_text,
     )
-    projection = build_projection(inventory)
-    sections = [
-        ("Boundary", _intelligence_boundary_findings(inventory, search_text, path_text, full_text)),
-        ("Drift", diagnostic_drift_findings(inventory)),
-        ("Recovery Routes", deep_research_rubric_recovery_findings(inventory, include_present=True)),
-        ("Repo Map", _repo_map_findings(projection)),
-        ("Backlinks", _backlink_findings(projection.links)),
-        ("Search", _search_findings(inventory, projection, search_text, path_text, full_text, limit, query_expansion)),
-        ("Fan-In", _fan_in_findings(inventory, projection)),
-        ("Projection", _projection_findings(inventory, projection)),
-    ]
+    if focus == "search":
+        if full_text is None:
+            sections = [("Search", _search_findings_from_inventory(inventory, search_text, path_text, query_expansion))]
+        else:
+            projection = build_projection(inventory)
+            sections = [("Search", _search_findings(inventory, projection, search_text, path_text, full_text, limit, query_expansion))]
+    else:
+        projection = build_projection(inventory)
+        if focus == "projection":
+            sections = [
+                ("Boundary", _intelligence_boundary_findings(inventory, search_text, path_text, full_text)),
+                ("Projection", _projection_findings(inventory, projection)),
+            ]
+        elif focus == "warnings":
+            sections = [
+                ("Drift", diagnostic_drift_findings(inventory)),
+                ("Recovery Routes", deep_research_rubric_recovery_findings(inventory, include_present=True)),
+                ("Repo Map", _repo_map_findings(projection)),
+                ("Backlinks", _backlink_findings(projection.links)),
+                ("Fan-In", _fan_in_findings(inventory, projection)),
+                ("Projection", _projection_findings(inventory, projection)),
+            ]
+            if search_text is not None or path_text is not None or full_text is not None or query_expansion is not None:
+                sections.append(("Search", _search_findings(inventory, projection, search_text, path_text, full_text, limit, query_expansion)))
+        else:
+            sections = [
+                ("Boundary", _intelligence_boundary_findings(inventory, search_text, path_text, full_text)),
+                ("Drift", diagnostic_drift_findings(inventory)),
+                ("Recovery Routes", deep_research_rubric_recovery_findings(inventory, include_present=True)),
+                ("Repo Map", _repo_map_findings(projection)),
+                ("Backlinks", _backlink_findings(projection.links)),
+                ("Search", _search_findings(inventory, projection, search_text, path_text, full_text, limit, query_expansion)),
+                ("Fan-In", _fan_in_findings(inventory, projection)),
+                ("Projection", _projection_findings(inventory, projection)),
+            ]
     normalized_sections = [
         (section_name, [_normalize_intelligence_finding(inventory, finding) for finding in findings])
         for section_name, findings in sections
     ]
     return [("Summary", _intelligence_summary_findings(inventory, normalized_sections, search_text, path_text, full_text))] + normalized_sections
+
+
+def _stage_unified_query_full_text(inventory: Inventory, focus: str | None, full_text: str | None, query_text: str | None) -> bool:
+    if query_text in (None, "") or full_text not in (None, ""):
+        return False
+    return _intelligence_query_corpus_is_large(inventory)
+
+
+def _intelligence_query_corpus_is_large(inventory: Inventory) -> bool:
+    total_lines = sum(surface.line_count for surface in inventory.present_surfaces)
+    total_chars = sum(surface.char_count for surface in inventory.present_surfaces)
+    return total_lines > LARGE_AGGREGATE_LINES or total_chars > LARGE_AGGREGATE_CHARS
 
 
 def intelligence_route_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -2910,11 +3044,14 @@ def _expanded_intelligence_queries(
     path_text: str | None,
     full_text: str | None,
     query_text: str | None,
+    *,
+    stage_full_text: bool = False,
 ) -> tuple[str | None, str | None, str | None, Finding | None]:
     if query_text in (None, ""):
         return search_text, path_text, full_text, None
 
     filled: list[str] = []
+    staged: list[str] = []
     if search_text is None:
         search_text = query_text
         filled.append("exact text")
@@ -2922,10 +3059,14 @@ def _expanded_intelligence_queries(
         path_text = query_text
         filled.append("path")
     if full_text is None:
-        full_text = query_text
-        filled.append("full text")
+        if stage_full_text:
+            staged.append("full text")
+        else:
+            full_text = query_text
+            filled.append("full text")
 
     filled_label = ", ".join(filled) if filled else "none"
+    staged_label = f"; staged modes: {', '.join(staged)} (use --full-text TEXT to include them)" if staged else ""
     return (
         search_text,
         path_text,
@@ -2933,7 +3074,7 @@ def _expanded_intelligence_queries(
         Finding(
             "info",
             "intelligence-query-expansion",
-            f"unified query expanded into omitted modes: {filled_label}; explicit mode flags keep their own values",
+            f"unified query expanded into omitted modes: {filled_label}{staged_label}; explicit mode flags keep their own values",
         ),
     )
 
@@ -3267,6 +3408,86 @@ def _search_findings(
     if not findings:
         if search_text is None and path_text is None:
             return notes
+        return notes + [Finding("info", "search-no-matches", "no case-sensitive inventory matches found")]
+    if truncated:
+        findings.append(Finding("info", "search-truncated", f"showing first {SEARCH_RESULT_LIMIT} deterministic matches"))
+    return notes + findings
+
+
+def _search_findings_from_inventory(
+    inventory: Inventory,
+    search_text: str | None,
+    path_text: str | None,
+    query_expansion: Finding | None = None,
+) -> list[Finding]:
+    if search_text == "":
+        search_text = None
+    if path_text == "":
+        path_text = None
+    if search_text is None and path_text is None:
+        return [Finding("info", "search-ready", "no query provided; use --query TEXT, --search TEXT, --path TEXT, and/or --full-text TEXT for inventory search")]
+
+    notes: list[Finding] = []
+    if query_expansion is not None:
+        notes.append(query_expansion)
+    if search_text:
+        notes.append(
+            Finding(
+                "info",
+                "projection-exact-search-source-only",
+                "exact text search reads direct source content through the in-memory inventory; projection artifacts do not store source bodies",
+            )
+        )
+
+    findings: list[Finding] = []
+    truncated = False
+
+    def add(finding: Finding) -> None:
+        nonlocal truncated
+        if len(findings) >= SEARCH_RESULT_LIMIT:
+            truncated = True
+            return
+        findings.append(finding)
+
+    if path_text:
+        for surface in inventory.surfaces:
+            if path_text in surface.rel_path:
+                add(
+                    Finding(
+                        "info",
+                        "search-path-match",
+                        f"path match for {path_text!r}: inventory source {surface.rel_path}",
+                        surface.rel_path,
+                    )
+                )
+        for surface in inventory.present_surfaces:
+            for link in surface.links:
+                if path_text in link.target:
+                    add(
+                        Finding(
+                            "info",
+                            "search-path-reference",
+                            f"path reference match for {path_text!r}: {link.target}; status=source-only",
+                            link.source,
+                            link.line,
+                        )
+                    )
+
+    if search_text:
+        for surface in inventory.present_surfaces:
+            for line_number, line in enumerate(surface.content.splitlines(), start=1):
+                if search_text in line:
+                    add(
+                        Finding(
+                            "info",
+                            "search-match",
+                            f"text match for {search_text!r}: {_trim_line(line)}",
+                            surface.rel_path,
+                            line_number,
+                        )
+                    )
+
+    if not findings:
         return notes + [Finding("info", "search-no-matches", "no case-sensitive inventory matches found")]
     if truncated:
         findings.append(Finding("info", "search-truncated", f"showing first {SEARCH_RESULT_LIMIT} deterministic matches"))
@@ -9622,7 +9843,8 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             findings.extend(_active_plan_generated_shape_findings(plan))
             findings.extend(_active_plan_verification_gate_findings(inventory, plan, data))
             findings.extend(_active_plan_execution_policy_findings(plan, data))
-            findings.extend(_active_plan_docs_decision_findings(plan, data))
+            findings.extend(_active_plan_completion_policy_findings(inventory, plan, data))
+            findings.extend(_active_plan_docs_decision_findings(inventory, plan, data))
             findings.extend(_active_plan_writeback_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_phase_evidence_findings(inventory, data))
@@ -9841,7 +10063,7 @@ def _active_plan_verification_gate_findings(
     plan: Surface,
     state_data: dict[str, object],
 ) -> list[Finding]:
-    lines = _active_plan_verification_gate_lines(plan)
+    lines = _active_plan_verification_gate_lines(plan, state_data)
     target_artifacts = _contract_list(plan.frontmatter.data.get("target_artifacts") if plan.frontmatter.has_frontmatter else None)
     target_root = _active_plan_target_root(inventory)
     declared_write_scope = [text for text, _line in _plan_contract_lines(plan, "write_scope", "write scope")]
@@ -9919,13 +10141,15 @@ def _active_plan_has_generated_verification_contract(plan: Surface, target_artif
     return bool(data.get("plan_id") or data.get("execution_slice") or data.get("primary_roadmap_item") or target_artifacts)
 
 
-def _active_plan_verification_gate_lines(plan: Surface) -> list[tuple[str, int]]:
-    lines: list[tuple[str, int]] = []
-    for index, line in enumerate(plan.content.splitlines(), start=1):
-        match = re.match(r"^\s*[-*]\s*verification_gates\s*:\s*(.*?)\s*$", line)
-        if match:
-            lines.append((_contract_text(match.group(1)), index))
-    return lines
+def _active_plan_verification_gate_lines(plan: Surface, state_data: dict[str, object]) -> list[tuple[str, int]]:
+    active_phase = _contract_text(
+        state_data.get("active_phase") or (plan.frontmatter.data.get("active_phase") if plan.frontmatter.has_frontmatter else "")
+    )
+    if active_phase:
+        lines = _active_phase_contract_lines(plan, active_phase, "verification_gates", "verification gates")
+        if lines:
+            return lines
+    return _plan_contract_lines(plan, "verification_gates", "verification gates")
 
 
 def _verification_gate_is_unresolved(text: str) -> bool:
@@ -10423,7 +10647,22 @@ def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, s
                 )
             )
 
-    closeout_values = {field: fact.value for field, fact in state_writeback_facts(inventory.state).items()}
+    closeout_facts = state_writeback_facts(inventory.state)
+    closeout_values = {field: fact.value for field, fact in closeout_facts.items()}
+    next_state_fact = closeout_facts.get("next_state")
+    if next_state_fact and _contract_text(next_state_fact.value).casefold() == NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED:
+        findings.append(
+            Finding(
+                "warn",
+                "active-plan-next-state-legacy-alias",
+                (
+                    f"project-state closeout next_state uses legacy {NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED}; "
+                    f"rerun writeback with {NEXT_STATE_EXPLICIT_DECISION_REQUIRED} before removing alias compatibility"
+                ),
+                next_state_fact.source,
+                next_state_fact.line,
+            )
+        )
     if (
         state_data.get("plan_status") == "active"
         and phase_status == "complete"
@@ -10448,7 +10687,7 @@ def _phase_label_matches_active_phase(phase: str, active_phase: str) -> bool:
     return _contract_text(phase).casefold() == _contract_text(active_phase).casefold()
 
 
-def _active_plan_docs_decision_findings(plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+def _active_plan_docs_decision_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
     if not plan.frontmatter.has_frontmatter or "docs_decision" not in plan.frontmatter.data:
         return []
     value = str(plan.frontmatter.data.get("docs_decision") or "")
@@ -10462,15 +10701,132 @@ def _active_plan_docs_decision_findings(plan: Surface, state_data: dict[str, obj
             )
         ]
     if value == "uncertain" and str(state_data.get("phase_status") or "") == "complete":
+        next_phase = _active_plan_next_phase_id(plan, str(state_data.get("active_phase") or ""))
+        if next_phase and _active_plan_has_current_phase_evidence(inventory):
+            return [
+                Finding(
+                    "info",
+                    "active-plan-docs-decision-provisional-phase-handoff",
+                    (
+                        "active plan frontmatter docs_decision is uncertain while phase_status is complete, "
+                        "but current-plan phase evidence is present; this is a phase-ready provisional handoff, "
+                        "not confident final closeout. next_safe_command=mylittleharness --root <root> "
+                        f"writeback --dry-run --active-phase {next_phase} --phase-status pending --docs-decision uncertain. "
+                        "Final closeout/archive still requires docs_decision updated/not-needed and an explicit "
+                        "writeback/archive route"
+                    ),
+                    plan.rel_path,
+                )
+            ]
         return [
             Finding(
                 "warn",
                 "active-plan-docs-decision-uncertain",
-                "active plan frontmatter docs_decision is uncertain while phase_status is complete; record updated/not-needed or keep closeout language provisional; next_safe_command=mylittleharness --root <root> suggest --intent \"docs decision closeout\"",
+                "active plan frontmatter docs_decision is uncertain while phase_status is complete without a next-phase provisional evidence posture; record updated/not-needed for final closeout or keep closeout language provisional; next_safe_command=mylittleharness --root <root> suggest --intent \"docs decision closeout\"",
                 plan.rel_path,
             )
         ]
     return []
+
+
+def _active_plan_completion_policy_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+    if not plan.frontmatter.has_frontmatter:
+        return []
+    completion_policy = _contract_text(plan.frontmatter.data.get("completion_policy") or "").casefold()
+    if completion_policy != "through-closeout":
+        return []
+    if str(state_data.get("plan_status") or "") != "active":
+        return []
+    if str(state_data.get("phase_status") or "") != "complete":
+        return []
+    active_phase = str(state_data.get("active_phase") or "")
+    next_phase = _active_plan_next_phase_id(plan, active_phase)
+    if not next_phase:
+        return []
+    docs_decision = str(plan.frontmatter.data.get("docs_decision") or "").strip()
+    docs_arg = f" --docs-decision {docs_decision}" if docs_decision in DOCS_DECISION_VALUES else ""
+    command = (
+        "mylittleharness --root <root> writeback --dry-run "
+        f"--active-phase {next_phase} --phase-status pending{docs_arg}"
+    )
+    if _active_plan_has_current_phase_evidence(inventory):
+        return [
+            Finding(
+                "info",
+                "active-plan-through-closeout-pending-phases",
+                (
+                    "active plan completion_policy=through-closeout and current phase_status is complete, "
+                    f"but pending successor phase {next_phase!r} remains; the plan is not done. "
+                    f"next_safe_command={command}; this previews phase advancement only and does not approve "
+                    "auto_continue, closeout, archive, roadmap done-status, next-plan opening, staging, or commit"
+                ),
+                plan.rel_path,
+            )
+        ]
+    return [
+        Finding(
+            "warn",
+            "active-plan-through-closeout-pending-evidence",
+            (
+                "active plan completion_policy=through-closeout and current phase_status is complete, "
+                f"but pending successor phase {next_phase!r} remains without complete repo-visible phase evidence; "
+                "record docs_decision, state_writeback, verification, and work_result before continuing. "
+                f"After evidence review, next_safe_command={command}"
+            ),
+            plan.rel_path,
+        )
+    ]
+
+
+def _active_plan_has_current_phase_evidence(inventory: Inventory) -> bool:
+    facts = state_writeback_facts(inventory.state)
+    if not facts or not state_writeback_identity_matches_current_plan(inventory):
+        return False
+    values = {field: fact.value for field, fact in facts.items()}
+    return not _missing_phase_evidence_fields(values)
+
+
+def _active_plan_next_phase_id(plan: Surface, active_phase: str) -> str:
+    active_normalized = _contract_text(active_phase).casefold()
+    if not active_normalized:
+        return ""
+    phase_ids = _active_plan_ordered_phase_ids(plan)
+    for index, phase_id in enumerate(phase_ids):
+        if _contract_text(phase_id).casefold() == active_normalized:
+            if index + 1 < len(phase_ids):
+                return phase_ids[index + 1]
+            return ""
+    return ""
+
+
+def _active_plan_ordered_phase_ids(plan: Surface) -> list[str]:
+    lines = plan.content.splitlines()
+    in_phases = False
+    phase_ids: list[str] = []
+    current_heading = ""
+    for line in lines:
+        if line.startswith("## "):
+            in_phases = _contract_text(line.lstrip("# ")).casefold() == "phases"
+            current_heading = ""
+            continue
+        if not in_phases:
+            continue
+        heading_match = re.match(r"^###\s+(.+?)\s*$", line)
+        if heading_match:
+            current_heading = _contract_text(heading_match.group(1))
+            if current_heading and current_heading not in phase_ids:
+                phase_ids.append(current_heading)
+            continue
+        id_match = re.match(r"^-\s*id:\s*`?([^`\n]+?)`?\s*$", line)
+        if id_match:
+            phase_id = _contract_text(id_match.group(1))
+            if not phase_id:
+                continue
+            if current_heading and phase_ids and phase_ids[-1] == current_heading:
+                phase_ids[-1] = phase_id
+            elif phase_id not in phase_ids:
+                phase_ids.append(phase_id)
+    return phase_ids
 
 
 def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
@@ -12564,27 +12920,30 @@ def _route_metadata_path_values(surface: Surface, key: str, value: object) -> tu
             return [], [_route_metadata_non_path_value_finding(surface, key, value, line)]
         return [normalized], []
 
-    if isinstance(value, list) and value and all(isinstance(item, str) and item.strip() for item in value):
-        paths: list[str] = []
-        non_path_values: list[str] = []
-        for item in value:
-            normalized = _normalize_route_metadata_path(item)
-            if _route_metadata_value_is_path_like(normalized):
-                paths.append(normalized)
-            else:
-                non_path_values.append(item)
-        if non_path_values:
-            sample = ", ".join(repr(item) for item in non_path_values[:3])
-            return paths, [
-                Finding(
-                    "warn",
-                    "route-metadata-field",
-                    f"{surface.rel_path} {key} contains non-path route metadata value(s): {sample}",
-                    surface.rel_path,
-                    line,
-                )
-            ]
-        return paths, []
+    if isinstance(value, list):
+        if not value:
+            return [], []
+        if all(isinstance(item, str) and item.strip() for item in value):
+            paths: list[str] = []
+            non_path_values: list[str] = []
+            for item in value:
+                normalized = _normalize_route_metadata_path(item)
+                if _route_metadata_value_is_path_like(normalized):
+                    paths.append(normalized)
+                else:
+                    non_path_values.append(item)
+            if non_path_values:
+                sample = ", ".join(repr(item) for item in non_path_values[:3])
+                return paths, [
+                    Finding(
+                        "warn",
+                        "route-metadata-field",
+                        f"{surface.rel_path} {key} contains non-path route metadata value(s): {sample}",
+                        surface.rel_path,
+                        line,
+                    )
+                ]
+            return paths, []
 
     return [], [
         Finding(
@@ -12833,6 +13192,22 @@ def _product_doc_frontmatter_audit_findings(inventory: Inventory) -> list[Findin
                 route_id=surface.memory_route,
             )
         )
+        posture_reason = _product_doc_evidence_posture_reason(surface)
+        if posture_reason:
+            findings.append(
+                Finding(
+                    "warn",
+                    "product-doc-evidence-posture",
+                    (
+                        f"{surface.rel_path} product doc has no frontmatter and {posture_reason} looks like "
+                        "durable verification/evidence; keep it as product documentation with explicit "
+                        "product-doc posture metadata, or move durable evidence under project/verification/*.md; "
+                        "advisory only, no automatic rewrite or route move"
+                    ),
+                    surface.rel_path,
+                    route_id=surface.memory_route,
+                )
+            )
     if findings:
         findings.append(
             Finding(
@@ -12842,6 +13217,16 @@ def _product_doc_frontmatter_audit_findings(inventory: Inventory) -> list[Findin
             )
         )
     return findings
+
+
+def _product_doc_evidence_posture_reason(surface: Surface) -> str:
+    rel_text = surface.rel_path.casefold()
+    if any(marker in rel_text for marker in PRODUCT_DOC_EVIDENCE_POSTURE_PATH_MARKERS):
+        return "its path"
+    content_sample = surface.content[:5000].casefold()
+    if any(marker in content_sample for marker in PRODUCT_DOC_EVIDENCE_POSTURE_TEXT_MARKERS):
+        return "its content"
+    return ""
 
 
 def _docmap_gap_findings(inventory: Inventory) -> list[Finding]:
@@ -12997,14 +13382,16 @@ def _git_findings(root: Path) -> list[Finding]:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [Finding("warn", "git-status", f"git status unavailable: {exc}")]
     if result.returncode == 0:
-        state = "clean" if not result.stdout.strip() else "dirty"
+        state = "clean" if not (result.stdout or "").strip() else "dirty"
         return [Finding("info", "git-status", f"git worktree detected: {state}")]
-    message = (result.stderr or result.stdout).strip().splitlines()
+    message = (result.stderr or result.stdout or "").strip().splitlines()
     detail = message[0] if message else f"git exited {result.returncode}"
     return [Finding("info", "git-status", f"not a git worktree: {detail}")]
 

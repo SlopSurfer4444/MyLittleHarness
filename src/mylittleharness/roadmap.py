@@ -295,6 +295,14 @@ class RoadmapItem:
 
 
 @dataclass(frozen=True)
+class ArchivedHistoryEntry:
+    item_id: str
+    archived_plan: str
+    bh_ids: str
+    line_index: int
+
+
+@dataclass(frozen=True)
 class RoadmapPlan:
     action: str
     item_id: str
@@ -311,6 +319,7 @@ class RoadmapPlan:
     related_incubation_source: str = ""
     related_incubation_reason: str = ""
     replayed_item_ids: tuple[str, ...] = ()
+    stale_archived_history_item_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -421,7 +430,15 @@ def make_roadmap_request(
     )
 
 
-def roadmap_batch_requests_from_manifest(manifest_text: str, source_label: str) -> tuple[tuple[RoadmapRequest, ...], list[Finding]]:
+def roadmap_batch_requests_from_manifest(
+    manifest_text: str,
+    source_label: str,
+    *,
+    action: str = "add-many",
+) -> tuple[tuple[RoadmapRequest, ...], list[Finding]]:
+    item_action, action_errors = _batch_item_action(action, source_label)
+    if action_errors:
+        return (), action_errors
     manifest, errors = _load_roadmap_batch_manifest(manifest_text, source_label)
     if errors:
         return (), errors
@@ -445,7 +462,7 @@ def roadmap_batch_requests_from_manifest(manifest_text: str, source_label: str) 
     requests: list[RoadmapRequest] = []
     errors = []
     for index, item in enumerate(items, start=1):
-        request, item_errors = _roadmap_request_from_batch_item(item, index, source_label)
+        request, item_errors = _roadmap_request_from_batch_item(item, index, source_label, item_action=item_action)
         errors.extend(item_errors)
         if request is not None:
             requests.append(request)
@@ -453,6 +470,15 @@ def roadmap_batch_requests_from_manifest(manifest_text: str, source_label: str) 
     if errors:
         return (), errors
     return tuple(requests), []
+
+
+def _batch_item_action(action: str, source_label: str) -> tuple[str, list[Finding]]:
+    normalized = str(action or "").strip().casefold().replace("_", "-")
+    if normalized == "add-many":
+        return "add", []
+    if normalized == "update-many":
+        return "update", []
+    return "", [Finding("error", "roadmap-batch-refused", "--action must be add-many or update-many for roadmap batch manifests", source_label)]
 
 
 def _load_roadmap_batch_manifest(manifest_text: str, source_label: str) -> tuple[object | None, list[Finding]]:
@@ -640,7 +666,13 @@ def _parse_simple_yaml_scalar(text: str, source_label: str) -> tuple[object, Fin
     return text, None
 
 
-def _roadmap_request_from_batch_item(item: object, index: int, source_label: str) -> tuple[RoadmapRequest | None, list[Finding]]:
+def _roadmap_request_from_batch_item(
+    item: object,
+    index: int,
+    source_label: str,
+    *,
+    item_action: str,
+) -> tuple[RoadmapRequest | None, list[Finding]]:
     if not isinstance(item, dict):
         return None, [Finding("error", "roadmap-batch-refused", f"items[{index}] must be an object", source_label)]
     normalized: dict[str, object] = {}
@@ -663,9 +695,9 @@ def _roadmap_request_from_batch_item(item: object, index: int, source_label: str
     alias_errors = _batch_alias_collision_errors(normalized, index, source_label)
     if alias_errors:
         return None, alias_errors
-    action = _batch_scalar(normalized.pop("action", "add"))
-    if action and str(action).strip().casefold().replace("_", "-") != "add":
-        return None, [Finding("error", "roadmap-batch-refused", f"items[{index}].action must be 'add' for add-many", source_label)]
+    action = _batch_scalar(normalized.pop("action", item_action))
+    if action and str(action).strip().casefold().replace("_", "-") != item_action:
+        return None, [Finding("error", "roadmap-batch-refused", f"items[{index}].action must be {item_action!r} for {item_action}-many", source_label)]
 
     custom_fields = _batch_custom_fields(normalized.pop("fields", ()), index, source_label)
     custom_field_values, custom_field_errors = _batch_custom_field_values(normalized.pop("custom_fields", ()), index, source_label)
@@ -704,7 +736,8 @@ def _roadmap_request_from_batch_item(item: object, index: int, source_label: str
         "superseded_by": _batch_list(normalized.pop("superseded_by", ())),
         "source_members": _batch_list(normalized.pop("source_members", normalized.pop("source_member", ()))),
     }
-    if "clear_fields" in normalized or "clear_field" in normalized:
+    clear_fields = _batch_list(normalized.pop("clear_fields", normalized.pop("clear_field", ())))
+    if item_action == "add" and clear_fields:
         return None, [Finding("error", "roadmap-batch-refused", f"items[{index}] cannot use clear_fields with add-many", source_label)]
     if normalized:
         unknown = ", ".join(sorted(normalized))
@@ -715,7 +748,7 @@ def _roadmap_request_from_batch_item(item: object, index: int, source_label: str
         return None, [order_error]
     return (
         make_roadmap_request(
-            action="add",
+            action=item_action,
             item_id=_batch_scalar(item_id),
             title=_batch_scalar(values["title"]),
             status=_batch_scalar(values["status"]),
@@ -739,6 +772,7 @@ def _roadmap_request_from_batch_item(item: object, index: int, source_label: str
             supersedes=list_values["supersedes"],
             superseded_by=list_values["superseded_by"],
             source_members=list_values["source_members"],
+            clear_fields=clear_fields,
             custom_fields=custom_fields,
         ),
         [],
@@ -863,15 +897,21 @@ def roadmap_plans_for_requests(
     return batch_plan.plans, []
 
 
-def roadmap_batch_dry_run_findings(inventory: Inventory, manifest_text: str, source_label: str) -> list[Finding]:
+def roadmap_batch_dry_run_findings(
+    inventory: Inventory,
+    manifest_text: str,
+    source_label: str,
+    *,
+    action: str = "add-many",
+) -> list[Finding]:
     findings = [
         Finding("info", "roadmap-batch-dry-run", "roadmap batch proposal only; no files were written"),
         _root_posture_finding(inventory),
         Finding("info", "roadmap-target", f"would target roadmap: {ROADMAP_REL}", ROADMAP_REL),
-        Finding("info", "roadmap-action", "requested action: add-many", ROADMAP_REL),
+        Finding("info", "roadmap-action", f"requested action: {action}", ROADMAP_REL),
         Finding("info", "roadmap-batch-source", f"would read roadmap batch manifest: {source_label}", ROADMAP_REL),
     ]
-    requests, manifest_errors = roadmap_batch_requests_from_manifest(manifest_text, source_label)
+    requests, manifest_errors = roadmap_batch_requests_from_manifest(manifest_text, source_label, action=action)
     if manifest_errors:
         findings.extend(_with_severity(manifest_errors, "warn"))
         findings.append(
@@ -919,9 +959,10 @@ def roadmap_batch_apply_findings(
     manifest_text: str,
     source_label: str,
     *,
+    action: str = "add-many",
     allowed_missing_paths: set[str] | None = None,
 ) -> list[Finding]:
-    requests, manifest_errors = roadmap_batch_requests_from_manifest(manifest_text, source_label)
+    requests, manifest_errors = roadmap_batch_requests_from_manifest(manifest_text, source_label, action=action)
     if manifest_errors:
         return manifest_errors
 
@@ -1229,7 +1270,83 @@ def roadmap_items_for_diagnostics(inventory: Inventory) -> tuple[dict[str, Roadm
     if parse_result[1]:
         return {}, parse_result[1]
     _items_start, _items_end, items = parse_result[0]
-    return dict(items), []
+    diagnostic_items = dict(items)
+    diagnostic_items.update(_compacted_history_items_for_diagnostics(text, diagnostic_items))
+    return diagnostic_items, []
+
+
+def _compacted_history_items_for_diagnostics(text: str, live_items: dict[str, RoadmapItem]) -> dict[str, RoadmapItem]:
+    items: dict[str, RoadmapItem] = {}
+    for entry in _compacted_history_entries(text):
+        if entry.item_id in live_items:
+            continue
+        fields: dict[str, object] = {
+            "id": entry.item_id,
+            "status": "done",
+            "related_plan": entry.archived_plan,
+            "archived_plan": entry.archived_plan,
+        }
+        if entry.bh_ids:
+            fields["bh_ids"] = entry.bh_ids
+        items[entry.item_id] = RoadmapItem(
+            title=_title_from_item_id(entry.item_id),
+            fields=fields,
+            start=entry.line_index,
+            end=entry.line_index + 1,
+            style="compacted-history",
+        )
+    return items
+
+
+def roadmap_archived_history_stale_tail_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+
+    findings: list[Finding] = []
+    for entry in _stale_archived_history_entries(text, items):
+        live_item = items[entry.item_id]
+        live_status = _normalized_status(live_item.fields.get("status")) or "<empty>"
+        live_archived_plan = _normalize_rel(_field_scalar(live_item.fields, "archived_plan")) or "<empty>"
+        findings.append(
+            Finding(
+                "warn",
+                "roadmap-archived-history-stale-tail",
+                (
+                    f"Archived Completed History entry for roadmap item {entry.item_id!r} points at "
+                    f"{entry.archived_plan!r}, but a live roadmap block still exists "
+                    f"(status={live_status}, archived_plan={live_archived_plan}); run "
+                    "`mylittleharness --root <root> roadmap normalize --dry-run` to review stale-history cleanup"
+                ),
+                ROADMAP_REL,
+                entry.line_index + 1,
+            )
+        )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-archived-history-boundary",
+                (
+                    "Archived Completed History diagnostics are route hygiene only; they cannot recreate archives, "
+                    "move lifecycle state, promote roadmap items, stage, commit, or push"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    return findings
 
 
 def roadmap_source_incubation_consumers(
@@ -1806,8 +1923,10 @@ def roadmap_terminal_related_plan_findings(inventory: Inventory) -> list[Finding
     if parse_result[1]:
         return []
     _items_start, _items_end, items = parse_result[0]
-    active_ids = set(active_plan_roadmap_item_ids(inventory))
+    active_item_ids = active_plan_roadmap_item_ids(inventory)
+    active_ids = set(active_item_ids)
     findings: list[Finding] = []
+    findings.extend(_active_plan_related_plan_marker_drift_findings(items, active_item_ids))
     for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
         if not _terminal_stale_active_plan_item(item_id, item, active_ids):
             continue
@@ -1827,6 +1946,56 @@ def roadmap_terminal_related_plan_findings(inventory: Inventory) -> list[Finding
             )
         )
     return findings
+
+
+def _active_plan_related_plan_marker_drift_findings(
+    items: dict[str, RoadmapItem],
+    active_item_ids: tuple[str, ...],
+) -> list[Finding]:
+    if len(active_item_ids) <= 1:
+        return []
+
+    missing: list[tuple[str, RoadmapItem, str]] = []
+    for item_id in active_item_ids:
+        item = items.get(item_id)
+        if item is None:
+            continue
+        status = _normalized_status(item.fields.get("status"))
+        if status in TERMINAL_QUEUE_STATUSES:
+            continue
+        related_plan = _normalize_rel(_field_scalar(item.fields, "related_plan"))
+        if related_plan != DEFAULT_PLAN_REL:
+            missing.append((item_id, item, related_plan or "<empty>"))
+
+    if not missing:
+        return []
+
+    primary = safe_item_id(active_item_ids[0], placeholder="<item-id>")
+    details = ", ".join(f"{item_id} (related_plan={related_plan})" for item_id, _item, related_plan in missing)
+    next_safe = f"mylittleharness --root <root> plan --dry-run --update-active --roadmap-item {primary}"
+    first_item = missing[0][1]
+    return [
+        Finding(
+            "warn",
+            "roadmap-bundled-related-plan-marker-drift",
+            (
+                "active plan covers multiple roadmap items but active related_plan markers are incomplete: "
+                f"{details}; next_safe_command={next_safe}; use --only-requested-item only if the partial "
+                "coverage was an intentional split"
+            ),
+            ROADMAP_REL,
+            first_item.start + 1,
+        ),
+        Finding(
+            "info",
+            "roadmap-bundled-related-plan-marker-boundary",
+            (
+                "bundled related_plan marker diagnostics report roadmap relationship drift only; they cannot "
+                "approve lifecycle movement, closeout, archive, staging, commit, or rollback"
+            ),
+            ROADMAP_REL,
+        ),
+    ]
 
 
 def roadmap_order_namespace_findings(inventory: Inventory) -> list[Finding]:
@@ -2273,7 +2442,7 @@ def _roadmap_normalize_plan_from_text(
         changed_fields = (*changed_fields, FUTURE_QUEUE_FIELD)
         updated_text = refreshed_text
 
-    refreshed_text, compacted_item_ids = _refresh_archived_completed_history(updated_text)
+    refreshed_text, compacted_item_ids, stale_archived_history_item_ids = _refresh_archived_completed_history(updated_text)
     if refreshed_text != updated_text:
         changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
         updated_text = refreshed_text
@@ -2305,6 +2474,7 @@ def _roadmap_normalize_plan_from_text(
             reordered_item_ids=reordered_item_ids,
             compacted_item_ids=compacted_item_ids,
             retargeted_terminal_item_ids=retargeted_terminal_item_ids,
+            stale_archived_history_item_ids=stale_archived_history_item_ids,
             current_text=text,
             updated_text=updated_text,
         ),
@@ -2562,7 +2732,7 @@ def _roadmap_plan_from_text(
         changed_fields = (*changed_fields, FUTURE_QUEUE_FIELD)
         updated_text = refreshed_text
 
-    refreshed_text, compacted_item_ids = _refresh_archived_completed_history(updated_text)
+    refreshed_text, compacted_item_ids, stale_archived_history_item_ids = _refresh_archived_completed_history(updated_text)
     if refreshed_text != updated_text:
         changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
         updated_text = refreshed_text
@@ -2600,6 +2770,7 @@ def _roadmap_plan_from_text(
         reordered_item_ids=reordered_item_ids,
         compacted_item_ids=compacted_item_ids,
         retargeted_terminal_item_ids=retargeted_terminal_item_ids,
+        stale_archived_history_item_ids=stale_archived_history_item_ids,
         current_text=text,
         updated_text=updated_text,
         target_existed=target_existed,
@@ -2913,10 +3084,10 @@ def _refresh_future_execution_slice_queue(text: str) -> str:
     return text if updated_text == text else updated_text
 
 
-def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...]]:
+def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     parse_result = _parse_roadmap_items(text)
     if parse_result[1]:
-        return text, ()
+        return text, (), ()
     items_start, _items_end, items = parse_result[0]
     done_items = [
         (item_id, item)
@@ -2924,32 +3095,35 @@ def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...]
         if _normalized_status(item.fields.get("status")) == "done"
     ]
     excess = len(done_items) - DETAILED_DONE_TAIL_LIMIT
-    if excess <= 0:
-        return text, ()
 
     to_compact: list[tuple[str, RoadmapItem]] = []
-    for item_id, item in done_items:
-        if excess <= 0:
-            break
-        if not _roadmap_item_has_compaction_evidence(item):
-            continue
-        to_compact.append((item_id, item))
-        excess -= 1
-    if not to_compact:
-        return text, ()
+    if excess > 0:
+        for item_id, item in done_items:
+            if excess <= 0:
+                break
+            if not _roadmap_item_has_compaction_evidence(item):
+                continue
+            to_compact.append((item_id, item))
+            excess -= 1
 
     lines = text.splitlines(keepends=True)
     compacted_ids = tuple(item_id for item_id, _item in to_compact)
     remove_ranges = tuple((item.start, item.end) for _item_id, item in to_compact)
     kept_lines = [line for index, line in enumerate(lines) if not any(start <= index < end for start, end in remove_ranges)]
-    kept_lines, history_entries = _sync_compacted_history_entries(kept_lines, to_compact)
-    if history_entries:
-        kept_lines = _with_archived_history_entries(
-            kept_lines,
-            history_entries,
-            fallback_insert_at=_items_section_end_index(kept_lines, fallback_insert_at=items_start),
-        )
-    return "".join(kept_lines), compacted_ids
+    stale_ids = tuple(entry.item_id for entry in _stale_archived_history_entries("".join(kept_lines), items, exclude_item_ids=compacted_ids))
+    kept_lines, removed_stale_ids = _without_archived_history_entries_from_lines(kept_lines, stale_ids)
+    if to_compact:
+        kept_lines, history_entries = _sync_compacted_history_entries(kept_lines, to_compact)
+        if history_entries:
+            kept_lines = _with_archived_history_entries(
+                kept_lines,
+                history_entries,
+                fallback_insert_at=_items_section_end_index(kept_lines, fallback_insert_at=items_start),
+            )
+    updated_text = "".join(kept_lines)
+    if updated_text == text:
+        return text, compacted_ids, removed_stale_ids
+    return updated_text, compacted_ids, removed_stale_ids
 
 
 def _roadmap_item_has_compaction_evidence(item: RoadmapItem) -> bool:
@@ -2966,7 +3140,10 @@ def _sync_compacted_history_entries(lines: list[str], items: list[tuple[str, Roa
     lines = list(lines)
     bounds = _h2_section_bounds(lines, ARCHIVED_HISTORY_TITLE)
     expected = {
-        item_id: _field_scalar(item.fields, "archived_plan")
+        item_id: (
+            _field_scalar(item.fields, "archived_plan"),
+            _compacted_history_bh_ids_text(_field_scalar(item.fields, "bh_ids")),
+        )
         for item_id, item in items
         if _field_scalar(item.fields, "archived_plan")
     }
@@ -2977,53 +3154,108 @@ def _sync_compacted_history_entries(lines: list[str], items: list[tuple[str, Roa
             if not match:
                 continue
             item_id = _normalized_item_id(match.group(1))
-            archived_plan = expected.get(item_id)
-            if not archived_plan or _normalize_rel(match.group(2)) == archived_plan:
+            expected_entry = expected.get(item_id)
+            if not expected_entry:
                 continue
-            lines[index] = _compacted_history_entry_line(item_id, archived_plan, _line_newline(lines[index]))
+            archived_plan, bh_ids = expected_entry
+            if _normalize_rel(match.group(2)) == archived_plan and _compacted_history_bh_ids_text(match.group(3) or "") == bh_ids:
+                continue
+            lines[index] = _compacted_history_entry_line(item_id, archived_plan, bh_ids=bh_ids, newline=_line_newline(lines[index]))
     existing_history = "".join(lines[bounds[0] + 1 : bounds[1]]) if bounds else ""
     entries: list[str] = []
     for item_id, item in items:
         if f"`{item_id}`" in existing_history:
             continue
         archived_plan = _field_scalar(item.fields, "archived_plan")
-        entries.append(_compacted_history_entry_line(item_id, archived_plan))
+        entries.append(_compacted_history_entry_line(item_id, archived_plan, bh_ids=_field_scalar(item.fields, "bh_ids")))
     return lines, entries
 
 
 def _compacted_history_entry_match(line: str) -> re.Match[str] | None:
-    return re.match(r"-\s+Compacted done roadmap item `([^`]+)`:\s+archived plan `([^`]+)`\.", line.strip())
+    return re.match(
+        r"-\s+Compacted done roadmap item `([^`]+)`:\s+archived plan `([^`]+)`(?:;\s+bh_ids `([^`]+)`)?\.",
+        line.strip(),
+    )
 
 
-def _compacted_history_entry_line(item_id: str, archived_plan: str, newline: str = "\n") -> str:
-    return f"- Compacted done roadmap item `{item_id}`: archived plan `{archived_plan}`.{newline}"
+def _compacted_history_entry_line(item_id: str, archived_plan: str, bh_ids: str = "", newline: str = "\n") -> str:
+    bh_ids = _compacted_history_bh_ids_text(bh_ids)
+    suffix = f"; bh_ids `{bh_ids}`" if bh_ids else ""
+    return f"- Compacted done roadmap item `{item_id}`: archived plan `{archived_plan}`{suffix}.{newline}"
+
+
+def _compacted_history_bh_ids_text(text: str) -> str:
+    return ", ".join(dict.fromkeys(re.findall(r"BH-\d{8}-\d{3}", text or "")))
 
 
 def _line_newline(line: str) -> str:
     return "\r\n" if line.endswith("\r\n") else "\n"
 
 
-def _archived_history_item_plan_map(text: str) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    for match in re.finditer(r"-\s+Compacted done roadmap item `([^`]+)`:\s+archived plan `([^`]+)`\.", text):
+def _compacted_history_entries(text: str) -> tuple[ArchivedHistoryEntry, ...]:
+    entries: list[ArchivedHistoryEntry] = []
+    for line_index, line in enumerate(text.splitlines(), start=0):
+        match = _compacted_history_entry_match(line)
+        if not match:
+            continue
         item_id = _normalized_item_id(match.group(1))
         archived_plan = _normalize_rel(match.group(2))
-        if item_id and archived_plan:
-            entries[item_id] = archived_plan
+        if not item_id or not archived_plan:
+            continue
+        entries.append(
+            ArchivedHistoryEntry(
+                item_id=item_id,
+                archived_plan=archived_plan,
+                bh_ids=_compacted_history_bh_ids_text(match.group(3) or ""),
+                line_index=line_index,
+            )
+        )
+    return tuple(entries)
+
+
+def _stale_archived_history_entries(
+    text: str,
+    live_items: dict[str, RoadmapItem],
+    *,
+    exclude_item_ids: tuple[str, ...] = (),
+) -> tuple[ArchivedHistoryEntry, ...]:
+    excluded = {_normalized_item_id(item_id) for item_id in exclude_item_ids if _normalized_item_id(item_id)}
+    return tuple(
+        entry
+        for entry in _compacted_history_entries(text)
+        if entry.item_id in live_items and entry.item_id not in excluded
+    )
+
+
+def _without_archived_history_entries_from_lines(
+    lines: list[str],
+    item_ids: tuple[str, ...],
+) -> tuple[list[str], tuple[str, ...]]:
+    normalized_item_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    if not normalized_item_ids:
+        return lines, ()
+    updated_lines: list[str] = []
+    removed: list[str] = []
+    for line in lines:
+        match = _compacted_history_entry_match(line)
+        item_id = _normalized_item_id(match.group(1)) if match else ""
+        if item_id in normalized_item_ids:
+            removed.append(item_id)
+            continue
+        updated_lines.append(line)
+    return updated_lines, tuple(_dedupe_nonempty(removed))
+
+
+def _archived_history_item_plan_map(text: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for entry in _compacted_history_entries(text):
+        entries[entry.item_id] = entry.archived_plan
     return entries
 
 
 def _without_archived_history_entries(text: str, item_ids: tuple[str, ...]) -> str:
-    normalized_item_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
-    if not normalized_item_ids:
-        return text
     lines = text.splitlines(keepends=True)
-    updated_lines: list[str] = []
-    for line in lines:
-        match = _compacted_history_entry_match(line)
-        if match and _normalized_item_id(match.group(1)) in normalized_item_ids:
-            continue
-        updated_lines.append(line)
+    updated_lines, _removed = _without_archived_history_entries_from_lines(lines, item_ids)
     return "".join(updated_lines)
 
 
@@ -3857,25 +4089,34 @@ def _route_destination_allowed(field: str, rel_path: str) -> bool:
 
 def _batch_plan_findings(inventory: Inventory, batch_plan: RoadmapBatchPlan, apply: bool) -> list[Finding]:
     prefix = "" if apply else "would "
+    batch_action = _batch_plan_action(batch_plan)
     findings: list[Finding] = [
         Finding(
             "info",
             "roadmap-batch-plan",
-            f"{prefix}process {len(batch_plan.requests)} roadmap item(s) through one add-many batch",
+            f"{prefix}process {len(batch_plan.requests)} roadmap item(s) through one {batch_action}-many batch",
             batch_plan.target_rel,
         )
     ]
     for position, plan in enumerate(batch_plan.plans, start=1):
+        item_verb = "create" if plan.action == "add" else "update"
         findings.append(
             Finding(
                 "info",
                 "roadmap-batch-item",
-                f"{prefix}create item {position}: {plan.item_id}",
+                f"{prefix}{item_verb} item {position}: {plan.item_id}",
                 batch_plan.target_rel,
             )
         )
         findings.extend(_plan_findings(inventory, plan, apply))
     return findings
+
+
+def _batch_plan_action(batch_plan: RoadmapBatchPlan) -> str:
+    actions = {plan.action for plan in batch_plan.plans}
+    if actions == {"update"}:
+        return "update"
+    return "add"
 
 
 def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list[Finding]:
@@ -3921,6 +4162,19 @@ def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list
                 "info",
                 "roadmap-compacted-item-replay",
                 f"{prefix}restore compacted roadmap item block(s) from Archived Completed History: {', '.join(plan.replayed_item_ids)}",
+                plan.target_rel,
+            )
+        )
+    if plan.stale_archived_history_item_ids:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-archived-history-stale-tail",
+                (
+                    f"{prefix}remove stale Archived Completed History entr"
+                    f"{'y' if len(plan.stale_archived_history_item_ids) == 1 else 'ies'} "
+                    f"for live roadmap item(s): {', '.join(plan.stale_archived_history_item_ids)}"
+                ),
                 plan.target_rel,
             )
         )
@@ -4215,7 +4469,16 @@ def _roadmap_readiness_blockers(
         )
     )
     for dependency in dependencies:
-        if not dependency or dependency in items:
+        if not dependency:
+            continue
+        dependency_item = items.get(dependency)
+        if dependency_item is not None:
+            dependency_status = _normalized_status(dependency_item.fields.get("status"))
+            if dependency_status == "active" and _inventory_has_active_plan(inventory):
+                blockers.append(
+                    f"dependency {dependency!r} is active and current active plan is open; "
+                    "finish or archive that dependency plan before opening this downstream item"
+                )
             continue
         archived_plan = archived_history.get(dependency)
         if not archived_plan:

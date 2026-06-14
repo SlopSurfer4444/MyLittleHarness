@@ -968,6 +968,8 @@ class PackageMetadataTests(unittest.TestCase):
             "operator-audit-loop",
             "repair-preview",
             "open-active-plan",
+            "cancel-accidental-plan-activation",
+            "phase-closeout-handoff",
             "archive-active-plan",
             "research-human-review-gate",
             "docs-route-recovery",

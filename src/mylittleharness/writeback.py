@@ -74,7 +74,16 @@ DOCS_DECISION_ALLOWED_IMPACT_BASIS = {
     "updated": {"docs-updated", "product-contract", "workflow-contract"},
     "uncertain": {"uncertain"},
 }
-NEXT_STATE_VALUES = {"no-next-action", "human-decision-required", "legal-dry-run-command"}
+NEXT_STATE_EXPLICIT_DECISION_REQUIRED = "explicit-decision-required"
+NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED = "human-decision-required"
+NEXT_STATE_CANONICAL_VALUES = {"no-next-action", NEXT_STATE_EXPLICIT_DECISION_REQUIRED, "legal-dry-run-command"}
+NEXT_STATE_LEGACY_ALIASES = {NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED: NEXT_STATE_EXPLICIT_DECISION_REQUIRED}
+NEXT_STATE_VALUES = {*NEXT_STATE_CANONICAL_VALUES, *NEXT_STATE_LEGACY_ALIASES}
+NEXT_STATE_EXPECTED_TEXT = (
+    "no-next-action, explicit-decision-required, or "
+    "legal-dry-run-command:<mylittleharness --root ... --dry-run ...>; "
+    "legacy alias human-decision-required remains accepted during migration"
+)
 NEXT_STATE_CONTRACT_MARKERS = (
     "next_state",
     "next-state",
@@ -542,10 +551,11 @@ def active_plan_completed_phase_handoff_findings(
     ]
 
 
-def _phase_closeout_handoff_sequence_findings(request: WritebackRequest, findings: list[Finding]) -> list[Finding]:
+def _phase_closeout_handoff_sequence_findings(inventory: Inventory, request: WritebackRequest, findings: list[Finding]) -> list[Finding]:
     if not _needs_phase_closeout_handoff_sequence(request, findings):
         return []
     roadmap_item = request.roadmap_item or "<id>"
+    archive_command, archive_evidence_source = _archive_handoff_sequence_command(inventory, request, roadmap_item)
     return [
         Finding(
             "info",
@@ -553,9 +563,7 @@ def _phase_closeout_handoff_sequence_findings(request: WritebackRequest, finding
             (
                 "phase evidence handoff and archive closeout replacement can be reviewed as a composed two-step sequence: "
                 "`mylittleharness --root <root> writeback --dry-run --phase-status complete --docs-decision uncertain`, "
-                "then after review `mylittleharness --root <root> writeback --dry-run --archive-active-plan "
-                f"--roadmap-item {roadmap_item} --roadmap-status done --docs-decision <updated|not-needed> "
-                "--state-writeback \"<text>\" --verification \"<text>\" --commit-decision \"<text>\"`; archive-active-plan owns "
+                f"then after review `{archive_command}`; {archive_evidence_source}; archive-active-plan owns "
                 "plan_status, active_plan, and last_archived_plan lifecycle pointers, so omit explicit --active-phase "
                 "and --last-archived-plan from the archive command. This advice is read-only and does not approve "
                 "archive, roadmap done-status, staging, commit, rollback, or next-plan opening"
@@ -573,6 +581,92 @@ def _needs_phase_closeout_handoff_sequence(request: WritebackRequest, findings: 
     if request.lifecycle.get("phase_status") == "complete" and request.closeout:
         return any(finding.code == "writeback-closeout-identity-refused" for finding in findings)
     return False
+
+
+def _archive_handoff_sequence_command(inventory: Inventory, request: WritebackRequest, roadmap_item: str) -> tuple[str, str]:
+    fields = _archive_handoff_sequence_closeout_fields(inventory, request)
+    command = [
+        "mylittleharness",
+        "--root",
+        "<root>",
+        "writeback",
+        "--dry-run",
+        "--archive-active-plan",
+        "--roadmap-item",
+        roadmap_item,
+        "--roadmap-status",
+        request.roadmap_status or "done",
+    ]
+    evidence_source = "the archive dry-run command names placeholder closeout fields because no complete closeout authority was available"
+    if fields:
+        evidence_source = (
+            "the archive dry-run command carries recorded closeout evidence fields forward without treating them as approval"
+        )
+        command.extend(_closeout_fields_as_cli_args(fields))
+    else:
+        command.extend(
+            [
+                "--docs-decision",
+                "<updated|not-needed>",
+                "--state-writeback",
+                "<text>",
+                "--verification",
+                "<text>",
+                "--commit-decision",
+                "<text>",
+            ]
+        )
+    return " ".join(_quote_cli_token(token) for token in command), evidence_source
+
+
+def _archive_handoff_sequence_closeout_fields(inventory: Inventory, request: WritebackRequest) -> dict[str, str]:
+    if closeout_values_are_complete(request.closeout):
+        return _archive_handoff_sequence_field_subset(request.closeout)
+
+    current = {field: fact.value for field, fact in state_writeback_facts(inventory.state).items()}
+    if not current or not closeout_values_are_complete(current):
+        return {}
+    existing_identity = _identity_from_facts(state_writeback_identity_facts(inventory.state))
+    current_identity = _current_closeout_identity(inventory, None)
+    if not _closeout_identity_matches(existing_identity, current_identity):
+        return {}
+    return _archive_handoff_sequence_field_subset(current)
+
+
+def _archive_handoff_sequence_field_subset(values: dict[str, str]) -> dict[str, str]:
+    return {
+        field: values[field]
+        for field in (
+            "worktree_start_state",
+            "task_scope",
+            "docs_decision",
+            "state_writeback",
+            "verification",
+            "commit_decision",
+            "residual_risk",
+            "next_state",
+            "carry_forward",
+        )
+        if values.get(field)
+    }
+
+
+def _closeout_fields_as_cli_args(values: dict[str, str]) -> list[str]:
+    args: list[str] = []
+    for field in CLOSEOUT_WRITEBACK_FIELDS:
+        if field == "work_result" or not values.get(field):
+            continue
+        args.extend((f"--{field.replace('_', '-')}", values[field]))
+    return args
+
+
+def _quote_cli_token(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return '""'
+    if re.fullmatch(r"[A-Za-z0-9_./:<>=|,-]+", text):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`") + '"'
 
 
 def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) -> list[Finding]:
@@ -597,7 +691,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
     errors.extend(harvest_errors)
     if errors:
         findings.extend(_with_severity(errors, "warn"))
-        findings.extend(_phase_closeout_handoff_sequence_findings(request, errors))
+        findings.extend(_phase_closeout_handoff_sequence_findings(inventory, request, errors))
         findings.append(
             Finding(
                 "info",
@@ -631,6 +725,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
     closeout_plan = _closeout_writeback_plan(inventory, request, archive_context_rel)
     planned = closeout_plan.values
     findings.append(_planned_closeout_finding(planned))
+    findings.extend(_next_state_legacy_alias_input_findings(request.closeout, apply=False))
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=False))
     findings.extend(_scoped_interrupt_writeback_boundary_findings(inventory, request, apply=False))
     completion_reason = _writeback_acceptance_completion_reason(inventory, request, planned)
@@ -747,7 +842,13 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
         advancement_finding = _phase_advancement_finding(inventory, planned_lifecycle, inventory.state.rel_path if inventory.state else None, apply=False)
         if advancement_finding:
             findings.append(advancement_finding)
-        ready_finding = _ready_for_closeout_boundary_finding(planned_lifecycle, inventory.state.rel_path if inventory.state else None, apply=False)
+        ready_finding = _ready_for_closeout_boundary_finding(
+            planned_lifecycle,
+            inventory.state.rel_path if inventory.state else None,
+            apply=False,
+            docs_decision=planned.get("docs_decision", ""),
+            has_phase_evidence=_has_provisional_phase_evidence(planned),
+        )
         if ready_finding:
             findings.append(ready_finding)
     findings.extend(_phase_writeback_tail_retirement_findings(inventory, projected_state_text, apply=False))
@@ -808,7 +909,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         return harvest_errors
     errors = _writeback_preflight_errors(inventory, request)
     if errors:
-        return [*errors, *_phase_closeout_handoff_sequence_findings(request, errors)]
+        return [*errors, *_phase_closeout_handoff_sequence_findings(inventory, request, errors)]
 
     if request.compact_only:
         findings = [
@@ -916,6 +1017,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         Finding("info", "writeback-apply", "closeout/state writeback apply started"),
         _planned_closeout_finding(planned),
     ]
+    findings.extend(_next_state_legacy_alias_input_findings(request.closeout, apply=True))
     findings.extend(harvest_findings)
     findings.extend(batch_gate_findings)
     findings.extend(
@@ -970,7 +1072,13 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         advancement_finding = _phase_advancement_finding(inventory, request.lifecycle, state.rel_path, apply=True)
         if advancement_finding:
             findings.append(advancement_finding)
-        ready_finding = _ready_for_closeout_boundary_finding(request.lifecycle, state.rel_path, apply=True)
+        ready_finding = _ready_for_closeout_boundary_finding(
+            request.lifecycle,
+            state.rel_path,
+            apply=True,
+            docs_decision=planned.get("docs_decision", ""),
+            has_phase_evidence=_has_provisional_phase_evidence(planned),
+        )
         if ready_finding:
             findings.append(ready_finding)
         findings.extend(_auto_compaction_boundary_findings(request, request.lifecycle, compaction_plan, apply=True))
@@ -1201,7 +1309,25 @@ def _writeback_request_with_active_plan_facts(
     finding_source = source
     candidate = dict(active_plan_values)
     candidate.update(request.closeout)
-    if active_plan_values and closeout_values_are_complete(candidate):
+    if closeout_values_are_complete(candidate):
+        if not active_plan_values:
+            fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in request.closeout)
+            verb = "kept" if apply else "would keep"
+            return (
+                replace(request, closeout=_ordered_closeout_values(candidate)),
+                [
+                    Finding(
+                        "info",
+                        "writeback-from-active-plan-request-fields",
+                        (
+                            f"{verb} complete same-request closeout facts because --from-active-plan "
+                            f"found no active-plan closeout facts: {fields or '<none>'}"
+                        ),
+                        source,
+                    )
+                ],
+                [],
+            )
         harvested = active_plan_values
     else:
         harvested, fallback_errors = _state_closeout_authority_facts(inventory)
@@ -2365,8 +2491,7 @@ def _next_state_findings(
                 severity,
                 f"{code_prefix}-next-state-missing",
                 (
-                    f"{completion_reason} requires explicit next_state; record one of "
-                    "no-next-action, human-decision-required, or legal-dry-run-command:<mylittleharness --root ... --dry-run ...>. "
+                    f"{completion_reason} requires explicit next_state; record one of {NEXT_STATE_EXPECTED_TEXT}. "
                     "Reported next_safe advisory commands do not satisfy this closeout fact"
                 ),
                 contract.source,
@@ -2385,7 +2510,20 @@ def _next_state_findings(
         ]
     if include_success:
         detail = f"{kind}: {command}" if command else kind
-        return [Finding("info", f"{code_prefix}-next-state", f"{completion_reason} records next_state={detail}", contract.source)]
+        findings = [Finding("info", f"{code_prefix}-next-state", f"{completion_reason} records next_state={detail}", contract.source)]
+        if _next_state_is_legacy_alias(value):
+            findings.append(
+                Finding(
+                    "info",
+                    f"{code_prefix}-next-state-legacy-alias",
+                    (
+                        f"{completion_reason} accepts legacy next_state={NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED} "
+                        f"as {NEXT_STATE_EXPLICIT_DECISION_REQUIRED}; new closeout facts are written with the neutral token"
+                    ),
+                    contract.source,
+                )
+            )
+        return findings
     return []
 
 
@@ -2429,8 +2567,10 @@ def _next_state_gate_enabled(closeout_values: dict[str, str], contract: Acceptan
 def _parse_next_state(value: str) -> tuple[str, str, str]:
     raw = str(value or "").strip()
     normalized = re.sub(r"\s+", " ", raw).casefold()
-    if normalized in {"no-next-action", "human-decision-required"}:
+    if normalized == "no-next-action":
         return normalized, "", ""
+    if normalized in {NEXT_STATE_EXPLICIT_DECISION_REQUIRED, NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED}:
+        return NEXT_STATE_EXPLICIT_DECISION_REQUIRED, "", ""
     for separator in (":", "="):
         prefix = f"legal-dry-run-command{separator}"
         if normalized.startswith(prefix):
@@ -2438,7 +2578,40 @@ def _parse_next_state(value: str) -> tuple[str, str, str]:
             return "legal-dry-run-command", command, _legal_dry_run_command_problem(command)
     if normalized == "legal-dry-run-command":
         return "legal-dry-run-command", "", "legal-dry-run-command must include the exact dry-run command after ':'"
-    return "", "", f"expected one of: {', '.join(sorted(NEXT_STATE_VALUES))}"
+    return "", "", f"expected one of: {NEXT_STATE_EXPECTED_TEXT}"
+
+
+def _next_state_is_legacy_alias(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+    return normalized in NEXT_STATE_LEGACY_ALIASES
+
+
+def _next_state_legacy_alias_input_findings(closeout_values: dict[str, str], *, apply: bool) -> list[Finding]:
+    if not _next_state_is_legacy_alias(closeout_values.get("next_state", "")):
+        return []
+    verb = "normalized" if apply else "would normalize"
+    return [
+        Finding(
+            "info",
+            "writeback-next-state-legacy-alias",
+            (
+                f"{verb} legacy next_state={NEXT_STATE_LEGACY_HUMAN_DECISION_REQUIRED} "
+                f"to neutral {NEXT_STATE_EXPLICIT_DECISION_REQUIRED}; the legacy spelling remains accepted as a compatibility alias"
+            ),
+            DEFAULT_STATE_REL,
+        )
+    ]
+
+
+def _canonical_closeout_value(field: str, value: str) -> str:
+    if field != "next_state":
+        return value
+    kind, _command, problem = _parse_next_state(value)
+    if problem:
+        return value
+    if kind == NEXT_STATE_EXPLICIT_DECISION_REQUIRED:
+        return kind
+    return value
 
 
 def _legal_dry_run_command_problem(command: str) -> str:
@@ -3419,7 +3592,7 @@ def _closeout_identity_matches(existing: CloseoutIdentity, current: CloseoutIden
 
 
 def _ordered_closeout_values(values: dict[str, str]) -> dict[str, str]:
-    ordered = {field: values[field] for field in CLOSEOUT_WRITEBACK_FIELDS if field in values and values[field]}
+    ordered = {field: _canonical_closeout_value(field, values[field]) for field in CLOSEOUT_WRITEBACK_FIELDS if field in values and values[field]}
     if ordered and "work_result" not in ordered:
         capsule = work_result_capsule_from_closeout_values(ordered)
         if capsule is not None:
@@ -3487,17 +3660,36 @@ def _phase_advancement_finding(inventory: Inventory, lifecycle_values: dict[str,
         "writeback-phase-advancement",
         (
             f"{verb} active-plan phase block {completed_phase!r} and advance project-state active_phase to {next_phase!r} "
-            "with phase_status pending in one lifecycle writeback; this does not authorize auto_continue, closeout, archive, "
-            "roadmap done-status, next-plan opening, staging, or commit"
+            "with phase_status pending in one lifecycle writeback; this is the legal continuation route for "
+            "through-closeout plans with pending successor phases and does not authorize auto_continue, closeout, "
+            "archive, roadmap done-status, next-plan opening, staging, or commit"
         ),
         source,
     )
 
 
-def _ready_for_closeout_boundary_finding(lifecycle_values: dict[str, str], source: str | None, apply: bool) -> Finding | None:
+def _ready_for_closeout_boundary_finding(
+    lifecycle_values: dict[str, str],
+    source: str | None,
+    apply: bool,
+    *,
+    docs_decision: str = "",
+    has_phase_evidence: bool = False,
+) -> Finding | None:
     if lifecycle_values.get("phase_status") != "complete":
         return None
     verb = "updated" if apply else "would update"
+    if docs_decision == "uncertain" and has_phase_evidence:
+        return Finding(
+            "info",
+            "writeback-ready-for-closeout-boundary",
+            (
+                f"{verb} phase_status complete with docs_decision uncertain as a phase-ready provisional handoff only; "
+                "this keeps closeout language provisional, and final closeout/archive still requires docs_decision "
+                "updated/not-needed plus an explicit writeback/archive route"
+            ),
+            source,
+        )
     return Finding(
         "info",
         "writeback-ready-for-closeout-boundary",

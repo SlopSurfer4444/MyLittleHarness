@@ -161,6 +161,7 @@ def dispatcher_worktree_coordination_findings(
 
 
 GitRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+GIT_OUTPUT_ENCODING = "utf-8"
 
 
 def probe_vcs(root: Path, runner: GitRunner | None = None) -> VcsPosture:
@@ -176,8 +177,9 @@ def probe_vcs(root: Path, runner: GitRunner | None = None) -> VcsPosture:
             state="non-git",
             detail=_first_output_line(rev_parse) or f"git exited {rev_parse.returncode}",
         )
-    if rev_parse.stdout.strip().casefold() != "true":
-        return VcsPosture(root=root, git_available=True, is_worktree=False, state="non-git", detail="not inside a Git worktree")
+    if (rev_parse.stdout or "").strip().casefold() != "true":
+        detail = _first_output_line(rev_parse) or "not inside a Git worktree"
+        return VcsPosture(root=root, git_available=True, is_worktree=False, state="non-git", detail=detail)
 
     top_level = _git_top_level(root, runner)
     status = _run_git(root, ("status", "--untracked-files=all", "--porcelain=v1"), runner)
@@ -191,6 +193,16 @@ def probe_vcs(root: Path, runner: GitRunner | None = None) -> VcsPosture:
             state="unknown",
             top_level=top_level,
             detail=_first_output_line(status) or f"git status exited {status.returncode}",
+        )
+
+    if status.stdout is None:
+        return VcsPosture(
+            root=root,
+            git_available=True,
+            is_worktree=True,
+            state="unknown",
+            top_level=top_level,
+            detail=_first_output_line(status) or "git status produced no stdout",
         )
 
     entries = _parse_porcelain(status.stdout)
@@ -621,7 +633,7 @@ def _git_top_level(root: Path, runner: GitRunner | None) -> str | None:
     result = _run_git(root, ("rev-parse", "--show-toplevel"), runner)
     if isinstance(result, str) or result.returncode != 0:
         return None
-    value = result.stdout.strip()
+    value = (result.stdout or "").strip()
     return value or None
 
 
@@ -638,6 +650,8 @@ def _run_git(root: Path, args: Sequence[str], runner: GitRunner | None) -> subpr
             check=False,
             capture_output=True,
             text=True,
+            encoding=GIT_OUTPUT_ENCODING,
+            errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
@@ -660,6 +674,8 @@ def _run_git_with_input(root: Path, args: Sequence[str], stdin: str) -> subproce
             check=False,
             capture_output=True,
             text=True,
+            encoding=GIT_OUTPUT_ENCODING,
+            errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
@@ -675,9 +691,9 @@ def _first_output_line(result: subprocess.CompletedProcess[str]) -> str:
     return output.splitlines()[0] if output else ""
 
 
-def _parse_porcelain(text: str) -> list[VcsChangedPath]:
+def _parse_porcelain(text: str | None) -> list[VcsChangedPath]:
     entries: list[VcsChangedPath] = []
-    for raw_line in text.splitlines():
+    for raw_line in (text or "").splitlines():
         if not raw_line:
             continue
         status = raw_line[:2].strip() or "??"
