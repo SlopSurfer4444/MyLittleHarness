@@ -29647,6 +29647,64 @@ class CliTests(unittest.TestCase):
         )
         return receipt_rel, log_rel, smoke_rel
 
+    def _write_deferred_route_package_checkpoint_fixture(self, root: Path) -> tuple[str, str, str]:
+        research_rel = "project/" + "research/2026-06-12-packet-007-worker-event-history-receipt-hardening.md"
+        hardening_archive_rel = "project/" + "archive/plans/2026-06-12-worker-event-history-receipt-hardening.md"
+        acceptance_archive_rel = "project/" + "archive/plans/2026-06-13-accept-product-worker-event-history-receipt-layer.md"
+        (root / research_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / hardening_archive_rel).parent.mkdir(parents=True, exist_ok=True)
+        research_hash = hashlib.sha256(b"worker event-history receipt hardening import").hexdigest()
+        (root / research_rel).write_text(
+            "---\n"
+            'status: "imported"\n'
+            'topic: "worker event-history receipt hardening"\n'
+            'title: "Worker Event History Receipt Hardening"\n'
+            'derived_from: "research-import cli"\n'
+            "source_hashes:\n"
+            f'  - "imported_text sha256={research_hash}"\n'
+            "---\n"
+            "# Worker Event History Receipt Hardening\n\n"
+            "Import rail: `research-import cli`.\n\n"
+            "Repo-visible research only; cannot approve lifecycle, archive, roadmap, vcs, release, or provider routing.\n",
+            encoding="utf-8",
+        )
+        for rel, title in (
+            (hardening_archive_rel, "Worker Event History Receipt Hardening"),
+            (acceptance_archive_rel, "Accept Product Worker Event History Receipt Layer"),
+        ):
+            (root / rel).write_text(
+                "---\n"
+                f'plan_id: "{Path(rel).stem}"\n'
+                f'title: "{title}"\n'
+                'status: "complete"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "complete"\n'
+                'docs_decision: "not-needed"\n'
+                'execution_policy: "current-phase-only"\n'
+                f'source_research: "{research_rel}"\n'
+                "---\n"
+                f"# {title}\n\n"
+                "Archived route-produced plan packet. This file is evidence only and cannot approve lifecycle, "
+                "roadmap, archive, vcs, release, or provider routing.\n",
+                encoding="utf-8",
+            )
+        state_rel = "project/" + "project-state.md"
+        state_path = root / state_rel
+        state_text = state_path.read_text(encoding="utf-8")
+        state_text = state_text.replace(
+            'active_plan: ""\n---',
+            f'active_plan: ""\nphase_status: "complete"\nlast_archived_plan: "{acceptance_archive_rel}"\n---',
+            1,
+        )
+        state_path.write_text(
+            state_text
+            + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            + "- docs_decision: not-needed\n"
+            + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        return hardening_archive_rel, acceptance_archive_rel, research_rel
+
     def test_hooks_pre_tool_allows_neighbor_live_root_reviewed_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -29678,6 +29736,40 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_neighbor_deferred_route_package_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = self._write_deferred_route_package_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            stage_command = "gi" + "t add -- "
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": stage_command + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": ("gi" + f't -C "{neighbor_root}" add -- ') + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("deferred research/archive route packages", messages)
+
     def test_hooks_pre_tool_blocks_neighbor_live_root_unsafe_checkpoint_with_precise_message(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -29707,6 +29799,8 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertIn("actual command workdir/root", messages)
                     self.assertIn("exact existing MLH route/evidence files", messages)
+                    self.assertIn("considered_shapes=", messages)
+                    self.assertIn("checkpoint dry-run or evidence/meta-feedback blocker packet", messages)
 
     def test_hooks_pre_tool_allows_reviewed_post_closeout_lifecycle_vcs_finalization_payload(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

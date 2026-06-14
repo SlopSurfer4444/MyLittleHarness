@@ -1718,8 +1718,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-allow-reviewed-local-vcs-checkpoint",
                 (
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
-                    "files in the actual command workdir/root; broad staging, unrelated dirty work, push, release, "
-                    "provider routing, reset, clean, and authority decisions remain blocked"
+                    "files in the actual command workdir/root, including deferred research/archive route packages; "
+                    "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
+                    "decisions remain blocked"
                 ),
                 paths[0] if paths else None,
             )
@@ -3412,7 +3413,7 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
         if not paths:
             return ReviewedLocalVcsCheckpoint(
                 root=target_inventory.root,
-                blocked_reason="the pathspecs are not a coherent reviewed lifecycle/evidence route set in the actual command root",
+                blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, pathspecs, "pathspecs"),
             )
         return ReviewedLocalVcsCheckpoint(root=target_inventory.root, paths=frozenset(paths), mode="staging")
     if not _is_narrow_local_vcs_commit_command(command):
@@ -3425,7 +3426,7 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
     if not paths:
         return ReviewedLocalVcsCheckpoint(
             root=target_inventory.root,
-            blocked_reason="staged files are not a coherent reviewed lifecycle/evidence route set in the actual command root",
+            blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, staged, "staged files"),
         )
     return ReviewedLocalVcsCheckpoint(root=target_inventory.root, paths=frozenset(paths), mode="commit")
 
@@ -3687,7 +3688,148 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
                 return set()
             allowed.update(receipt_allowed)
         return normalized if normalized <= allowed else set()
+    deferred_package_paths = _coherent_deferred_route_package_checkpoint_paths(inventory, normalized)
+    if deferred_package_paths:
+        return deferred_package_paths
     return set()
+
+
+def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    research_paths = {path for path in paths if _is_deferred_research_route_path(path)}
+    archive_paths = {path for path in paths if _is_deferred_archive_plan_route_path(path)}
+    if not research_paths or not archive_paths or paths != research_paths | archive_paths:
+        return set()
+    if not all(_is_reviewed_deferred_research_route_file(inventory, path) for path in research_paths):
+        return set()
+    archive_sources: set[str] = set()
+    for path in archive_paths:
+        source_research = _reviewed_deferred_archive_plan_source_research(inventory, path)
+        if not source_research:
+            return set()
+        archive_sources.add(source_research)
+    if not archive_sources <= research_paths:
+        return set()
+    return paths
+
+
+def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
+    shapes = (
+        "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
+        "worker-run-receipt-refs,deferred-research/archive-package"
+    )
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return (
+            f"the {label} include missing, broad, wildcard, directory, generated/runtime, or non-MLH-route "
+            f"files in the actual command root; considered_shapes={shapes}; next_safe=split exact route files, "
+            "rerun a checkpoint dry-run or evidence/meta-feedback blocker packet, then retry exact local-only staging"
+        )
+    classes = _reviewed_local_vcs_checkpoint_path_classes(normalized)
+    return (
+        f"the {label} are not a coherent reviewed lifecycle/evidence route set in the actual command root; "
+        f"path_classes={classes}; considered_shapes={shapes}; next_safe=split the checkpoint group, include "
+        "required route anchors/receipt refs, or record a checkpoint dry-run or evidence/meta-feedback blocker packet"
+    )
+
+
+def _reviewed_local_vcs_checkpoint_path_classes(paths: set[str]) -> str:
+    classes: list[str] = []
+    if any(path == "project/project-state.md" for path in paths):
+        classes.append("state")
+    if any(path == "project/roadmap.md" for path in paths):
+        classes.append("roadmap")
+    if any(path.startswith("project/archive/plans/") for path in paths):
+        classes.append("archive-plans")
+    if any(_is_agent_run_evidence_route_path(path) for path in paths):
+        classes.append("agent-run-evidence")
+    if any(_is_worker_run_receipt_route_path(path) for path in paths):
+        classes.append("worker-run-receipts")
+    if any(_is_deferred_research_route_path(path) for path in paths):
+        classes.append("research")
+    if len(classes) == 0:
+        classes.append("other-route")
+    return ",".join(classes)
+
+
+def _is_deferred_research_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/research/") and rel.endswith(".md")
+
+
+def _is_deferred_archive_plan_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/archive/plans/") and rel.endswith(".md")
+
+
+def _is_reviewed_deferred_research_route_file(inventory: Inventory, path: str) -> bool:
+    if not _is_deferred_research_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    status = str(data.get("status") or "").strip().casefold()
+    title = str(data.get("title") or "").strip()
+    derived_from = str(data.get("derived_from") or "").strip().casefold()
+    content = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :]).casefold()
+    return (
+        status == "imported"
+        and bool(title)
+        and ("research-import" in derived_from or "research-import" in content)
+        and "cannot approve" in content
+        and "lifecycle" in content
+        and ("staging" in content or "commit" in content or "vcs" in content)
+    )
+
+
+def _reviewed_deferred_archive_plan_source_research(inventory: Inventory, path: str) -> str:
+    if not _is_deferred_archive_plan_route_path(path):
+        return ""
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return ""
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return ""
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return ""
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return ""
+    data = frontmatter.data
+    if str(data.get("status") or "").strip().casefold() != "complete":
+        return ""
+    if str(data.get("phase_status") or "").strip().casefold() != "complete":
+        return ""
+    if not str(data.get("plan_id") or "").strip():
+        return ""
+    source_research = _hook_route_rel_path(inventory, str(data.get("source_research") or "")).casefold()
+    if not _is_deferred_research_route_path(source_research):
+        return ""
+    content = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :]).casefold()
+    if "cannot approve" not in content or "lifecycle" not in content:
+        return ""
+    return source_research
 
 
 def _is_reviewed_agent_run_evidence_file(inventory: Inventory, path: str) -> bool:
