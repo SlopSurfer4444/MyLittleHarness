@@ -6,19 +6,19 @@ import os
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .context_memory import context_memory_hook_context
 from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness_payload
-from .inventory import Inventory
+from .inventory import Inventory, load_inventory
 from .models import Finding
 from .parsing import parse_frontmatter
 from .preflight import preflight_sections
 from .reporting import command_action_report_dict
 from .routes import classify_memory_route
-from .root_boundary import PRODUCT_SOURCE_FIXTURE
+from .root_boundary import LIVE_OPERATING_ROOT, PRODUCT_SOURCE_FIXTURE
 from .safe_commands import mlh_command, safe_double_quoted, safe_intent_text, shell_arg
 
 
@@ -117,6 +117,100 @@ READ_ONLY_SOURCE_DISCOVERY_PREFIX_TOKENS = {
     "where-object",
     "while",
 }
+READ_ONLY_PRODUCT_SOURCE_SMOKE_COMMANDS = {"dashboard", "task-session"}
+READ_ONLY_PRODUCT_SOURCE_SMOKE_FORBIDDEN_MARKERS = (
+    "--apply",
+    "--build",
+    "--delete",
+    "--install-client-config",
+    "--rebuild",
+    "--serve",
+    "--warm-cache",
+    "check_call(",
+    "check_output(",
+    "os.system(",
+    "popen(",
+    "start-job",
+    "start-process",
+    "subprocess.",
+)
+READ_ONLY_SUBAGENT_DELEGATION_TOOLS = (
+    "create_thread",
+    "fork_thread",
+    "handoff_thread",
+    "send_message_to_thread",
+    "spawn_agent",
+    "subagent",
+    "delegate_agent",
+)
+READ_ONLY_SUBAGENT_DELEGATION_MARKERS = (
+    "read-only",
+    "read only",
+    "readonly",
+    "no writes",
+    "without writing",
+    "do not write",
+    "do not mutate",
+    "evidence/navigation",
+    "inspect",
+    "research",
+    "analyze",
+)
+LOCAL_VCS_DELEGATION_PURPOSE_MARKERS = (
+    "audit",
+    "checkpoint",
+    "checkpointing",
+    "commitize",
+    "commitization",
+    "coordinate",
+    "coordination",
+    "local vcs",
+    "vcs checkpoint",
+    "vcs finalization",
+)
+LOCAL_VCS_DELEGATION_BOUNDARY_MARKERS = (
+    "reviewed",
+    "exact",
+    "narrow",
+    "route boundary",
+    "route boundaries",
+    "mlh route",
+    "mlh routes",
+    "local-only",
+    "local only",
+    "no push",
+    "do not push",
+    "without push",
+    "without pushing",
+)
+SUBAGENT_DELEGATION_FORBIDDEN_RE = re.compile(
+    r"(?i)"
+    r"(?:"
+    r"\bmy(?:littleharness)?\s+[^\n\r;]*\s--apply\b|"
+    r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\s+[^\n\r;]*\s--apply\b|"
+    r"\barchive-active-plan\b|"
+    r"\bmark\s+(?:roadmap\s+)?done\b|"
+    r"\bgit\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
+    r"\bapply_patch\b|"
+    r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item)\b|"
+    r"\b(?:start|launch)\s+(?:worker|daemon|provider)\b|"
+    r"\bmlhd\s+run-once\s+--apply\b"
+    r")"
+)
+SUBAGENT_DELEGATION_LOCAL_VCS_RE = re.compile(r"(?i)\bgit\s+(?:add|stage|commit)\b")
+SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE = re.compile(
+    r"(?i)\b(?:do\s+not|don't|no|without)\s+"
+    r"(?:push(?:ing)?|release|releasing|publish(?:ing)?|provider|daemon|runtime|launcher)\b"
+)
+SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
+    r"(?i)(?:"
+    r"\bgit\s+(?:push|reset|checkout|clean|restore|rm|mv)\b|"
+    r"\b(?:--force|-f|--mirror|--delete|--amend|--all|--no-verify)\b|"
+    r"\b(?:bypass|skip\s+dry-run|skip\s+review|skip\s+check)\b|"
+    r"\b(?:provider|daemon|runtime|launcher)\b|"
+    r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|apply_patch)\b"
+    r")"
+)
 READ_ONLY_GIT_INSPECTION_COMMANDS = {"diff", "show", "status", "log"}
 GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push", "reset", "checkout", "clean", "restore", "rm", "mv"}
 GIT_OPTIONS_WITH_VALUES = {
@@ -304,6 +398,14 @@ class HookToolIntent:
     paths: list[str]
     write_command: str
     write_target_paths: list[str]
+
+
+@dataclass(frozen=True)
+class ReviewedLocalVcsCheckpoint:
+    root: Path | None = None
+    paths: frozenset[str] = field(default_factory=frozenset)
+    mode: str = ""
+    blocked_reason: str = ""
 
 
 def make_hook_install_request(args) -> HookInstallRequest:
@@ -1345,7 +1447,7 @@ def _user_prompt_policy_findings(inventory: Inventory, hook_input_text: str) -> 
 def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
-    intent = _hook_tool_intent(data, text)
+    intent = _hook_tool_intent(data, text, inventory=inventory)
     paths = intent.paths
     command = intent.command
     write_command = intent.write_command
@@ -1357,22 +1459,41 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             "pre-tool-use inspects declared tool intent and blocks deterministic MLH shortcut attempts before tool execution",
         )
     ]
+    allow_read_only_product_source_smoke = _is_read_only_product_source_smoke_command(inventory, command)
+    allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
+    allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
     allow_read_only_source_paths = (
         _is_read_only_source_discovery_command(command)
         or _is_read_only_git_inspection_command(command)
         or _is_bounded_mlh_read_tool_request(data)
+        or allow_read_only_product_source_smoke
+        or allow_read_only_subagent_delegation
+        or allow_reviewed_local_vcs_delegation
     )
     allow_read_only_roadmap_path = _is_read_only_roadmap_direct_read_command(command, paths)
     allow_research_import_related_prompt = _is_research_import_related_prompt_provenance_command(command)
-    allow_mlh_owner_route_paths = _is_mlh_owner_route_review_command(command) or allow_research_import_related_prompt
+    allow_mlh_owner_route_paths = (
+        (_is_mlh_owner_route_review_command(command) and not _is_subagent_delegation_tool_request(data))
+        or allow_research_import_related_prompt
+    )
     allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, data)
     allow_active_plan_spec_doc_patch = _is_active_plan_spec_doc_patch_request(inventory, data)
     allow_post_closeout_lifecycle_route_stage = _is_post_closeout_lifecycle_route_stage_command(inventory, command, paths)
     allow_route_produced_lifecycle_route_stage = _is_route_produced_lifecycle_route_stage_command(inventory, command)
-    allow_post_closeout_local_vcs_stage = _is_post_closeout_local_vcs_stage_command(inventory, command)
+    allow_post_closeout_local_vcs_stage = (
+        _is_post_closeout_local_vcs_stage_command(inventory, command)
+        and not _hook_command_workdir_outside_root(inventory, data)
+    )
     allow_post_closeout_local_vcs_commit = _is_post_closeout_local_vcs_commit_command(inventory, command)
+    post_closeout_lifecycle_vcs_finalization_paths = _post_closeout_lifecycle_vcs_finalization_paths(inventory, command)
     allow_route_produced_lifecycle_commit = _is_route_produced_lifecycle_commit_command(inventory, command)
+    allow_product_source_vcs_stage = _is_product_source_vcs_stage_command(inventory, data, command)
+    allow_product_source_vcs_push = _is_product_source_vcs_push_command(inventory, data, command)
+    allow_product_source_vcs_command = allow_product_source_vcs_stage or allow_product_source_vcs_push
+    reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, data, command)
+    allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
+    allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
     if _active_plan_roadmap_policy_relevant(inventory, command, paths):
         findings.append(
             Finding(
@@ -1398,6 +1519,11 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         allow_active_plan_spec_doc_patch=allow_active_plan_spec_doc_patch,
         allow_post_closeout_lifecycle_route_stage=(allow_post_closeout_lifecycle_route_stage or allow_route_produced_lifecycle_route_stage),
         allow_post_closeout_local_vcs_stage=allow_post_closeout_local_vcs_stage,
+        allow_post_closeout_lifecycle_vcs_finalization_paths=post_closeout_lifecycle_vcs_finalization_paths,
+        allow_delegation_prompt_context=allow_delegation_prompt_context,
+        allow_product_source_vcs_command=allow_product_source_vcs_command,
+        reviewed_local_vcs_checkpoint_root=reviewed_local_vcs_checkpoint.root,
+        reviewed_local_vcs_checkpoint_paths=set(reviewed_local_vcs_checkpoint.paths),
     ):
         findings.append(finding)
     if _looks_like_opaque_shell_payload(command):
@@ -1475,6 +1601,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     if allow_mlh_owner_route_paths:
         owner_route_evidence_path = _first_mlh_owner_route_evidence_path(inventory, paths)
+        if _powershell_mlh_splat_policy_command(command):
+            findings.append(
+                Finding(
+                    "info",
+                    "hooks-policy-allow-powershell-mlh-owner-route-splat",
+                    (
+                        "recognized simple PowerShell argv/splat composition that resolves to a first-class MLH "
+                        "owner-route dry-run/apply command; direct lifecycle or product-source writes remain blocked"
+                    ),
+                    owner_route_evidence_path or None,
+                )
+            )
         if owner_route_evidence_path:
             findings.append(
                 Finding(
@@ -1535,6 +1673,57 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 ),
             )
         )
+    if post_closeout_lifecycle_vcs_finalization_paths:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-post-closeout-lifecycle-vcs-finalization",
+                (
+                    "allowed narrow post-closeout local VCS finalization for a prior reviewed staged "
+                    "lifecycle/evidence diff; this permits only VCS finalization and does not approve "
+                    "lifecycle content, archive, push, release, roadmap movement, or authority decisions"
+                ),
+            )
+        )
+    if allow_product_source_vcs_stage:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-product-source-vcs-staging",
+                (
+                    "allowed exact Git staging from the configured product_source_root workdir after plan_status=none; "
+                    "operating-root lifecycle files, broad add, wildcards, directories, commit, push, reset, and clean "
+                    "remain outside this allowance"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_product_source_vcs_push:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-product-source-vcs-push",
+                (
+                    "allowed ordinary non-force Git push from the configured product_source_root workdir after "
+                    "plan_status=none; force, mirror, delete, broad refspec, operating-root lifecycle mutation, "
+                    "release, and future lifecycle decisions remain unapproved"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_reviewed_local_vcs_checkpoint:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-reviewed-local-vcs-checkpoint",
+                (
+                    "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
+                    "files in the actual command workdir/root; broad staging, unrelated dirty work, push, release, "
+                    "provider routing, reset, clean, and authority decisions remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
     if allow_route_produced_lifecycle_commit:
         findings.append(
             Finding(
@@ -1563,6 +1752,73 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "info",
                 "hooks-policy-allow-read-only-lifecycle-inspection",
                 "allowed read-only lifecycle inspection; route files remain authority and this hook output cannot approve mutation or lifecycle movement",
+                paths[0] if paths else None,
+            )
+        )
+    if allow_read_only_product_source_smoke and any(_is_under_configured_product_root(inventory, path) for path in paths):
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-product-source-smoke",
+                (
+                    "allowed read-only Python smoke importing configured product_source_root for MLH inspect JSON; "
+                    "writes, apply/rebuild/cache/runtime launch, lifecycle mutation, and Git mutation remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_read_only_subagent_delegation:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-subagent-delegation",
+                (
+                    "allowed source-explicit read-only subagent delegation prompt; lifecycle apply/archive, "
+                    "roadmap mutation, Git mutation, provider/daemon launch, cache truth, and source writes remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_reviewed_local_vcs_delegation:
+        findings.append(
+            Finding(
+                "warn",
+                "hooks-policy-warn-reviewed-local-vcs-delegation",
+                (
+                    "allowed project-thread delegation to coordinate reviewed local-only VCS checkpointing; actual "
+                    "shell/file operations remain guarded, and broad staging, push/release/provider routing, "
+                    "daemon/runtime launch, direct authority edits, and bypass wording remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_delegation_prompt_context and not allow_read_only_subagent_delegation and not allow_reviewed_local_vcs_delegation:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-delegation-prompt-context",
+                (
+                    "allowed delegation/thread prompt context to name protected routes or product roots without "
+                    "treating them as current-tool mutation targets; actual shell/editor/file operations, embedded "
+                    "executable payloads, lifecycle apply/archive, Git mutation, push, release, and authority "
+                    "decisions remain guarded"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if (
+        _is_subagent_delegation_tool_request(data)
+        and _subagent_delegation_forbidden_shortcut(text)
+        and not allow_reviewed_local_vcs_delegation
+    ):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-subagent-delegation-shortcut",
+                (
+                    "blocked subagent delegation prompt because it contains lifecycle apply, archive, Git, "
+                    "provider/daemon launch, or source-write shortcut markers; keep delegation read-only and evidence/navigation only"
+                ),
                 paths[0] if paths else None,
             )
         )
@@ -1651,19 +1907,32 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_post_closeout_local_vcs_stage
         and not allow_post_closeout_local_vcs_commit
         and not allow_route_produced_lifecycle_commit
+        and not allow_product_source_vcs_command
         and not allow_mlh_owner_route_git_literals
+        and not allow_reviewed_local_vcs_checkpoint
+        and not allow_reviewed_local_vcs_delegation
     ):
         next_safe = _git_mutation_next_safe_command(inventory, command)
-        git_message = (
-            "blocked Git mutation while an active plan is open; complete explicit lifecycle closeout "
-            f"or stage the coherent route-produced lifecycle set; next_safe_command={next_safe}"
-            if _has_active_plan(inventory)
-            else (
-                "blocked broad Git mutation after closeout; only exact staging of reviewed existing files or "
-                "narrow local commit commands are allowed, and hook output cannot approve push, reset, clean, "
-                f"amend, wildcard, directory, or broad add; next_safe_command={next_safe}"
+        if reviewed_local_vcs_checkpoint.blocked_reason:
+            git_message = (
+                "blocked reviewed local VCS checkpoint because "
+                f"{reviewed_local_vcs_checkpoint.blocked_reason}; only exact existing MLH route/evidence files "
+                "in the actual command workdir/root are allowed, and hook output cannot approve push, release, "
+                "reset, clean, broad add, or authority decisions; "
+                "next_safe_command=git -C <actual-root> add -- <exact-route-files>; "
+                "git -C <actual-root> diff --cached --check; git -C <actual-root> commit -F <message-file>"
             )
-        )
+        else:
+            git_message = (
+                "blocked Git mutation while an active plan is open; complete explicit lifecycle closeout "
+                f"or stage the coherent route-produced lifecycle set; next_safe_command={next_safe}"
+                if _has_active_plan(inventory)
+                else (
+                    "blocked broad Git mutation after closeout; only exact staging of reviewed existing files or "
+                    "narrow local commit commands are allowed, and hook output cannot approve push, reset, clean, "
+                    f"amend, wildcard, directory, or broad add; next_safe_command={next_safe}"
+                )
+            )
         findings.append(
             Finding(
                 "error",
@@ -1672,7 +1941,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
-    product_root_direct_path = _product_root_direct_edit_path(inventory, paths, write_command)
+    product_root_direct_path = "" if allow_delegation_prompt_context else _product_root_direct_edit_path(inventory, paths, write_command)
     if product_root_direct_path:
         next_safe = _hook_product_root_write_next_safe_command(inventory, product_root_direct_path)
         findings.append(
@@ -1695,7 +1964,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
 def _post_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
-    paths = _hook_tool_intent(data, text).paths
+    paths = _hook_tool_intent(data, text, inventory=inventory).paths
     findings = [
         Finding(
             "info",
@@ -1901,9 +2170,9 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
     return fallback_text
 
 
-def _hook_tool_intent(data: dict[str, object], text: str) -> HookToolIntent:
+def _hook_tool_intent(data: dict[str, object], text: str, *, inventory: Inventory | None = None) -> HookToolIntent:
     command = _hook_input_command(data, text)
-    write_target_paths = _hook_write_target_paths(data, command)
+    write_target_paths = _hook_write_target_paths(data, command, inventory=inventory)
     paths = _hook_input_paths(data, text, command=command, write_target_paths=write_target_paths)
     return HookToolIntent(
         command=command,
@@ -1955,11 +2224,13 @@ def _hook_input_paths(
     return _dedupe_normalized_hook_paths(paths)
 
 
-def _hook_write_target_paths(data: dict[str, object], command: str) -> list[str]:
+def _hook_write_target_paths(data: dict[str, object], command: str, *, inventory: Inventory | None = None) -> list[str]:
     apply_patch_targets = _hook_apply_patch_target_paths(data)
     if apply_patch_targets:
         return _dedupe_normalized_hook_paths(apply_patch_targets)
     targets = _shell_write_target_paths(command)
+    if inventory is not None:
+        return _dedupe_normalized_hook_paths(_workdir_scoped_write_targets(inventory, data, targets))
     targets.extend(_workdir_relative_write_targets(data, targets))
     return _dedupe_normalized_hook_paths(targets)
 
@@ -1975,7 +2246,7 @@ def _shell_write_target_paths(command: str, *, depth: int = 0) -> list[str]:
     index = 0
     while index < len(tokens):
         raw = str(tokens[index] or "").strip()
-        clean = _clean_token(raw)
+        clean = _clean_shell_command_token(raw)
         inline_redirect_target = _inline_redirection_target(raw)
         if inline_redirect_target:
             targets.append(inline_redirect_target)
@@ -2034,6 +2305,23 @@ def _workdir_relative_write_targets(data: dict[str, object], targets: list[str])
     return resolved
 
 
+def _workdir_scoped_write_targets(inventory: Inventory, data: dict[str, object], targets: list[str]) -> list[str]:
+    if not targets:
+        return []
+    workdir = _hook_command_workdir_path(inventory, data) or inventory.root
+    scoped: list[str] = []
+    for target in targets:
+        candidate = _resolve_hook_path_from_root(inventory, target, base_root=workdir)
+        if candidate is None:
+            scoped.append(target)
+            continue
+        try:
+            scoped.append(candidate.relative_to(inventory.root.resolve()).as_posix())
+        except (OSError, RuntimeError, ValueError):
+            scoped.append(candidate.as_posix())
+    return scoped
+
+
 def _hook_workdir_value(data: dict[str, object]) -> str:
     for key in ("cwd", "workdir", "working_directory", "workingDirectory"):
         value = data.get(key)
@@ -2048,7 +2336,7 @@ def _hook_workdir_value(data: dict[str, object]) -> str:
 
 
 def _write_command_target_paths(tokens: list[str], command_index: int) -> tuple[list[str], int]:
-    command = _clean_token(tokens[command_index])
+    command = _clean_shell_command_token(tokens[command_index])
     max_positional = 2 if command in PAIRED_TARGET_WRITING_COMMAND_NAMES else 1
     single_target = command in SINGLE_TARGET_WRITING_COMMAND_NAMES
     targets: list[str] = []
@@ -2128,7 +2416,7 @@ def _path_argument_value(token: str) -> str:
 def _git_output_target_paths(tokens: list[str]) -> list[str]:
     targets: list[str] = []
     for index, token in enumerate(tokens):
-        clean = _clean_token(token)
+        clean = _clean_shell_command_token(token)
         if clean == "--output" and index + 1 < len(tokens):
             target = _path_argument_value(tokens[index + 1])
             if target:
@@ -2162,7 +2450,7 @@ def _nested_shell_commands_from_tokens(tokens: list[str]) -> list[str]:
     index = 0
     while index < len(tokens):
         raw = str(tokens[index] or "")
-        clean = _clean_token(raw)
+        clean = _clean_shell_command_token(raw)
         name = Path(clean).name
         if name in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
             payload, next_index = _powershell_payload(tokens, index + 1)
@@ -2398,14 +2686,14 @@ def _normalize_hook_path(path: str) -> str:
     return rel
 
 
-def _resolve_hook_path_from_root(inventory: Inventory, path: str) -> Path | None:
+def _resolve_hook_path_from_root(inventory: Inventory, path: str, *, base_root: Path | None = None) -> Path | None:
     raw = _clean_hook_path_token(path)
     if not raw:
         return None
     try:
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
-            candidate = inventory.root / candidate
+            candidate = (base_root or inventory.root) / candidate
         return candidate.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
@@ -2413,6 +2701,17 @@ def _resolve_hook_path_from_root(inventory: Inventory, path: str) -> Path | None
 
 def _path_escapes_root(path: str) -> bool:
     return _normalize_hook_path(path).startswith("../")
+
+
+def _path_resolves_under_base_root(inventory: Inventory, path: str, base_root: Path) -> bool:
+    target = _resolve_hook_path_from_root(inventory, path, base_root=base_root)
+    if target is None:
+        return False
+    try:
+        target.relative_to(base_root.resolve())
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _path_policy_findings(
@@ -2427,9 +2726,16 @@ def _path_policy_findings(
     allow_active_plan_spec_doc_patch: bool = False,
     allow_post_closeout_lifecycle_route_stage: bool = False,
     allow_post_closeout_local_vcs_stage: bool = False,
+    allow_post_closeout_lifecycle_vcs_finalization_paths: set[str] | None = None,
+    allow_delegation_prompt_context: bool = False,
+    allow_product_source_vcs_command: bool = False,
+    reviewed_local_vcs_checkpoint_root: Path | None = None,
+    reviewed_local_vcs_checkpoint_paths: set[str] | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     severity = "warn" if warn_only else "error"
+    finalization_paths = allow_post_closeout_lifecycle_vcs_finalization_paths or set()
+    checkpoint_paths = reviewed_local_vcs_checkpoint_paths or set()
     for rel in paths:
         if _is_generated_cache_path(rel):
             recovery_command = _generated_cache_recovery_command(inventory)
@@ -2444,6 +2750,15 @@ def _path_policy_findings(
                     rel,
                 )
             )
+        route_rel = (_hook_route_rel_path(inventory, rel) or _normalize_hook_path(rel)).casefold()
+        if route_rel in finalization_paths:
+            continue
+        if route_rel in checkpoint_paths:
+            continue
+        if reviewed_local_vcs_checkpoint_root is not None and _path_resolves_under_base_root(inventory, rel, reviewed_local_vcs_checkpoint_root):
+            continue
+        if allow_delegation_prompt_context and (_is_lifecycle_route_path(rel) or _is_under_configured_product_root(inventory, rel)):
+            continue
         if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and _is_lifecycle_route_path(rel):
             continue
         if allow_read_only_roadmap_path and _is_roadmap_path(rel):
@@ -2481,6 +2796,8 @@ def _path_policy_findings(
                 )
             )
         if _is_under_configured_product_root(inventory, rel):
+            if allow_product_source_vcs_command:
+                continue
             if allow_read_only_source_paths or allow_mlh_owner_route_paths or _is_active_plan_product_artifact(inventory, rel):
                 continue
             next_safe = _hook_product_root_write_next_safe_command(inventory, rel)
@@ -2517,6 +2834,67 @@ def _is_bounded_mlh_read_tool_request(data: dict[str, object]) -> bool:
         if lowered.endswith(BOUNDED_MLH_READ_TOOL_SUFFIXES):
             return True
     return False
+
+
+def _hook_tool_name(data: dict[str, object]) -> str:
+    for key in ("toolName", "tool_name", "tool", "name"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().casefold()
+    return ""
+
+
+def _is_subagent_delegation_tool_request(data: dict[str, object]) -> bool:
+    tool_name = _hook_tool_name(data)
+    return bool(tool_name) and any(tool_name.endswith(marker) or marker in tool_name for marker in READ_ONLY_SUBAGENT_DELEGATION_TOOLS)
+
+
+def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
+    raw = str(text or "")
+    if _is_reviewed_local_vcs_delegation_prompt(raw):
+        scrubbed = SUBAGENT_DELEGATION_LOCAL_VCS_RE.sub(" ", raw)
+        scrubbed = SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
+        return bool(SUBAGENT_DELEGATION_FORBIDDEN_RE.search(scrubbed) or SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed))
+    scrubbed = SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", raw)
+    return bool(SUBAGENT_DELEGATION_FORBIDDEN_RE.search(scrubbed) or SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed))
+
+
+def _is_reviewed_local_vcs_delegation_prompt(text: str) -> bool:
+    raw = str(text or "")
+    lowered = raw.casefold()
+    if not SUBAGENT_DELEGATION_LOCAL_VCS_RE.search(raw):
+        return False
+    if not any(marker in lowered for marker in LOCAL_VCS_DELEGATION_PURPOSE_MARKERS):
+        return False
+    boundary_hits = sum(1 for marker in LOCAL_VCS_DELEGATION_BOUNDARY_MARKERS if marker in lowered)
+    if boundary_hits < 3:
+        return False
+    return any(marker in lowered for marker in ("local-only", "local only", "no push", "do not push", "without push", "without pushing"))
+
+
+def _is_reviewed_local_vcs_delegation_request(data: dict[str, object], text: str) -> bool:
+    return (
+        _is_subagent_delegation_tool_request(data)
+        and _is_reviewed_local_vcs_delegation_prompt(text)
+        and not _subagent_delegation_forbidden_shortcut(text)
+    )
+
+
+def _is_read_only_subagent_delegation_request(data: dict[str, object], text: str) -> bool:
+    if not _is_subagent_delegation_tool_request(data):
+        return False
+    lowered = str(text or "").casefold()
+    if _subagent_delegation_forbidden_shortcut(lowered):
+        return False
+    return any(marker in lowered for marker in READ_ONLY_SUBAGENT_DELEGATION_MARKERS)
+
+
+def _is_delegation_prompt_context_request(data: dict[str, object], text: str) -> bool:
+    if not _is_subagent_delegation_tool_request(data):
+        return False
+    if _subagent_delegation_forbidden_shortcut(text):
+        return False
+    return True
 
 
 def _mlh_policy_command(command: str) -> str:
@@ -2689,6 +3067,18 @@ def _has_mlh_review_mode_token(command: str) -> bool:
     return bool(_mlh_command_token_set(command).intersection({"--dry-run", "--apply", "--help", "-h"}))
 
 
+def _has_mlh_option_value(command: str, option: str) -> bool:
+    expected = option.casefold()
+    tokens = _shell_tokens(command)
+    for index, token in enumerate(tokens):
+        clean = _clean_token(token)
+        if clean == expected:
+            return index + 1 < len(tokens) and bool(_clean_token(tokens[index + 1])) and not _clean_token(tokens[index + 1]).startswith("-")
+        if clean.startswith(expected + "="):
+            return bool(clean.split("=", 1)[1])
+    return False
+
+
 def _is_mlh_evidence_record_route_command(command: str) -> bool:
     lowered = command.casefold()
     tokens = _mlh_command_token_set(command)
@@ -2696,6 +3086,7 @@ def _is_mlh_evidence_record_route_command(command: str) -> bool:
         _mlh_cli_subcommand(lowered) == "evidence"
         and not _looks_like_write_command(command)
         and "--record" in tokens
+        and (_has_mlh_option_value(command, "--record-id") or tokens.intersection({"--help", "-h"}))
         and _has_mlh_review_mode_token(command)
     )
 
@@ -2730,7 +3121,7 @@ def _is_read_only_source_discovery_command(command: str) -> bool:
         return False
     tokens = _shell_tokens(command)
     for index, token in enumerate(tokens):
-        clean = _clean_token(token)
+        clean = _clean_shell_command_token(token)
         if not clean or clean.startswith("-"):
             continue
         if clean not in READ_ONLY_SOURCE_DISCOVERY_COMMANDS:
@@ -2765,6 +3156,62 @@ def _is_read_only_git_inspection_command(command: str) -> bool:
     return _git_subcommand(command) in READ_ONLY_GIT_INSPECTION_COMMANDS
 
 
+def _is_read_only_product_source_smoke_command(inventory: Inventory, command: str) -> bool:
+    if _configured_product_source_root_path(inventory) is None:
+        return False
+    if _looks_like_write_command(command):
+        return False
+    lowered = command.casefold()
+    if not _command_has_python_executable(command):
+        return False
+    if any(marker in lowered for marker in READ_ONLY_PRODUCT_SOURCE_SMOKE_FORBIDDEN_MARKERS):
+        return False
+    if _is_python_mlh_module_inspect_command(command):
+        return True
+    return any(_python_inline_payload_is_read_only_mlh_inspect(payload) for payload in _python_inline_payloads(command))
+
+
+def _command_has_python_executable(command: str) -> bool:
+    return any(_is_python_executable_token(token) for token in _shell_tokens(command))
+
+
+def _is_python_mlh_module_inspect_command(command: str) -> bool:
+    subcommand = _mlh_cli_subcommand(command.casefold())
+    if subcommand not in READ_ONLY_PRODUCT_SOURCE_SMOKE_COMMANDS:
+        return False
+    return "--inspect" in _mlh_command_token_set(command)
+
+
+def _python_inline_payloads(command: str) -> list[str]:
+    payloads: list[str] = []
+    tokens = _shell_tokens(command)
+    for index, token in enumerate(tokens):
+        if not _is_python_executable_token(token):
+            continue
+        cursor = index + 1
+        while cursor < len(tokens):
+            clean = _clean_token(tokens[cursor])
+            if clean in {"-c", "-command"}:
+                if cursor + 1 < len(tokens):
+                    payloads.append(_strip_shell_payload_token(tokens[cursor + 1]))
+                break
+            if clean == "-m":
+                break
+            cursor += 1
+    return payloads
+
+
+def _python_inline_payload_is_read_only_mlh_inspect(payload: str) -> bool:
+    lowered = str(payload or "").casefold()
+    if any(marker in lowered for marker in READ_ONLY_PRODUCT_SOURCE_SMOKE_FORBIDDEN_MARKERS):
+        return False
+    if "my" + "littleharness" not in lowered or "main(" not in lowered:
+        return False
+    if "--inspect" not in lowered:
+        return False
+    return any(f"'{name}'" in lowered or f'"{name}"' in lowered for name in READ_ONLY_PRODUCT_SOURCE_SMOKE_COMMANDS)
+
+
 def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, command: str, paths: list[str]) -> bool:
     if _has_active_plan(inventory):
         return False
@@ -2787,6 +3234,143 @@ def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, comma
     return _coherent_route_produced_lifecycle_paths(inventory, pathspecs)
 
 
+def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+        return False
+    base_root, product_root = _product_source_vcs_roots(inventory, data, command)
+    if base_root is None or product_root is None:
+        return False
+    subcommand, _tokens, _index = _git_command_context(command)
+    if subcommand not in {"add", "stage"}:
+        return False
+    pathspecs = _git_stage_pathspecs(command)
+    if not pathspecs:
+        return False
+    return all(
+        _is_exact_post_closeout_stage_file(
+            inventory,
+            pathspec,
+            base_root=base_root,
+            boundary_root=product_root,
+        )
+        for pathspec in pathspecs
+    )
+
+
+def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+        return False
+    base_root, product_root = _product_source_vcs_roots(inventory, data, command)
+    if base_root is None or product_root is None:
+        return False
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand != "push" or subcommand_index < 0:
+        return False
+    operands: list[str] = []
+    for token in tokens[subcommand_index + 1 :]:
+        clean = _clean_token(token)
+        if not clean:
+            continue
+        if _is_shell_command_separator(token, clean):
+            return False
+        if clean == "--":
+            continue
+        if clean in {"-u", "--set-upstream"}:
+            continue
+        if clean.startswith("--force") or clean in {"-f", "--mirror", "--delete", "--all", "--tags", "--prune"}:
+            return False
+        if clean.startswith("-") and not clean.startswith("--") and "f" in clean[1:]:
+            return False
+        if clean.startswith("-"):
+            return False
+        if (
+            clean.startswith("+")
+            or ":" in clean
+            or _looks_like_product_source_tag_push_ref(clean)
+            or any(char in clean for char in "*?[]")
+        ):
+            return False
+        operands.append(clean)
+    return len(operands) <= 2
+
+
+def _looks_like_product_source_tag_push_ref(ref: str) -> bool:
+    clean = _normalize_hook_path(ref).casefold()
+    if clean.startswith(("refs/tags/", "tags/")):
+        return True
+    return bool(re.match(r"^v?\d+\.\d+(?:\.\d+)?(?:[-+][a-z0-9._-]+)?$", clean))
+
+
+def _product_source_vcs_roots(
+    inventory: Inventory, data: dict[str, object], command: str
+) -> tuple[Path | None, Path | None]:
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is None:
+        return None, None
+    workdir = _git_effective_workdir_path(inventory, data, command)
+    if workdir is None:
+        return None, None
+    try:
+        workdir.relative_to(product_root)
+    except (OSError, RuntimeError, ValueError):
+        return None, None
+    try:
+        workdir.relative_to(inventory.root.resolve())
+        return None, None
+    except ValueError:
+        pass
+    except (OSError, RuntimeError):
+        return None, None
+    try:
+        product_root.relative_to(inventory.root.resolve())
+        return None, None
+    except ValueError:
+        return workdir, product_root
+    except (OSError, RuntimeError):
+        return None, None
+
+
+def _configured_product_source_root_path(inventory: Inventory) -> Path | None:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    product_root = str(state.get("product_source_root") or "").strip()
+    if not product_root:
+        return None
+    try:
+        candidate = Path(product_root).expanduser()
+        if not candidate.is_absolute():
+            candidate = inventory.root / candidate
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _hook_command_workdir_path(inventory: Inventory, data: dict[str, object]) -> Path | None:
+    raw_value = str(_hook_workdir_value(data) or "").strip()
+    if not raw_value:
+        return None
+    value = _path_argument_value(raw_value) or raw_value
+    try:
+        candidate = Path(_clean_hook_path_token(value)).expanduser()
+        if not candidate.is_absolute():
+            candidate = inventory.root / candidate
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _hook_command_workdir_outside_root(inventory: Inventory, data: dict[str, object]) -> bool:
+    workdir = _hook_command_workdir_path(inventory, data)
+    if workdir is None:
+        return False
+    try:
+        workdir.relative_to(inventory.root.resolve())
+        return False
+    except ValueError:
+        return True
+    except (OSError, RuntimeError):
+        return False
+
+
 def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str) -> bool:
     if _has_active_plan(inventory) or _has_shell_command_separator(command):
         return False
@@ -2803,6 +3387,148 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
     if _has_active_plan(inventory):
         return False
     return _is_narrow_local_vcs_commit_command(command)
+
+
+def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, command: str) -> set[str]:
+    if not _is_post_closeout_local_vcs_commit_command(inventory, command):
+        return set()
+    return _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, _git_staged_paths(inventory))
+
+
+def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object], command: str) -> ReviewedLocalVcsCheckpoint:
+    if _has_shell_command_separator(command):
+        return ReviewedLocalVcsCheckpoint()
+    subcommand = _git_subcommand(command)
+    if subcommand not in {"add", "stage", "commit"}:
+        return ReviewedLocalVcsCheckpoint()
+    target_inventory, root_reason = _neighbor_mlh_root_inventory(inventory, data, command)
+    if target_inventory is None:
+        return ReviewedLocalVcsCheckpoint(blocked_reason=root_reason) if root_reason else ReviewedLocalVcsCheckpoint()
+    if subcommand in {"add", "stage"}:
+        pathspecs = _git_stage_pathspecs(command)
+        if not pathspecs:
+            return ReviewedLocalVcsCheckpoint(root=target_inventory.root, blocked_reason="no exact pathspecs were supplied")
+        paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, pathspecs)
+        if not paths:
+            return ReviewedLocalVcsCheckpoint(
+                root=target_inventory.root,
+                blocked_reason="the pathspecs are not a coherent reviewed lifecycle/evidence route set in the actual command root",
+            )
+        return ReviewedLocalVcsCheckpoint(root=target_inventory.root, paths=frozenset(paths), mode="staging")
+    if not _is_narrow_local_vcs_commit_command(command):
+        return ReviewedLocalVcsCheckpoint(
+            root=target_inventory.root,
+            blocked_reason="commit command is not a narrow local commit with a reviewed message option",
+        )
+    staged = _git_staged_paths_for_root(target_inventory.root)
+    paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, staged)
+    if not paths:
+        return ReviewedLocalVcsCheckpoint(
+            root=target_inventory.root,
+            blocked_reason="staged files are not a coherent reviewed lifecycle/evidence route set in the actual command root",
+        )
+    return ReviewedLocalVcsCheckpoint(root=target_inventory.root, paths=frozenset(paths), mode="commit")
+
+
+def _neighbor_mlh_root_inventory(inventory: Inventory, data: dict[str, object], command: str) -> tuple[Inventory | None, str]:
+    actual_root = _git_effective_workdir_path(inventory, data, command)
+    if actual_root is None:
+        return None, "actual command workdir/root is ambiguous because git work-tree/git-dir options were used"
+    try:
+        actual_root_resolved = actual_root.resolve()
+        current_root = inventory.root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None, "actual command workdir/root could not be resolved"
+    if actual_root_resolved == current_root:
+        return None, ""
+    try:
+        actual_root_resolved.relative_to(current_root)
+        return None, ""
+    except ValueError:
+        pass
+    except (OSError, RuntimeError):
+        return None, "actual command workdir/root could not be compared with the current root"
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is not None:
+        try:
+            product_root_resolved = product_root.resolve()
+            if actual_root_resolved == product_root_resolved:
+                return None, ""
+            actual_root_resolved.relative_to(product_root_resolved)
+            return None, ""
+        except ValueError:
+            pass
+        except (OSError, RuntimeError):
+            return None, "actual command workdir/root could not be compared with the configured product source root"
+    try:
+        target_inventory = load_inventory(actual_root_resolved)
+    except Exception:
+        return None, "actual command workdir/root is not a readable MLH root"
+    if target_inventory.root_kind != LIVE_OPERATING_ROOT:
+        return None, f"actual command workdir/root is not a live MLH operating root (root_kind={target_inventory.root_kind})"
+    return target_inventory, ""
+
+
+def _git_effective_workdir_path(inventory: Inventory, data: dict[str, object], command: str) -> Path | None:
+    workdir = _hook_command_workdir_path(inventory, data) or inventory.root.resolve()
+    _subcommand, tokens, raw_tokens, subcommand_index = _git_command_context_tokens(command)
+    if subcommand_index < 0:
+        return workdir
+    git_index = -1
+    for index, token in enumerate(tokens[:subcommand_index]):
+        if _is_git_executable_token(token):
+            git_index = index
+            break
+    if git_index < 0:
+        return workdir
+    index = git_index + 1
+    while index < subcommand_index:
+        clean = tokens[index]
+        raw_clean = _clean_git_option_raw_token(raw_tokens[index])
+        if raw_clean == "-C":
+            if index + 1 >= subcommand_index:
+                return None
+            workdir = _resolve_path_token_from_base(raw_tokens[index + 1], workdir)
+            if workdir is None:
+                return None
+            index += 2
+            continue
+        if raw_clean.startswith("-C") and len(raw_clean) > 2:
+            workdir = _resolve_path_token_from_base(raw_clean[2:], workdir)
+            if workdir is None:
+                return None
+            index += 1
+            continue
+        if clean in {"--work-tree", "--git-dir"} or clean.startswith(("--work-tree=", "--git-dir=")):
+            return None
+        if clean in GIT_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if any(clean.startswith(option + "=") for option in GIT_OPTIONS_WITH_VALUES if option.startswith("--")):
+            index += 1
+            continue
+        index += 1
+    try:
+        return workdir.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _clean_git_option_raw_token(token: str) -> str:
+    return str(token or "").strip(' \t\r\n"\'`{}[](),;')
+
+
+def _resolve_path_token_from_base(token: str, base: Path) -> Path | None:
+    value = _path_argument_value(token) or _clean_hook_path_token(token)
+    if not value:
+        return None
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _is_route_produced_lifecycle_commit_command(inventory: Inventory, command: str) -> bool:
@@ -2908,6 +3634,130 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
     return True
 
 
+def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    if not any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS):
+        return set()
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return set()
+    state_rel = "project/" + "project-state.md"
+    roadmap_rel = "project/" + "roadmap.md"
+    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    if not last_archive_rel:
+        return set()
+    evidence_paths = {path for path in normalized if _is_agent_run_evidence_route_path(path)}
+    allowed = {state_rel, roadmap_rel, last_archive_rel, *evidence_paths}
+    if any(path not in allowed for path in normalized):
+        return set()
+    if state_rel not in normalized or last_archive_rel not in normalized or not evidence_paths:
+        return set()
+    if not all(_is_reviewed_agent_run_evidence_file(inventory, path) for path in evidence_paths):
+        return set()
+    return normalized
+
+
+def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
+    if _active_plan_ready_for_route_produced_lifecycle_git(inventory) and _coherent_route_produced_lifecycle_paths(inventory, paths):
+        return _normalized_route_produced_lifecycle_paths(inventory, paths)
+    post_closeout_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
+    if post_closeout_paths:
+        return post_closeout_paths
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return set()
+    agent_run_paths = {path for path in normalized if _is_agent_run_evidence_route_path(path)}
+    if agent_run_paths and normalized == agent_run_paths:
+        return normalized if all(_is_reviewed_agent_run_evidence_file(inventory, path) for path in agent_run_paths) else set()
+    receipt_paths = {path for path in normalized if _is_worker_run_receipt_route_path(path)}
+    if receipt_paths:
+        allowed = set(receipt_paths)
+        for path in receipt_paths:
+            receipt_allowed = _reviewed_worker_run_receipt_checkpoint_refs(inventory, path)
+            if not receipt_allowed:
+                return set()
+            allowed.update(receipt_allowed)
+        return normalized if normalized <= allowed else set()
+    return set()
+
+
+def _is_reviewed_agent_run_evidence_file(inventory: Inventory, path: str) -> bool:
+    if not _is_agent_run_evidence_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    return (
+        str(data.get("schema") or "").strip() == "mylittleharness.agent-run.v1"
+        and str(data.get("record_type") or "").strip() == "agent-run"
+        and bool(str(data.get("status") or "").strip())
+    )
+
+
+def _is_worker_run_receipt_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/verification/worker-run-receipts/") and rel.endswith(".json")
+
+
+def _reviewed_worker_run_receipt_checkpoint_refs(inventory: Inventory, path: str) -> set[str]:
+    if not _is_worker_run_receipt_route_path(path):
+        return set()
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return set()
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return set()
+        data = json.loads(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    if str(data.get("schema") or "").strip() != "mylittleharness.worker-run-receipt.v1":
+        return set()
+    if str(data.get("record_type") or "").strip() != "worker-run-receipt":
+        return set()
+    non_authority = str(data.get("non_authority") or "").casefold()
+    if "cannot approve" not in non_authority or "lifecycle" not in non_authority or "git" not in non_authority:
+        return set()
+    if data.get("private_trace_authoritative") is True:
+        return set()
+    event_history = data.get("event_history")
+    if isinstance(event_history, dict) and event_history.get("approves_lifecycle") is True:
+        return set()
+    private_traces = data.get("private_traces")
+    if isinstance(private_traces, dict) and private_traces.get("private_traces_authoritative") is True:
+        return set()
+    allowed = {_hook_route_rel_path(inventory, path).casefold()}
+    for field in ("event_stream_refs", "event_history_refs", "verification_refs"):
+        value = data.get(field)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            rel = _hook_route_rel_path(inventory, str(item or "")).casefold()
+            if rel.startswith("project/verification/") and _is_existing_lifecycle_route_file(inventory, rel):
+                allowed.add(rel)
+    return allowed
+
+
 def _normalized_route_produced_lifecycle_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
     normalized: set[str] = set()
     for path in paths:
@@ -2936,9 +3786,13 @@ def _last_archived_plan_rel_path(inventory: Inventory) -> str:
 
 
 def _git_staged_paths(inventory: Inventory) -> tuple[str, ...]:
+    return _git_staged_paths_for_root(inventory.root)
+
+
+def _git_staged_paths_for_root(root: Path) -> tuple[str, ...]:
     try:
         result = subprocess.run(
-            ["git", "-C", str(inventory.root), "diff", "--cached", "--name-only"],
+            ["git", "-C", str(root), "diff", "--cached", "--name-only"],
             check=False,
             capture_output=True,
             encoding="utf-8",
@@ -2973,7 +3827,13 @@ def _git_stage_pathspecs(command: str) -> list[str]:
     return pathspecs
 
 
-def _is_exact_post_closeout_stage_file(inventory: Inventory, pathspec: str) -> bool:
+def _is_exact_post_closeout_stage_file(
+    inventory: Inventory,
+    pathspec: str,
+    *,
+    base_root: Path | None = None,
+    boundary_root: Path | None = None,
+) -> bool:
     clean = _clean_token(pathspec)
     if not clean:
         return False
@@ -2984,11 +3844,12 @@ def _is_exact_post_closeout_stage_file(inventory: Inventory, pathspec: str) -> b
         return False
     if rel.startswith(":") or any(rel.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
         return False
-    target = _resolve_hook_path_from_root(inventory, clean)
+    target = _resolve_hook_path_from_root(inventory, clean, base_root=base_root)
     if target is None:
         return False
+    boundary = boundary_root or inventory.root
     try:
-        target.relative_to(inventory.root.resolve())
+        target.relative_to(boundary.resolve())
     except (OSError, RuntimeError, ValueError):
         return False
     try:
@@ -3292,7 +4153,7 @@ def _looks_like_write_command(command: str) -> bool:
             return True
     for token in tokens:
         raw = str(token or "").strip()
-        clean = _clean_token(raw)
+        clean = _clean_shell_command_token(raw)
         if _is_shell_redirection_token(raw, clean):
             return True
         if not clean:
@@ -3444,6 +4305,13 @@ def _is_python_executable_token(token: str) -> bool:
 
 def _clean_token(token: str) -> str:
     return str(token or "").strip(" \t\r\n\"'`{}[](),;").casefold()
+
+
+def _clean_shell_command_token(token: str) -> str:
+    clean = _clean_token(token)
+    while clean.startswith(("@(", "$(")):
+        clean = clean[2:].strip(" \t\r\n\"'`{}[](),;")
+    return clean
 
 
 def _has_explicit_mlh_review_mode(lowered_command: str) -> bool:

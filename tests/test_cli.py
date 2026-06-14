@@ -20,12 +20,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Sequence
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mylittleharness import atomic_files, bootstrap, claims
+from mylittleharness import atomic_files, bootstrap, claims, vcs as vcs_module
 from mylittleharness.adapter import serve_mcp_read_projection
 from mylittleharness.checks import (
     WORKFLOW_ATTACH_DIRECTORIES,
@@ -34,10 +35,11 @@ from mylittleharness.checks import (
     _active_plan_scoped_interrupt_contract_findings,
     _lifecycle_frontmatter_atomic_write,
     _route_reference_target_state,
+    audit_link_findings,
     resolve_link,
     validation_findings,
 )
-from mylittleharness.cli import main
+from mylittleharness.cli import COMMANDS, main
 from mylittleharness.context_memory import build_context_memory_capsule
 from mylittleharness.inventory import (
     EXPECTED_SPEC_NAMES,
@@ -71,6 +73,7 @@ from mylittleharness.vcs import (
     VcsPosture,
     VcsTrailer,
     VcsTrailerParseResult,
+    probe_vcs,
     product_diff_write_scope_findings,
     worktree_coordination_findings,
 )
@@ -643,7 +646,7 @@ class CliTests(unittest.TestCase):
                 code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", item_id, "--only-requested-item"])
 
             rendered = output.getvalue()
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 0, rendered)
             self.assertIn("plan-scoped-interrupt-contract", rendered)
             plan_text = (root / "project" / "implementation-plan.md").read_text(encoding="utf-8")
             state_text = (root / "project" / "project-state.md").read_text(encoding="utf-8")
@@ -935,6 +938,7 @@ class CliTests(unittest.TestCase):
                 "work_claim_required",
                 "work_claim_contract",
                 "route_receipt_contract",
+                "provider_runtime_config_contract",
                 "fan_in_authority",
                 "runtime_boundary",
                 "coordination_budget",
@@ -961,6 +965,11 @@ class CliTests(unittest.TestCase):
             self.assertIn("review_token_status", governor["fan_in_output_required"])
             self.assertIn("route receipts and review tokens are evidence only", governor["fan_in_authority"])
             self.assertIn("no worker lifecycle writes", governor["runtime_boundary"])
+            dispatcher = roles["dispatcher"]
+            self.assertTrue(dispatcher["may_spawn_workers"])
+            self.assertIn("secret environment variables may be named", " ".join(dispatcher["provider_runtime_config_contract"]))
+            self.assertIn("values are never persisted", " ".join(dispatcher["provider_runtime_config_contract"]))
+            self.assertIn("repo-visible task-session receipt", " ".join(dispatcher["provider_runtime_config_contract"]))
             permission = coder["permissions"][0]
             for key in ("route_id", "read", "propose", "apply", "requires_human_gate", "gate_class", "human_gate"):
                 self.assertIn(key, permission)
@@ -1790,6 +1799,44 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("projection-artifact-stale,projection-artifact-stale", stale_rendered)
             self.assertNotIn("projection-index-hash,projection-index-hash", stale_rendered)
 
+    def test_projection_rebuild_all_leaves_immediate_check_current_after_dirty_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nProjection rebuild mismatch probe.\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+            self.assertTrue((root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).is_file())
+            self.assertTrue((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).is_file())
+
+            rebuild_output = io.StringIO()
+            with redirect_stdout(rebuild_output):
+                rebuild_code = main(["--root", str(root), "projection", "--rebuild", "--target", "all"])
+
+            self.assertEqual(rebuild_code, 0)
+            self.assertFalse((root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists())
+            self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
+            self.assertIn("projection-artifact-build", rebuild_output.getvalue())
+            self.assertIn("projection-index-build", rebuild_output.getvalue())
+
+            before_check = snapshot_tree_bytes(root)
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+
+            self.assertEqual(check_code, 0)
+            self.assertEqual(before_check, snapshot_tree_bytes(root))
+            rendered = check_output.getvalue()
+            self.assertIn("projection-cache-status", rendered)
+            self.assertIn("artifacts=current", rendered)
+            self.assertIn("sqlite_index=current", rendered)
+            self.assertIn("detail=artifacts:projection-artifact-current; index:projection-index-current", rendered)
+            self.assertNotIn("artifacts=stale", rendered)
+            self.assertNotIn("sqlite_index=stale", rendered)
+            self.assertNotIn("stale_reason=projection-artifact-current", rendered)
+
     def test_projection_operation_marker_reports_updating_instead_of_plain_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -2445,6 +2492,43 @@ class CliTests(unittest.TestCase):
                     self.assertIn("project/specs/workflow/wrong-implementation.md implemented_by must point to an active or archived plan route", rendered)
                     self.assertNotIn("project/plan-incubation/wrong-status.md status='accepted'; lifecycle_state='accepted'", rendered)
 
+    def test_check_allows_empty_optional_route_relationship_lists_without_hiding_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            research_dir = root / "project/research"
+            research_dir.mkdir(exist_ok=True)
+            (research_dir / "empty-relationships.md").write_text(
+                "---\n"
+                'status: "imported"\n'
+                "supersedes: []\n"
+                "superseded_by: []\n"
+                "---\n"
+                "# Empty Relationships\n",
+                encoding="utf-8",
+            )
+            (research_dir / "bad-relationship.md").write_text(
+                "---\n"
+                'status: "imported"\n'
+                'superseded_by: "not a route path"\n'
+                "---\n"
+                "# Bad Relationship\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            findings = validation_findings(load_inventory(root))
+
+            self.assertEqual(before, snapshot_tree(root))
+            field_warnings = [finding for finding in findings if finding.code == "route-metadata-field"]
+            self.assertFalse(any(finding.source == "project/research/empty-relationships.md" for finding in field_warnings))
+            self.assertTrue(
+                any(
+                    finding.source == "project/research/bad-relationship.md"
+                    and "must be a root-relative route path" in finding.message
+                    for finding in field_warnings
+                )
+            )
+
     def test_check_reports_explicit_route_lifecycle_states_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -2844,6 +2928,56 @@ class CliTests(unittest.TestCase):
                 code = main(["--root", str(root), "check"])
             self.assertEqual(code, 0)
             self.assertNotIn("active-plan-adjacent-verification-ownership", output.getvalue())
+
+    def test_check_prefers_current_phase_verification_gate_over_stale_prior_phase_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-3"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-gate-plan"\n'
+                'title: "Current Gate Plan"\n'
+                'status: "complete"\n'
+                'active_phase: "phase-3"\n'
+                'phase_status: "complete"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/checks.py"\n'
+                '  - "tests/test_cli.py"\n'
+                'execution_policy: "current-phase-only"\n'
+                "auto_continue: false\n"
+                "---\n"
+                "# Current Gate Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1\n\n"
+                "- id: `phase-1`\n"
+                "- status: `done`\n"
+                "- write_scope: `src/mylittleharness/checks.py`\n"
+                "- verification_gates: UNRESOLVED: no repo-visible verification command was discovered from target artifacts.\n\n"
+                "### phase-3\n\n"
+                "- id: `phase-3`\n"
+                "- status: `done`\n"
+                "- write_scope: `src/mylittleharness/checks.py`, `tests/test_cli.py`\n"
+                "- verification_gates: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py` exits 0\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertNotIn("active-plan-verification-gate-unresolved", rendered)
+            self.assertNotIn("active-plan-verification-gate-closeout-blocker", rendered)
 
     def test_check_flags_auto_continue_without_stop_conditions_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4726,7 +4860,7 @@ class CliTests(unittest.TestCase):
             (["incubate", "--help"], "Advanced mutating command: create or append explicit future-idea incubation"),
             (["plan", "--help"], "Advanced mutating command: create or replace a deterministic active"),
             (["memory-hygiene", "--help"], "Advanced mutating command: apply explicit research/incubation lifecycle"),
-            (["roadmap", "--help"], "Advanced mutating command: add, batch-add, update, or normalize explicit"),
+            (["roadmap", "--help"], "Advanced mutating command: add, batch-add, batch-update, update, or normalize"),
             (["meta-feedback", "--help"], "Advanced mutating command: collect MLH-Fix-Candidate meta-feedback"),
             (["adapter", "--help"], "Advanced diagnostic: inspect or serve optional adapter"),
             (["attach", "--help"], "Compatibility command: preview or apply workflow scaffold attachment"),
@@ -6325,6 +6459,126 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             self.assertNotIn("check-agent-run-record-stale", refreshed_check.getvalue())
 
+    def test_evidence_record_refresh_ignores_existing_self_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "docs").mkdir()
+            (root / "src").mkdir()
+            (root / "docs/input.md").write_text("# Input\n", encoding="utf-8")
+            (root / "src/changed.py").write_text("print('before')\n", encoding="utf-8")
+            (root / "project/verification/agent-runs").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/smoke.md").write_text(
+                "---\n"
+                'status: "passed"\n'
+                "---\n"
+                "# Smoke Verification\n",
+                encoding="utf-8",
+            )
+            input_hash = hashlib.sha256((root / "docs/input.md").read_bytes()).hexdigest()
+            old_changed_hash = hashlib.sha256((root / "src/changed.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            record_ref = "project/verification/agent-runs/run-legacy.md"
+            record_path = root / record_ref
+            record_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-legacy"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "Refresh legacy self-ref evidence."\n'
+                'assigned_scope: "agent-run-evidence-route-mvp"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "verification-passed"\n'
+                'attempt_budget: "1/1"\n'
+                "input_refs:\n"
+                '  - "docs/input.md"\n'
+                "output_refs:\n"
+                f'  - "{record_ref}"\n'
+                "claimed_paths:\n"
+                '  - "src/changed.py"\n'
+                "changed_files:\n"
+                '  - "src/changed.py"\n'
+                "commands:\n"
+                '  - "pytest -q tests/test_cli.py"\n'
+                "verification_refs:\n"
+                '  - "project/verification/smoke.md"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none known"\n'
+                "source_hashes:\n"
+                f'  - "docs/input.md sha256={input_hash}"\n'
+                f'  - "src/changed.py sha256={old_changed_hash}"\n'
+                f'  - "project/verification/smoke.md sha256={smoke_hash}"\n'
+                "---\n"
+                "# Agent Run Record: run-legacy\n",
+                encoding="utf-8",
+            )
+            (root / "src/changed.py").write_text("print('after')\n", encoding="utf-8")
+            new_changed_hash = hashlib.sha256((root / "src/changed.py").read_bytes()).hexdigest()
+
+            common_args = [
+                "--root",
+                str(root),
+                "evidence",
+                "--record",
+                "--record-id",
+                "run-legacy",
+                "--role",
+                "coder",
+                "--actor",
+                "codex",
+                "--task",
+                "Refresh legacy self-ref evidence.",
+                "--assigned-scope",
+                "agent-run-evidence-route-mvp",
+                "--runtime",
+                "local-shell",
+                "--worktree-id",
+                "main",
+                "--status",
+                "succeeded",
+                "--stop-reason",
+                "source-hash-refresh",
+                "--attempt-budget",
+                "1/1",
+                "--input-ref",
+                "docs/input.md",
+                "--output-ref",
+                "docs/input.md",
+                "--claimed-path",
+                "src/changed.py",
+                "--changed-file",
+                "src/changed.py",
+                "--command",
+                "pytest -q tests/test_cli.py",
+                "--verification-ref",
+                "project/verification/smoke.md",
+                "--docs-decision",
+                "not-needed",
+                "--residual-risk",
+                "none known",
+            ]
+
+            dry_run = io.StringIO()
+            with redirect_stdout(dry_run):
+                self.assertEqual(main([*common_args, "--dry-run"]), 0)
+            dry_rendered = dry_run.getvalue()
+            self.assertIn("agent-run-record-refresh-self-ref-ignored", dry_rendered)
+            self.assertIn("agent-run-record-refresh-dry-run", dry_rendered)
+            self.assertNotIn("agent-run-record-refused", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main([*common_args, "--apply"]), 0)
+            apply_rendered = apply_output.getvalue()
+            refreshed_text = record_path.read_text(encoding="utf-8")
+            self.assertIn("agent-run-record-refreshed", apply_rendered)
+            self.assertIn(f"src/changed.py sha256={new_changed_hash}", refreshed_text)
+            self.assertNotIn(f"src/changed.py sha256={old_changed_hash}", refreshed_text)
+            self.assertNotIn(f"{record_ref} sha256=", refreshed_text)
+
     def test_evidence_record_refuses_self_output_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -6499,29 +6753,22 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("worker run receipt child_agent_fanout", rendered)
             self.assertNotIn("worker run receipt artifact_lineage", rendered)
 
-
     def test_check_focus_agents_reports_worker_run_receipt_event_history_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
-            worker_ref = "src" + "/worker.py"
-            receipt_dir_ref = "project" + "/verification" + "/worker-run-receipts"
-            logs_dir_ref = "project" + "/verification" + "/logs"
-            smoke_ref = "project" + "/verification" + "/smoke.md"
-            log_ref = "project" + "/verification" + "/logs" + "/launch-2-worker-1.jsonl"
-            receipt_ref = "project" + "/verification" + "/worker-run-receipts" + "/launch-2-worker-1.json"
-            receipt_dir = root / receipt_dir_ref
+            receipt_dir = root / "project/verification/worker-run-receipts"
             receipt_dir.mkdir(parents=True)
             (root / "src").mkdir()
-            (root / worker_ref).write_text("print('worker output')\n", encoding="utf-8")
-            (root / logs_dir_ref).mkdir(parents=True)
-            (root / log_ref).write_text(
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-2-worker-1.jsonl").write_text(
                 '{"event":"queued"}\n{"event":"running"}\n{"event":"completed"}\n',
                 encoding="utf-8",
             )
-            (root / smoke_ref).write_text("# Smoke\n\npassed\n", encoding="utf-8")
-            worker_hash = hashlib.sha256((root / worker_ref).read_bytes()).hexdigest()
-            smoke_hash = hashlib.sha256((root / smoke_ref).read_bytes()).hexdigest()
-            (root / receipt_ref).write_text(
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-2-worker-1.json").write_text(
                 json.dumps(
                     {
                         "schema": "mylittleharness.worker-run-receipt.v1",
@@ -6542,13 +6789,13 @@ class CliTests(unittest.TestCase):
                         "event_history_summary": "Repo-visible event stream recorded queued, running, and completed worker events; private SDK traces excluded.",
                         "event_history_redaction": "private-traces-excluded",
                         "private_trace_policy": "private SDK traces are excluded; repo-visible evidence only and cannot approve lifecycle.",
-                        "task_input_refs": ["project" + "/implementation-plan.md"],
-                        "event_stream_refs": [log_ref],
-                        "output_refs": [worker_ref],
-                        "verification_refs": [smoke_ref],
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-2-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
                         "source_hashes": [
-                            f"{worker_ref} sha256={worker_hash}",
-                            f"{smoke_ref} sha256={smoke_hash}",
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
                         ],
                         "event_history": {
                             "summary": "Repo-visible event summary only; no lifecycle authority.",
@@ -6573,12 +6820,877 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(before, snapshot_tree_bytes(root))
             rendered = output.getvalue()
-            self.assertIn(f"candidate: worker run receipt: {receipt_ref}", rendered)
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-2-worker-1.json", rendered)
             self.assertIn("event history refs are source-bound evidence", rendered)
             self.assertNotIn("event_history_redaction must use the event history redaction vocabulary", rendered)
             self.assertNotIn("private_trace_policy must explicitly keep private SDK traces non-authoritative", rendered)
             self.assertNotIn("private_trace_policy must not treat private SDK traces as authoritative", rendered)
             self.assertNotIn("event_history_summary must not claim event history approves lifecycle", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_runtime_guard_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-3-worker-1.jsonl").write_text(
+                '{"event":"preflight"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/logs/launch-3-worker-1-mailbox.jsonl").write_text(
+                '{"status":"delivered"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/handoffs").mkdir(parents=True)
+            (root / "project/verification/handoffs/launch-3-worker-1.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-3-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-3-worker-1",
+                        "launch_id": "launch-3",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve launch, lifecycle, roadmap, archive, Git, release, provider routing, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-3-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "runtime_guard_preflight": {
+                            "schema": "mylittleharness.runtime-guard-preflight-receipt.v1",
+                            "preflight_status": "passed",
+                            "mission_preconditions_status": "passed",
+                            "runtime_readiness": "ready",
+                            "replay_status": "replayed",
+                            "worktree_status": "dirty-reviewed",
+                            "non_authority": "repo-visible-evidence-only; cannot approve launch, lifecycle, provider routing, archive, Git, or target-repo acceptance",
+                            "dispatch_refs": ["project/verification/handoffs/launch-3-worker-1.json"],
+                            "mailbox_refs": ["project/verification/logs/launch-3-worker-1-mailbox.jsonl"],
+                            "leader_lifecycle_refs": ["project/implementation-plan.md"],
+                            "unsafe_bypass": {
+                                "sandbox_bypass": True,
+                                "approval_bypass": False,
+                                "summary": "Sandbox bypass posture is diagnostic evidence only and cannot approve launch.",
+                            },
+                            "worktree": {
+                                "base_ref": "main",
+                                "dirty_start": True,
+                                "summary": "Dirty worktree posture is recorded as evidence only and cannot approve launch.",
+                            },
+                            "hook_proof": {
+                                "proof_level": "fallback",
+                                "summary": "Fallback hook observation only; no native hook proof claimed.",
+                            },
+                            "provider_proof": {
+                                "proof_level": "env-present",
+                                "summary": "Provider environment presence recorded without secret values; no provider call or routing approval.",
+                            },
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-3-worker-1.json", rendered)
+            self.assertNotIn("runtime_guard_preflight preflight_status must use the runtime guard preflight namespace", rendered)
+            self.assertNotIn("runtime_guard_preflight non_authority must explicitly label preflight", rendered)
+            self.assertNotIn("runtime_guard_preflight.unsafe_bypass.sandbox_bypass must remain false", rendered)
+            self.assertNotIn("must not claim native hook proof when proof_level is fallback", rendered)
+            self.assertNotIn("must not claim provider-call proof when proof_level is env-present", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_child_agent_fanout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-4-parent.jsonl").write_text(
+                '{"event":"fanout"}\n{"event":"child-completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/logs/launch-4-reviewer.jsonl").write_text(
+                '{"event":"review-completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/prompts").mkdir(parents=True)
+            (root / "project/verification/prompts/reviewer.md").write_text("# Reviewer prompt\n", encoding="utf-8")
+            (root / "project/verification/agent-runs").mkdir(parents=True)
+            (root / "project/verification/agent-runs/reviewer.md").write_text("# Reviewer output\n", encoding="utf-8")
+            (root / "project/verification/handoffs").mkdir(parents=True)
+            (root / "project/verification/handoffs/launch-4-reviewer.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/work-claims").mkdir(parents=True)
+            (root / "project/verification/work-claims/launch-4-reviewer.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-4-parent.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-4-parent",
+                        "launch_id": "launch-4",
+                        "worker_id": "parent",
+                        "role": "conductor",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "waiting-for-review",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, fan-in, roadmap, archive, Git, release, provider routing, cleanup, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-4-parent.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "child_agent_fanout": {
+                            "schema": "mylittleharness.child-agent-fanout-receipt.v1",
+                            "parent_run_id": "launch-4-parent",
+                            "fanout_status": "completed",
+                            "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, fan-in, roadmap, archive, Git, release, provider routing, cleanup, or target-repo acceptance",
+                            "summary": "Parent launched one reviewer child; this is evidence only and cannot approve fan-in or lifecycle.",
+                            "coordination_refs": [
+                                "project/verification/handoffs/launch-4-reviewer.json",
+                                "project/verification/work-claims/launch-4-reviewer.json",
+                            ],
+                            "runtime_posture": {
+                                "summary": "Dirty worktree and bypass posture are evidence only and cannot approve fan-in or lifecycle.",
+                                "bypass_approved": False,
+                                "provider_routing_approved": False,
+                                "runtime_readiness_refs": ["project/verification/logs/launch-4-parent.jsonl"],
+                            },
+                            "authority": {
+                                "approves_lifecycle": False,
+                                "approves_fan_in": False,
+                                "approves_roadmap_status": False,
+                                "approves_git": False,
+                                "approves_provider_routing": False,
+                                "approves_release": False,
+                                "approves_cleanup": False,
+                                "approves_target_repo_acceptance": False,
+                            },
+                            "children": [
+                                {
+                                    "child_id": "reviewer-1",
+                                    "role": "reviewer",
+                                    "agent_type": "sdk-worker",
+                                    "provider_type": "openai",
+                                    "model": "gpt-5",
+                                    "worker_status": "succeeded",
+                                    "workflow_status": "waiting-for-review",
+                                    "verification_verdict": "passed",
+                                    "lifecycle_status": "active",
+                                    "target_root": str(root),
+                                    "summary": "Child reviewer completed and produced evidence only; cannot approve fan-in or lifecycle.",
+                                    "residual_risk": "none",
+                                    "task_refs": ["project/implementation-plan.md"],
+                                    "prompt_refs": ["project/verification/prompts/reviewer.md"],
+                                    "output_refs": ["project/verification/agent-runs/reviewer.md"],
+                                    "event_history_refs": ["project/verification/logs/launch-4-reviewer.jsonl"],
+                                    "verification_refs": ["project/verification/smoke.md"],
+                                    "authority": {
+                                        "approves_lifecycle": False,
+                                        "approves_fan_in": False,
+                                        "approves_target_repo_acceptance": False,
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-4-parent.json", rendered)
+            self.assertIn("child_agent_fanout is nested source-bound evidence for parent/child worker coordination", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout missing required", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout fanout_status must use the child fanout namespace", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout.authority.approves_fan_in must remain false", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout.children[0].worker_status must not carry lifecycle", rendered)
+            self.assertNotIn("worker run receipt child_agent_fanout.children[0].authority.approves_fan_in must remain false", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_checkpoint_resume_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-5-worker-1.jsonl").write_text(
+                '{"event":"checkpoint-created"}\n{"event":"replayed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/checkpoints").mkdir(parents=True)
+            (root / "project/verification/checkpoints/launch-5-checkpoint.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/checkpoints/launch-5-snapshot.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/replay").mkdir(parents=True)
+            (root / "project/verification/replay/launch-5-tail.jsonl").write_text('{"event":"tail"}\n', encoding="utf-8")
+            (root / "project/verification/messages").mkdir(parents=True)
+            (root / "project/verification/messages/launch-5-resume.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/backpressure").mkdir(parents=True)
+            (root / "project/verification/backpressure/launch-5-verdict.json").write_text('{"verdict":"allow"}\n', encoding="utf-8")
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-5-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-5-worker-1",
+                        "launch_id": "launch-5",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, provider routing, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-5-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "checkpoint_resume": {
+                            "schema": "mylittleharness.checkpoint-resume-receipt.v1",
+                            "task_run_id": "task-run-5",
+                            "root_run_id": "root-run-5",
+                            "parent_run_id": "parent-run-5",
+                            "queue": "sdk-workers",
+                            "concurrency_key": "root-run-5",
+                            "idempotency_key": "idem-5",
+                            "trace_id": "trace-5",
+                            "span_id": "span-5",
+                            "attempt": 1,
+                            "environment_type": "local",
+                            "external_status_namespace": "trigger.dev task run",
+                            "task_run_status": "completed",
+                            "checkpoint_status": "created",
+                            "checkpoint_kind": "message-snapshot",
+                            "checkpoint_created_at": "2026-06-12T00:00:00Z",
+                            "resume_required": True,
+                            "resume_status": "required",
+                            "resume_reason": "waiting for review before continuation",
+                            "restore_strategy": "snapshot-tail-replay",
+                            "replay_status": "replayed",
+                            "checkpoint_failure_status": "none",
+                            "idempotency_posture": "present",
+                            "backpressure_mode": "dry-run",
+                            "backpressure_verdict": "allow",
+                            "backpressure_stale_posture": "not-stale",
+                            "backpressure_failure_posture": "fail-open",
+                            "backpressure_ramp_window": "0%",
+                            "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, provider routing, release, launch, verification acceptance, or target-repo acceptance",
+                            "summary": "Checkpoint and replay evidence are source-bound runtime evidence only and cannot approve lifecycle or verification acceptance.",
+                            "durable_task_run_refs": ["project/verification/logs/launch-5-worker-1.jsonl"],
+                            "event_readback_refs": ["project/verification/logs/launch-5-worker-1.jsonl"],
+                            "checkpoint_refs": ["project/verification/checkpoints/launch-5-checkpoint.json"],
+                            "resume_message_refs": ["project/verification/messages/launch-5-resume.json"],
+                            "replay_refs": ["project/verification/replay/launch-5-tail.jsonl"],
+                            "backpressure_verdict_refs": ["project/verification/backpressure/launch-5-verdict.json"],
+                            "snapshot_refs": ["project/verification/checkpoints/launch-5-snapshot.json"],
+                            "authority": {
+                                "approves_lifecycle": False,
+                                "checkpoint_approves_lifecycle": False,
+                                "resume_approves_lifecycle": False,
+                                "replay_approves_verification": False,
+                                "backpressure_approves_lifecycle": False,
+                            },
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-5-worker-1.json", rendered)
+            self.assertIn("checkpoint_resume is nested source-bound evidence for durable task/run refs", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume schema should be", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume checkpoint_status must use the checkpoint namespace", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume resume_status must use the resume namespace", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume replay_status must use the replay namespace", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume backpressure_verdict must use the backpressure verdict namespace", rendered)
+            self.assertNotIn("worker run receipt checkpoint_resume.checkpoint_approves_lifecycle must remain false", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_capability_fence_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-6-worker-1.jsonl").write_text(
+                '{"event":"capability-fence"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/policies").mkdir(parents=True)
+            (root / "project/verification/policies/capability-policy.json").write_text('{"policy":"file-read"}\n', encoding="utf-8")
+            (root / "project/verification/audit").mkdir(parents=True)
+            (root / "project/verification/audit/launch-6-tool-call.json").write_text('{"status":"recorded"}\n', encoding="utf-8")
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-6-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-6-worker-1",
+                        "launch_id": "launch-6",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, provider routing, launch, fan-in, verification acceptance, cleanup, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-6-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "capability_fence_decision": {
+                            "schema": "mylittleharness.capability-fence-decision-receipt.v1",
+                            "fence_id": "capability-fence-6",
+                            "fence_status": "allow",
+                            "capability_profile": "worker-file-read",
+                            "approval_state": "granted",
+                            "audit_status": "recorded",
+                            "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, provider routing, launch, fan-in, verification acceptance, release, cleanup, or target-repo acceptance",
+                            "summary": "Capability fence allowed file-read for worker tool use; this is evidence only and cannot approve lifecycle.",
+                            "requested_capabilities": ["file-read"],
+                            "allowed_capabilities": ["file-read"],
+                            "denied_capabilities": ["network-write"],
+                            "restricted_routes": ["mylittleharness check"],
+                            "forbidden_routes": ["blocked-provider-route"],
+                            "policy_refs": ["project/verification/policies/capability-policy.json"],
+                            "audit_refs": ["project/verification/audit/launch-6-tool-call.json"],
+                            "authority": {
+                                "capability_fence_approves_lifecycle": False,
+                                "tool_authorization_approved": False,
+                                "tool_authorization_approves_provider_routing": False,
+                            },
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-6-worker-1.json", rendered)
+            self.assertIn("capability_fence_decision is nested source-bound evidence for tool/capability policy decisions", rendered)
+            self.assertNotIn("worker run receipt capability_fence_decision schema should be", rendered)
+            self.assertNotIn("worker run receipt capability_fence_decision non_authority must explicitly label", rendered)
+            self.assertNotIn("worker run receipt capability_fence_decision fence_status must use the capability fence namespace", rendered)
+            self.assertNotIn("worker run receipt capability_fence_decision.authority.capability_fence_approves_lifecycle must remain false", rendered)
+            self.assertNotIn("worker run receipt capability_fence_decision.authority.tool_authorization_approved must remain false", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_runtime_broker_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-7-worker-1.jsonl").write_text(
+                '{"event":"broker-dispatch"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/runtime").mkdir(parents=True)
+            (root / "project/verification/runtime/broker.json").write_text('{"broker":"registered"}\n', encoding="utf-8")
+            (root / "project/verification/runtime/workspace.json").write_text('{"workspace":"worktree"}\n', encoding="utf-8")
+            (root / "project/verification/runtime/credentials.json").write_text('{"secrets":"redacted"}\n', encoding="utf-8")
+            (root / "project/verification/runtime/telemetry.json").write_text('{"telemetry":"redacted"}\n', encoding="utf-8")
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-7-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-7-worker-1",
+                        "launch_id": "launch-7",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, provider routing, launch, cleanup, credential projection, telemetry, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-7-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "runtime_broker_provider": {
+                            "schema": "mylittleharness.runtime-broker-provider-receipt.v1",
+                            "broker_id": "broker-7",
+                            "provider_id": "provider-7",
+                            "broker_status": "running",
+                            "provider_status": "default",
+                            "registration_status": "joined",
+                            "join_status": "joined",
+                            "server_status": "running",
+                            "dispatch_status": "eligible",
+                            "workspace_isolation_status": "worktree-per-agent",
+                            "workspace_cleanup_status": "guarded",
+                            "credential_projection_status": "redacted",
+                            "approval_mode": "full-auto-observed",
+                            "resume_status": "not-required",
+                            "telemetry_status": "redacted",
+                            "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, worker launch, provider routing, cleanup, credential projection, telemetry retention, archive, Git, release, or target-repo acceptance",
+                            "summary": "Runtime broker and provider posture is source-bound evidence only; cannot approve lifecycle or provider routing.",
+                            "broker_refs": ["project/verification/runtime/broker.json"],
+                            "workspace_refs": ["project/verification/runtime/workspace.json"],
+                            "credential_refs": ["project/verification/runtime/credentials.json"],
+                            "telemetry_refs": ["project/verification/runtime/telemetry.json"],
+                            "authority": {
+                                "broker_dispatch_approves_lifecycle": False,
+                                "provider_routing_approved": False,
+                                "workspace_mount_approves_target_repo_acceptance": False,
+                                "credential_projection_approved": False,
+                                "telemetry_authoritative": False,
+                            },
+                            "workspace": {
+                                "backend": "local-worktree",
+                                "summary": "Workspace mount posture is evidence only and cannot approve target-repo acceptance.",
+                                "workspace_refs": ["project/verification/runtime/workspace.json"],
+                            },
+                            "credentials": {
+                                "summary": "Credential projection is redacted evidence only and cannot approve lifecycle.",
+                                "credential_refs": ["project/verification/runtime/credentials.json"],
+                            },
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-7-worker-1.json", rendered)
+            self.assertIn("runtime_broker_provider is nested source-bound evidence for runtime broker/provider", rendered)
+            self.assertNotIn("worker run receipt runtime_broker_provider schema should be", rendered)
+            self.assertNotIn("worker run receipt runtime_broker_provider broker_status must use the runtime broker namespace", rendered)
+            self.assertNotIn("worker run receipt runtime_broker_provider approval_mode must use the approval mode namespace", rendered)
+            self.assertNotIn("worker run receipt runtime_broker_provider.authority.broker_dispatch_approves_lifecycle must remain false", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_artifact_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "artifacts").mkdir()
+            (root / "artifacts/worker-output.txt").write_text("worker output\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-8-worker-1.jsonl").write_text(
+                '{"event":"lineage-recorded"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/lineage").mkdir(parents=True)
+            (root / "project/verification/lineage/lineage.jsonl").write_text(
+                '{"artifact":"artifacts/worker-output.txt","hash_status":"verified"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/prompts").mkdir(parents=True)
+            (root / "project/verification/prompts/launch-8.txt").write_text("Prompt\n", encoding="utf-8")
+            (root / "project/verification/smoke.txt").write_text("Smoke passed\n", encoding="utf-8")
+            artifact_hash = hashlib.sha256((root / "artifacts/worker-output.txt").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.txt").read_bytes()).hexdigest()
+            prompt_hash = hashlib.sha256((root / "project/verification/prompts/launch-8.txt").read_bytes()).hexdigest()
+            (receipt_dir / "launch-8-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-8-worker-1",
+                        "launch_id": "launch-8",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, provider routing, launch, cleanup, verification acceptance, artifact acceptance, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.txt"],
+                        "event_stream_refs": ["project/verification/logs/launch-8-worker-1.jsonl"],
+                        "output_refs": ["artifacts/worker-output.txt"],
+                        "verification_refs": ["project/verification/smoke.txt"],
+                        "source_hashes": [
+                            f"artifacts/worker-output.txt sha256={artifact_hash}",
+                            f"project/verification/smoke.txt sha256={smoke_hash}",
+                        ],
+                        "artifact_lineage": {
+                            "schema": "mylittleharness.artifact-lineage-receipt.v1",
+                            "lineage_id": "lineage-launch-8-worker-1",
+                            "lineage_status": "verified",
+                            "content_hash_status": "verified",
+                            "parent_hash_status": "recorded",
+                            "signature_status": "not-required",
+                            "hmac_status": "not-recorded",
+                            "lineage_verification_status": "passed",
+                            "producer_worker_id": "worker-1",
+                            "producer_run_id": "launch-8",
+                            "prompt_sha": prompt_hash,
+                            "model": "gpt-5-codex",
+                            "provider": "openai",
+                            "cost_usd": "0.00",
+                            "tokens": "0",
+                            "non_authority": "artifact lineage repo-visible evidence-only; cannot approve lifecycle, verification acceptance, artifact acceptance, target-repo acceptance, archive, Git, release, provider routing, launch, or cleanup",
+                            "summary": "Artifact lineage refs recorded as source-bound evidence only; cannot approve lifecycle or artifact acceptance.",
+                            "output_refs": ["artifacts/worker-output.txt"],
+                            "input_refs": ["project/implementation-plan.txt"],
+                            "parent_refs": ["project/verification/logs/launch-8-worker-1.jsonl"],
+                            "prompt_refs": ["project/verification/prompts/launch-8.txt"],
+                            "verification_refs": ["project/verification/smoke.txt"],
+                            "signature_refs": ["project/verification/lineage/lineage.jsonl"],
+                            "hash_chain": {
+                                "summary": "Lineage hash chain evidence recorded; cannot approve lifecycle.",
+                                "lineage_refs": ["project/verification/lineage/lineage.jsonl"],
+                            },
+                            "authority": {
+                                "artifact_lineage_authoritative": False,
+                                "artifact_accepted": False,
+                                "artifact_lineage_approves_lifecycle": False,
+                            },
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-8-worker-1.json", rendered)
+            self.assertIn("artifact_lineage is nested source-bound evidence for output/input artifact lineage", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage schema should be", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage lineage_status must use the artifact lineage namespace", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage non_authority must explicitly label", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage summary must not claim", rendered)
+            self.assertNotIn("worker run receipt artifact_lineage.authority.artifact_lineage_approves_lifecycle must remain false", rendered)
+
+    def test_check_focus_agents_reports_worker_run_receipt_worktree_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-9-worker-1.jsonl").write_text(
+                '{"event":"session-captured"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/worktree-session").mkdir(parents=True)
+            (root / "project/verification/worktree-session/worktree.json").write_text('{"status":"dirty-reviewed"}\n', encoding="utf-8")
+            (root / "project/verification/worktree-session/prompt.txt").write_text("Prompt\n", encoding="utf-8")
+            (root / "project/verification/worktree-session/session.json").write_text('{"pane":"pane-1"}\n', encoding="utf-8")
+            (root / "project/verification/worktree-session/capture.txt").write_text("Captured status\n", encoding="utf-8")
+            (root / "project/verification/worktree-session/sandbox.json").write_text('{"sandbox":"validated"}\n', encoding="utf-8")
+            (root / "project/verification/worktree-session/wait.json").write_text('{"wait":"completed"}\n', encoding="utf-8")
+            (root / "project/verification/worktree-session/cleanup.json").write_text('{"cleanup":"guarded"}\n', encoding="utf-8")
+            (root / "project/verification/smoke.txt").write_text("Smoke passed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.txt").read_bytes()).hexdigest()
+            (receipt_dir / "launch-9-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-9-worker-1",
+                        "launch_id": "launch-9",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, roadmap, archive, Git, release, provider routing, launch, cleanup, verification acceptance, or target-repo acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-9-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.txt"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.txt sha256={smoke_hash}",
+                        ],
+                        "worker_worktree_session": {
+                            "schema": "mylittleharness.worker-worktree-session-receipt.v1",
+                            "session_id": "session-launch-9-worker-1",
+                            "worktree_session_status": "closed",
+                            "worktree_status": "dirty-reviewed",
+                            "prompt_status": "written",
+                            "status_capture_status": "captured",
+                            "sandbox_status": "validated",
+                            "merge_cleanup_status": "guarded",
+                            "concurrency_status": "bounded",
+                            "wait_status": "completed",
+                            "non_authority": "worktree session repo-visible evidence-only; cannot approve lifecycle, launch, cleanup, Git, provider routing, verification, target-repo acceptance, or external authority",
+                            "summary": "Worktree and terminal session refs are source-bound evidence only; cannot approve lifecycle or cleanup.",
+                            "worktree_refs": ["project/verification/worktree-session/worktree.json"],
+                            "branch_refs": ["project/verification/worktree-session/worktree.json"],
+                            "prompt_refs": ["project/verification/worktree-session/prompt.txt"],
+                            "prompt_file_refs": ["project/verification/worktree-session/prompt.txt"],
+                            "status_refs": ["project/verification/worktree-session/session.json"],
+                            "capture_refs": ["project/verification/worktree-session/capture.txt"],
+                            "session_refs": ["project/verification/worktree-session/session.json"],
+                            "sandbox_refs": ["project/verification/worktree-session/sandbox.json"],
+                            "merge_refs": ["project/verification/worktree-session/cleanup.json"],
+                            "cleanup_refs": ["project/verification/worktree-session/cleanup.json"],
+                            "wait_refs": ["project/verification/worktree-session/wait.json"],
+                            "concurrency_refs": ["project/verification/worktree-session/wait.json"],
+                            "authority": {
+                                "worktree_session_authoritative": False,
+                                "worktree_session_approves_lifecycle": False,
+                                "terminal_pane_authoritative": False,
+                                "wait_success_approves_lifecycle": False,
+                                "merge_success_approves_target_repo_acceptance": False,
+                                "cleanup_success_approves_git": False,
+                            },
+                            "worktree": {
+                                "summary": "Worktree posture is evidence only and cannot approve target-repo acceptance.",
+                                "worktree_refs": ["project/verification/worktree-session/worktree.json"],
+                            },
+                            "prompt": {
+                                "summary": "Prompt file refs are evidence only and cannot approve launch.",
+                                "prompt_file_refs": ["project/verification/worktree-session/prompt.txt"],
+                            },
+                            "session": {
+                                "summary": "Pane/session refs are evidence only and cannot approve lifecycle.",
+                                "session_refs": ["project/verification/worktree-session/session.json"],
+                            },
+                            "status_capture": {
+                                "summary": "Status captures are evidence only and cannot approve verification acceptance.",
+                                "capture_refs": ["project/verification/worktree-session/capture.txt"],
+                            },
+                            "sandbox": {
+                                "summary": "Sandbox posture is evidence only and cannot approve launch.",
+                                "sandbox_refs": ["project/verification/worktree-session/sandbox.json"],
+                            },
+                            "merge_cleanup": {
+                                "summary": "Merge and cleanup posture is evidence only and cannot approve Git or lifecycle.",
+                                "cleanup_refs": ["project/verification/worktree-session/cleanup.json"],
+                            },
+                            "concurrency": {
+                                "summary": "Bounded wait/concurrency posture is evidence only and cannot approve lifecycle.",
+                                "wait_refs": ["project/verification/worktree-session/wait.json"],
+                            },
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: worker run receipt: project/verification/worker-run-receipts/launch-9-worker-1.json", rendered)
+            self.assertIn("worker_worktree_session is nested source-bound evidence for worktree/session/pane refs", rendered)
+            self.assertNotIn("worker run receipt worker_worktree_session schema should be", rendered)
+            self.assertNotIn("worker run receipt worker_worktree_session worktree_session_status must use the worktree session namespace", rendered)
+            self.assertNotIn("worker run receipt worker_worktree_session non_authority must explicitly label", rendered)
+            self.assertNotIn("worker run receipt worker_worktree_session summary must not claim", rendered)
+            self.assertNotIn("worker run receipt worker_worktree_session.authority.worktree_session_approves_lifecycle must remain false", rendered)
+
+    def test_check_focus_agents_warns_on_malformed_worker_run_receipt_checkpoint_resume_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (receipt_dir / "bad-checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "bad-checkpoint",
+                        "launch_id": "launch-5",
+                        "worker_id": "worker-1",
+                        "role": "reviewer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "worker_status": "succeeded",
+                        "verification_verdict": "passed",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/missing.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [],
+                        "checkpoint_resume": {
+                            "schema": "wrong.schema",
+                            "non_authority": "approved",
+                            "summary": "checkpoint approves lifecycle and replay approves verification",
+                            "checkpoint_status": "approved",
+                            "checkpoint_kind": "approved",
+                            "resume_status": "complete",
+                            "restore_strategy": "approved",
+                            "replay_status": "complete",
+                            "checkpoint_failure_status": "approved",
+                            "idempotency_posture": "approved",
+                            "backpressure_mode": "automatic",
+                            "backpressure_verdict": "approved",
+                            "backpressure_stale_posture": "stale-approved",
+                            "backpressure_failure_posture": "approved",
+                            "checkpoint_authoritative": True,
+                            "queue_success_approves_lifecycle": True,
+                            "authority": {"backpressure_approves_lifecycle": True},
+                            "checkpoint_refs": ["../escape.json"],
+                            "replay_refs": ["../escape.json"],
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("worker run receipt checkpoint_resume schema should be mylittleharness.checkpoint-resume-receipt.v1", rendered)
+            self.assertIn("worker run receipt checkpoint_resume non_authority must explicitly label checkpoint/resume as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt checkpoint_resume summary must not claim checkpoint, replay, queue, backpressure, run, lifecycle, or external authority", rendered)
+            self.assertIn("worker run receipt checkpoint_resume checkpoint_status must use the checkpoint namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume checkpoint_kind must use the checkpoint kind namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume resume_status must use the resume namespace: complete", rendered)
+            self.assertIn("worker run receipt checkpoint_resume restore_strategy must use the restore strategy namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume replay_status must use the replay namespace: complete", rendered)
+            self.assertIn("worker run receipt checkpoint_resume checkpoint_failure_status must use the checkpoint failure namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume idempotency_posture must use the idempotency namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume backpressure_mode must use the backpressure mode namespace: automatic", rendered)
+            self.assertIn("worker run receipt checkpoint_resume backpressure_verdict must use the backpressure verdict namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume backpressure_stale_posture must use the backpressure stale posture namespace: stale-approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume backpressure_failure_posture must use the backpressure failure posture namespace: approved", rendered)
+            self.assertIn("worker run receipt checkpoint_resume.checkpoint_authoritative must remain false", rendered)
+            self.assertIn("worker run receipt checkpoint_resume.queue_success_approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt checkpoint_resume.authority.backpressure_approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt checkpoint_resume.checkpoint_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt checkpoint_resume.replay_refs path must not contain parent traversal", rendered)
 
     def test_check_focus_agents_warns_on_malformed_worker_run_receipt_namespaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6598,24 +7710,176 @@ class CliTests(unittest.TestCase):
                         "worker_status": "complete",
                         "verification_verdict": "succeeded",
                         "non_authority": "approved",
-                        "event_history_redaction": "kept-secret-trace",
-                        "event_history_summary": "event history approved lifecycle acceptance",
-                        "private_trace_policy": "private SDK traces are authoritative approval evidence",
-                        "private_trace_authoritative": True,
-                        "event_history": {
-                            "summary": "event stream accepted lifecycle",
-                            "approves_lifecycle": True,
-                        },
-                        "private_traces": {
-                            "summary": "private SDK trace approval evidence",
-                            "private_traces_authoritative": True,
-                        },
+                        "event_history_summary": "event history approves lifecycle and marks roadmap done",
+                        "event_history_redaction": "approved",
+                        "private_trace_policy": "private SDK traces are authoritative approval",
                         "task_input_refs": ["../escape.md"],
                         "event_stream_refs": ["project/verification/logs/missing.jsonl"],
                         "output_refs": ["src/worker.py"],
                         "verification_refs": ["project/verification/smoke.md"],
                         "source_hashes": ["src/worker.py not-a-hash"],
                         "authority": {"approves_lifecycle": True},
+                        "event_history": {"approves_lifecycle": True},
+                        "private_trace_authoritative": True,
+                        "private_traces": {"private_traces_authoritative": True},
+                        "runtime_guard_preflight": {
+                            "schema": "wrong.schema",
+                            "preflight_status": "approved",
+                            "mission_preconditions_status": "done",
+                            "runtime_readiness": "launch-approved",
+                            "replay_status": "complete",
+                            "worktree_status": "accepted",
+                            "non_authority": "approved",
+                            "summary": "preflight approves launch and moves roadmap done",
+                            "approves_launch": True,
+                            "authority": {"approves_provider_routing": True},
+                            "dispatch_refs": ["../escape.json"],
+                            "unsafe_bypass": {
+                                "sandbox_bypass": True,
+                                "bypass_approved": True,
+                                "summary": "bypass approves launch",
+                            },
+                            "worktree": {
+                                "dirty_start": True,
+                                "dirty_worktree_approved": True,
+                                "summary": "dirty worktree approves launch",
+                            },
+                            "hook_proof": {
+                                "proof_level": "fallback",
+                                "summary": "native hook proof installed and authorizes launch",
+                            },
+                            "provider_proof": {
+                                "proof_level": "env-present",
+                                "provider_routing_approved": True,
+                                "summary": "provider call completed and provider routing approved",
+                            },
+                        },
+                        "child_agent_fanout": {
+                            "schema": "wrong.schema",
+                            "parent_run_id": "",
+                            "fanout_status": "approved",
+                            "non_authority": "approved",
+                            "summary": "child fanout approves fan-in and marks roadmap done",
+                            "authority": {"approves_fan_in": True},
+                            "coordination_refs": ["../escape.json"],
+                            "runtime_posture": {
+                                "summary": "runtime posture approves lifecycle",
+                                "bypass_approved": True,
+                                "runtime_readiness_refs": ["../escape.json"],
+                            },
+                            "children": [
+                                {
+                                    "child_id": "",
+                                    "role": "",
+                                    "worker_status": "complete",
+                                    "workflow_status": "done",
+                                    "verification_verdict": "succeeded",
+                                    "summary": "child worker accepts target repo",
+                                    "task_refs": ["../escape.md"],
+                                    "authority": {"approves_target_repo_acceptance": True},
+                                }
+                            ],
+                        },
+                        "capability_fence_decision": {
+                            "schema": "wrong.schema",
+                            "fence_id": "",
+                            "capability_profile": "",
+                            "fence_status": "approved",
+                            "approval_state": "accepted",
+                            "audit_status": "authoritative",
+                            "non_authority": "approved",
+                            "summary": "tool authorization approves lifecycle and provider routing",
+                            "allowed_capabilities": ["provider routing approved"],
+                            "tool_authorization_approved": True,
+                            "authority": {"tool_authorization_approves_provider_routing": True},
+                            "policy_refs": ["../escape.json"],
+                        },
+                        "runtime_broker_provider": {
+                            "schema": "wrong.schema",
+                            "broker_id": "",
+                            "provider_id": "",
+                            "broker_status": "approved",
+                            "provider_status": "authorized",
+                            "registration_status": "complete",
+                            "join_status": "accepted",
+                            "server_status": "approved",
+                            "dispatch_status": "approved",
+                            "workspace_isolation_status": "trusted",
+                            "workspace_cleanup_status": "approved",
+                            "credential_projection_status": "approved",
+                            "approval_mode": "approved",
+                            "resume_status": "complete",
+                            "telemetry_status": "authoritative",
+                            "non_authority": "approved",
+                            "summary": "broker dispatch approves lifecycle and provider routing",
+                            "broker_refs": ["../escape.json"],
+                            "provider_routing_approved": True,
+                            "authority": {
+                                "broker_dispatch_approves_lifecycle": True,
+                                "credential_projection_approved": True,
+                            },
+                            "workspace": {
+                                "summary": "workspace mount approves target repo",
+                                "workspace_mount_approves_target_repo_acceptance": True,
+                                "workspace_refs": ["../escape.json"],
+                            },
+                            "credentials": {
+                                "summary": "credential projection approves lifecycle",
+                                "credential_projection_authoritative": True,
+                                "credential_refs": ["../escape.json"],
+                            },
+                        },
+                        "worker_worktree_session": {
+                            "schema": "wrong.schema",
+                            "session_id": "",
+                            "worktree_session_status": "approved",
+                            "worktree_status": "accepted",
+                            "prompt_status": "approved",
+                            "status_capture_status": "complete",
+                            "sandbox_status": "trusted",
+                            "merge_cleanup_status": "approved",
+                            "concurrency_status": "approved",
+                            "wait_status": "succeeded",
+                            "non_authority": "approved",
+                            "summary": "worktree session approves lifecycle, launch, cleanup, verification, provider routing, Git, and target repo acceptance",
+                            "worktree_refs": ["../escape.json"],
+                            "worktree_session_authoritative": True,
+                            "authority": {"worktree_session_approves_lifecycle": True},
+                            "worktree": {
+                                "summary": "worktree approves lifecycle and target repo acceptance",
+                                "worktree_session_approves_target_repo_acceptance": True,
+                                "worktree_refs": ["../escape.json"],
+                            },
+                            "sandbox": {
+                                "summary": "sandbox approves launch",
+                                "sandbox_approves_launch": True,
+                                "sandbox_refs": ["../escape.json"],
+                            },
+                            "merge_cleanup": {
+                                "summary": "cleanup success approves lifecycle and Git",
+                                "cleanup_success_approves_git": True,
+                                "cleanup_refs": ["../escape.json"],
+                            },
+                        },
+                        "artifact_lineage": {
+                            "schema": "wrong.schema",
+                            "lineage_id": "",
+                            "lineage_status": "approved",
+                            "content_hash_status": "accepted",
+                            "parent_hash_status": "complete",
+                            "signature_status": "authoritative",
+                            "hmac_status": "authoritative",
+                            "lineage_verification_status": "succeeded",
+                            "non_authority": "approved",
+                            "summary": "artifact lineage approves lifecycle and accepts artifacts",
+                            "output_refs": ["../escape.json"],
+                            "artifact_accepted": True,
+                            "authority": {"artifact_lineage_approves_lifecycle": True},
+                            "hash_chain": {
+                                "summary": "hash chain approves verification",
+                                "lineage_refs": ["../escape.json"],
+                            },
+                        },
                     },
                     indent=2,
                     sort_keys=True,
@@ -6637,19 +7901,108 @@ class CliTests(unittest.TestCase):
             self.assertIn("worker run receipt verification_verdict must use the verification verdict namespace: succeeded", rendered)
             self.assertIn("worker run receipt non_authority must explicitly label the receipt as evidence-only and non-authoritative", rendered)
             self.assertIn("worker run receipt authority.approves_lifecycle must remain false", rendered)
-            self.assertIn("worker run receipt event_history_redaction must use the event history redaction vocabulary", rendered)
-            self.assertIn("worker run receipt event_history_summary must not claim event history approves lifecycle", rendered)
-            self.assertIn("worker run receipt private_trace_policy must explicitly keep private SDK traces non-authoritative and repo-visible evidence for recovery", rendered)
-            self.assertIn("worker run receipt private_trace_policy must not treat private SDK traces as authoritative approval evidence", rendered)
             self.assertIn("worker run receipt private_trace_authoritative must remain false", rendered)
+            self.assertIn("worker run receipt event_history_redaction must use the event history redaction vocabulary: approved", rendered)
+            self.assertIn("worker run receipt event_history_summary must not claim event history approves lifecycle", rendered)
+            self.assertIn("worker run receipt private_trace_policy must explicitly keep private SDK traces non-authoritative", rendered)
+            self.assertIn("worker run receipt private_trace_policy must not treat private SDK traces as authoritative", rendered)
             self.assertIn("worker run receipt event_history.approves_lifecycle must remain false", rendered)
             self.assertIn("worker run receipt private_traces.private_traces_authoritative must remain false", rendered)
             self.assertIn("worker run receipt task_input_refs path must not contain parent traversal", rendered)
             self.assertIn("malformed source_hashes entry: src/worker.py not-a-hash", rendered)
-            self.assertNotIn("worker run receipt runtime_guard_preflight", rendered)
-            self.assertNotIn("worker run receipt child_agent_fanout", rendered)
-            self.assertNotIn("worker run receipt checkpoint_resume", rendered)
-            self.assertNotIn("worker run receipt artifact_lineage", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight schema should be mylittleharness.runtime-guard-preflight-receipt.v1", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight preflight_status must use the runtime guard preflight namespace: approved", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight summary must not claim preflight approves launch, lifecycle, or external authority", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.approves_launch must remain false", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.authority.approves_provider_routing must remain false", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.dispatch_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.unsafe_bypass.bypass_approved must remain false", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.worktree.dirty_worktree_approved must remain false", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.hook_proof.summary must not claim native hook proof when proof_level is fallback", rendered)
+            self.assertIn("worker run receipt runtime_guard_preflight.provider_proof.summary must not claim provider-call proof when proof_level is env-present", rendered)
+            self.assertIn("worker run receipt child_agent_fanout schema should be mylittleharness.child-agent-fanout-receipt.v1", rendered)
+            self.assertIn("worker run receipt child_agent_fanout missing required field: parent_run_id", rendered)
+            self.assertIn("worker run receipt child_agent_fanout fanout_status must use the child fanout namespace: approved", rendered)
+            self.assertIn("worker run receipt child_agent_fanout non_authority must explicitly label fanout as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt child_agent_fanout summary must not claim fanout approves lifecycle or external authority", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.authority.approves_fan_in must remain false", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.coordination_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.runtime_posture.bypass_approved must remain false", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.runtime_posture.summary must not claim fanout approves lifecycle or external authority", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.runtime_posture.runtime_readiness_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0] missing required field: child_id", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0] missing required field: role", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0].worker_status must not carry lifecycle or verification status: complete", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0].workflow_status must use the workflow namespace: done", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0].verification_verdict must use the verification verdict namespace: succeeded", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0].summary must not claim child worker evidence approves lifecycle or external authority", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0].task_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt child_agent_fanout.children[0].authority.approves_target_repo_acceptance must remain false", rendered)
+            self.assertIn("worker run receipt capability_fence_decision schema should be mylittleharness.capability-fence-decision-receipt.v1", rendered)
+            self.assertIn("worker run receipt capability_fence_decision missing required field: fence_id", rendered)
+            self.assertIn("worker run receipt capability_fence_decision missing required field: capability_profile", rendered)
+            self.assertIn("worker run receipt capability_fence_decision fence_status must use the capability fence namespace: approved", rendered)
+            self.assertIn("worker run receipt capability_fence_decision non_authority must explicitly label capability fence as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt capability_fence_decision approval_state must use the capability fence approval namespace: accepted", rendered)
+            self.assertIn("worker run receipt capability_fence_decision audit_status must use the capability fence audit namespace: authoritative", rendered)
+            self.assertIn("worker run receipt capability_fence_decision summary must not claim tool authorization approves lifecycle or external authority", rendered)
+            self.assertIn("worker run receipt capability_fence_decision.tool_authorization_approved must remain false", rendered)
+            self.assertIn("worker run receipt capability_fence_decision.authority.tool_authorization_approves_provider_routing must remain false", rendered)
+            self.assertIn("worker run receipt capability_fence_decision.policy_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt capability_fence_decision.allowed_capabilities must not claim capability authorization approves lifecycle or external authority", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider schema should be mylittleharness.runtime-broker-provider-receipt.v1", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider missing required field: broker_id", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider missing required field: provider_id", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider broker_status must use the runtime broker namespace: approved", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider provider_status must use the runtime provider namespace: authorized", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider registration_status must use the broker registration namespace: complete", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider dispatch_status must use the broker dispatch namespace: approved", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider workspace_isolation_status must use the workspace isolation namespace: trusted", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider credential_projection_status must use the credential projection namespace: approved", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider approval_mode must use the approval mode namespace: approved", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider telemetry_status must use the telemetry namespace: authoritative", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider non_authority must explicitly label runtime broker/provider as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider summary must not claim broker/provider evidence approves launch, lifecycle, provider routing, cleanup, credential projection, telemetry, or external authority", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider.provider_routing_approved must remain false", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider.authority.broker_dispatch_approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider.broker_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider.workspace.workspace_mount_approves_target_repo_acceptance must remain false", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider.workspace.workspace_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt runtime_broker_provider.credentials.credential_projection_authoritative must remain false", rendered)
+            self.assertIn("worker run receipt worker_worktree_session schema should be mylittleharness.worker-worktree-session-receipt.v1", rendered)
+            self.assertIn("worker run receipt worker_worktree_session missing required field: session_id", rendered)
+            self.assertIn("worker run receipt worker_worktree_session worktree_session_status must use the worktree session namespace: approved", rendered)
+            self.assertIn("worker run receipt worker_worktree_session worktree_status must use the worktree namespace: accepted", rendered)
+            self.assertIn("worker run receipt worker_worktree_session prompt_status must use the prompt namespace: approved", rendered)
+            self.assertIn("worker run receipt worker_worktree_session status_capture_status must use the status/capture namespace: complete", rendered)
+            self.assertIn("worker run receipt worker_worktree_session sandbox_status must use the sandbox namespace: trusted", rendered)
+            self.assertIn("worker run receipt worker_worktree_session merge_cleanup_status must use the merge/cleanup namespace: approved", rendered)
+            self.assertIn("worker run receipt worker_worktree_session concurrency_status must use the concurrency namespace: approved", rendered)
+            self.assertIn("worker run receipt worker_worktree_session wait_status must use the wait namespace: succeeded", rendered)
+            self.assertIn("worker run receipt worker_worktree_session non_authority must explicitly label worktree/session as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt worker_worktree_session summary must not claim worktree/session evidence approves lifecycle", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.worktree_session_authoritative must remain false", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.authority.worktree_session_approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.worktree_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.worktree.worktree_session_approves_target_repo_acceptance must remain false", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.worktree.worktree_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.sandbox.sandbox_approves_launch must remain false", rendered)
+            self.assertIn("worker run receipt worker_worktree_session.merge_cleanup.cleanup_success_approves_git must remain false", rendered)
+            self.assertIn("worker run receipt artifact_lineage schema should be mylittleharness.artifact-lineage-receipt.v1", rendered)
+            self.assertIn("worker run receipt artifact_lineage missing required field: lineage_id", rendered)
+            self.assertIn("worker run receipt artifact_lineage lineage_status must use the artifact lineage namespace: approved", rendered)
+            self.assertIn("worker run receipt artifact_lineage content_hash_status must use the artifact content hash namespace: accepted", rendered)
+            self.assertIn("worker run receipt artifact_lineage parent_hash_status must use the artifact parent hash namespace: complete", rendered)
+            self.assertIn("worker run receipt artifact_lineage signature_status must use the artifact signature namespace: authoritative", rendered)
+            self.assertIn("worker run receipt artifact_lineage hmac_status must use the artifact hmac namespace: authoritative", rendered)
+            self.assertIn("worker run receipt artifact_lineage lineage_verification_status must use the artifact lineage verification namespace: succeeded", rendered)
+            self.assertIn("worker run receipt artifact_lineage non_authority must explicitly label artifact lineage as evidence-only and non-authoritative", rendered)
+            self.assertIn("worker run receipt artifact_lineage summary must not claim artifact lineage approves lifecycle, verification, artifact acceptance, or external authority", rendered)
+            self.assertIn("worker run receipt artifact_lineage.artifact_accepted must remain false", rendered)
+            self.assertIn("worker run receipt artifact_lineage.authority.artifact_lineage_approves_lifecycle must remain false", rendered)
+            self.assertIn("worker run receipt artifact_lineage.output_refs path must not contain parent traversal", rendered)
+            self.assertIn("worker run receipt artifact_lineage.hash_chain.summary must not claim artifact lineage approves lifecycle, verification, artifact acceptance, or external authority", rendered)
+            self.assertIn("worker run receipt artifact_lineage.hash_chain.lineage_refs path must not contain parent traversal", rendered)
 
     def test_check_reports_symphony_queue_blocked_by_current_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6955,6 +8308,541 @@ class CliTests(unittest.TestCase):
                 product_output.getvalue(),
             )
 
+    def test_task_session_inspect_reports_read_only_runtime_contract_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "plan-session-1"\n'
+                'title: "Task Session Contract"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "uncertain"\n'
+                'execution_slice: "next-live-work"\n'
+                'primary_roadmap_item: "next-live-work"\n'
+                'covered_roadmap_items: ["next-live-work"]\n'
+                'target_artifacts: ["src/mylittleharness/task_session.py"]\n'
+                'execution_policy: "current-phase-only"\n'
+                "auto_continue: false\n"
+                'closeout_boundary: "read-only task-session inspect only"\n'
+                "---\n"
+                "# Task Session Contract\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("MyLittleHarness task-session --inspect", rendered)
+            for heading in ("Task Session", "Lifecycle", "Roadmap", "Topology", "Authority", "Coordination Evidence", "Capabilities", "Boundary"):
+                self.assertIn(heading, rendered)
+            self.assertIn("task-session-inspect-read-only", rendered)
+            self.assertIn("readiness=ready", rendered)
+            self.assertIn("task-session-topology-reserved", rendered)
+            self.assertIn("provider_routing=false", rendered)
+            self.assertIn("cannot approve fan-in, route proposals, multi-root execution, provider routing", rendered)
+
+    def test_task_session_inspect_json_exposes_stable_runtime_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            (root / "project/project-state.md").write_text(
+                "---\n"
+                'project: "Operating"\n'
+                'workflow: "workflow-core"\n'
+                'operating_mode: "plan"\n'
+                'plan_status: "active"\n'
+                'active_plan: "project/implementation-plan.md"\n'
+                'active_phase: "phase-1"\n'
+                'phase_status: "pending"\n'
+                f'product_source_root: "{root.parent / "product-source"}"\n'
+                "---\n"
+                "# Operating Project State\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "plan-session-1"\n'
+                'title: "Task Session Contract"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "uncertain"\n'
+                'execution_slice: "next-live-work"\n'
+                'primary_roadmap_item: "next-live-work"\n'
+                'covered_roadmap_items: ["next-live-work"]\n'
+                'target_artifacts: ["src/mylittleharness/task_session.py"]\n'
+                'execution_policy: "current-phase-only"\n'
+                "auto_continue: false\n"
+                'closeout_boundary: "read-only task-session inspect only"\n'
+                "---\n"
+                "# Task Session Contract\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("mylittleharness.task-session.inspect.v1", payload["schema"])
+            self.assertTrue(payload["read_only"])
+            self.assertEqual("live_operating_root", payload["root_kind"])
+            self.assertEqual("plan-session-1", payload["session"]["session_id"])
+            self.assertEqual("ready", payload["session"]["readiness"])
+            self.assertTrue(payload["session"]["external_runtime_may_launch_workers"])
+            self.assertFalse(payload["session"]["lifecycle_approval_granted"])
+            self.assertEqual("active", payload["lifecycle"]["plan_status"])
+            self.assertEqual("phase-1", payload["lifecycle"]["active_phase"])
+            self.assertEqual("plan-session-1", payload["active_plan"]["plan_id"])
+            self.assertEqual("next-live-work", payload["active_plan"]["primary_roadmap_item"])
+            self.assertEqual("next-live-work", payload["roadmap"]["primary_item"]["id"])
+            self.assertEqual(str(root.parent / "product-source"), payload["topology"]["target_roots"][0])
+            self.assertFalse(payload["topology"]["multi_root_execution_enabled"])
+            self.assertEqual([], payload["topology"]["cross_root_allowed_routes"])
+            self.assertEqual("MLH", payload["authority"]["lifecycle_authority"])
+            self.assertFalse(payload["authority"]["provider_routing"])
+            self.assertTrue(payload["authority"]["repo_visible_evidence_required"])
+            self.assertTrue(payload["capabilities"]["inspect"])
+            self.assertTrue(payload["capabilities"]["receipt_apply"])
+            for forbidden in ("fan_in_authority", "route_proposal_validation", "multi_root_execution", "provider_routing", "git"):
+                self.assertFalse(payload["capabilities"][forbidden])
+            self.assertIn("handoff --status", payload["next_safe_command"]["command"])
+            self.assertFalse(payload["next_safe_command"]["approves_lifecycle"])
+            self.assertIn("repo-visible MLH files remain truth", payload["authority_boundary"])
+
+    def test_task_session_fan_in_inspect_json_reports_blockers_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            _write_fan_in_gate_plan(root, fan_in_required=True)
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--fan-in", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("mylittleharness.task-session.fan-in.inspect.v1", payload["schema"])
+            self.assertTrue(payload["read_only"])
+            self.assertEqual("blocked", payload["fan_in"]["status"])
+            self.assertTrue(payload["fan_in"]["activated"])
+            self.assertIn("work-claim", payload["fan_in"]["missing"])
+            self.assertIn("handoff", payload["fan_in"]["missing"])
+            self.assertIn("agent-run", payload["fan_in"]["missing"])
+            self.assertIn("task-session-receipt", payload["fan_in"]["missing"])
+            self.assertFalse(payload["approvals"]["fan_in"])
+            self.assertFalse(payload["authority"]["fan_in_approval"])
+            self.assertTrue(payload["capabilities"]["fan_in_inspect"])
+            self.assertFalse(payload["capabilities"]["fan_in_authority"])
+            self.assertIn("check --focus agents", payload["next_safe_command"]["command"])
+            self.assertIn("cannot approve lifecycle", payload["authority_boundary"])
+
+    def test_task_session_fan_in_inspect_json_reports_ready_session_graph_without_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            _write_fan_in_gate_plan(root, fan_in_required=True)
+            _write_fan_in_coordination_evidence(root, "delegated-slice")
+            receipt_dir = root / "project/verification/task-sessions"
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            (receipt_dir / "session-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.task-session.receipt.v1",
+                        "record_type": "task-session-receipt",
+                        "session_id": "current-plan",
+                        "task_id": "task-1",
+                        "objective": "Coordinate delegated slice",
+                        "execution_slice": "delegated-slice",
+                        "runtime": {
+                            "owner": "symphony",
+                            "backend": "openai-sdk",
+                            "provider_routing_authority": False,
+                        },
+                        "read_context": ["project/implementation-plan.md"],
+                        "write_scope": ["src/work.py"],
+                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "claim_refs": ["project/verification/work-claims/claim-1.json"],
+                        "handoff_refs": ["project/verification/handoffs/handoff-1.json"],
+                        "route_proposal_refs": ["check --focus agents"],
+                        "provider_refs": ["sdk-trace-id:test-only"],
+                        "approvals": {
+                            "lifecycle": False,
+                            "fan_in": False,
+                            "route_proposal": False,
+                            "provider_routing": False,
+                            "git": False,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--fan-in", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("ready", payload["fan_in"]["status"])
+            self.assertTrue(payload["fan_in"]["activated"])
+            self.assertEqual([], payload["fan_in"]["missing"])
+            self.assertEqual(["project/verification/work-claims/claim-1.json"], payload["fan_in"]["claim_refs"])
+            self.assertEqual(["project/verification/handoffs/handoff-1.json"], payload["fan_in"]["handoff_refs"])
+            self.assertEqual(["project/verification/agent-runs/run-1.md"], payload["fan_in"]["agent_run_refs"])
+            self.assertEqual(["project/verification/task-sessions/session-1.json"], payload["fan_in"]["receipt_refs"])
+            self.assertEqual(["check --focus agents"], payload["fan_in"]["route_proposal_refs"])
+            self.assertEqual("symphony", payload["receipts"][0]["runtime_owner"])
+            self.assertFalse(payload["approvals"]["fan_in"])
+            self.assertFalse(payload["approvals"]["route_proposal"])
+            self.assertFalse(payload["authority"]["fan_in_approval"])
+            self.assertFalse(payload["authority"]["route_proposal_approval"])
+            self.assertIn("writeback --dry-run", payload["next_safe_command"]["command"])
+
+    def test_task_session_conductor_inspect_json_reports_living_coordination_root_without_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            _write_fan_in_gate_plan(root, fan_in_required=True)
+            _write_fan_in_coordination_evidence(root, "delegated-slice")
+            receipt_dir = root / "project/verification/task-sessions"
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            (receipt_dir / "session-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.task-session.receipt.v1",
+                        "record_type": "task-session-receipt",
+                        "session_id": "current-plan",
+                        "task_id": "task-1",
+                        "objective": "Coordinate delegated slice",
+                        "execution_slice": "delegated-slice",
+                        "runtime": {
+                            "owner": "symphony",
+                            "backend": "openai-sdk",
+                            "provider_routing_authority": False,
+                        },
+                        "read_context": ["project/implementation-plan.md"],
+                        "write_scope": ["src/work.py"],
+                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "claim_refs": ["project/verification/work-claims/claim-1.json"],
+                        "handoff_refs": ["project/verification/handoffs/handoff-1.json"],
+                        "approvals": {
+                            "lifecycle": False,
+                            "fan_in": False,
+                            "route_proposal": False,
+                            "provider_routing": False,
+                            "git": False,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            queue_dir = root / "project/symphony/queue"
+            queue_dir.mkdir(parents=True, exist_ok=True)
+            (queue_dir / "item-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mlh.symphony.queue-item.v1",
+                        "queue_item_id": "item-1",
+                        "state": "ready",
+                        "execution_slice": "delegated-slice",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--conductor", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("mylittleharness.task-session.conductor.inspect.v1", payload["schema"])
+            self.assertTrue(payload["read_only"])
+            self.assertEqual("ready", payload["conductor"]["status"])
+            self.assertEqual(str(root), payload["conductor"]["coordination_root"])
+            self.assertEqual(str(root), payload["conductor"]["integration_root"])
+            self.assertIn("project/verification/work-claims", payload["conductor"]["living_routes"])
+            self.assertIn("project/verification/handoffs", payload["conductor"]["living_routes"])
+            self.assertIn("project/verification/task-sessions", payload["conductor"]["living_routes"])
+            self.assertIn("claim", payload["conductor"]["safe_worker_routes"])
+            self.assertIn("writeback", payload["conductor"]["forbidden_routes"])
+            self.assertEqual(1, payload["coordination"]["evidence_counts"]["task-session-receipt"])
+            self.assertEqual(1, payload["coordination"]["evidence_counts"]["symphony-queue"])
+            self.assertFalse(payload["approvals"]["worker_launch"])
+            self.assertFalse(payload["approvals"]["lifecycle"])
+            self.assertFalse(payload["capabilities"]["worker_launch"])
+            self.assertTrue(payload["capabilities"]["conductor_inspect"])
+            self.assertFalse(payload["authority"]["external_completion_claims_authoritative"])
+            self.assertFalse(payload["authority"]["completion_claim_policy"]["external_done_claims_authoritative"])
+            self.assertFalse(payload["conductor"]["completion_claim_policy"]["external_done_claims_authoritative"])
+            self.assertFalse(payload["conductor"]["completion_claim_policy"]["approves_lifecycle"])
+            self.assertIn("task-session --inspect --fan-in --json", payload["next_safe_command"]["command"])
+            self.assertIn("cannot launch workers", payload["authority_boundary"])
+
+    def test_task_session_conductor_provider_launcher_reports_secret_safe_runtime_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            _write_fan_in_gate_plan(root, fan_in_required=False)
+            secret_value = "sk-test-secret-value-that-must-not-leak"
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with patch.dict(os.environ, {"OPENAI_API_KEY": secret_value}, clear=False):
+                with redirect_stdout(output):
+                    self.assertEqual(
+                        main(
+                            [
+                                "--root",
+                                str(root),
+                                "task-session",
+                                "--inspect",
+                                "--conductor",
+                                "--provider-launcher",
+                                "--json",
+                            ]
+                        ),
+                        0,
+                    )
+
+            rendered = output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertNotIn(secret_value, rendered)
+            payload = json.loads(rendered)
+            self.assertEqual("mylittleharness.task-session.conductor.inspect.v1", payload["schema"])
+            launcher = payload["provider_launcher"]
+            self.assertEqual("mylittleharness.task-session.provider-launcher.v1", launcher["schema"])
+            self.assertEqual("conductor_full_dev", launcher["profile"])
+            self.assertEqual("configured", launcher["provider_gate_status"])
+            self.assertTrue(launcher["read_only"])
+            self.assertTrue(launcher["secret_safe"])
+            self.assertFalse(launcher["stores_secret_material"])
+            self.assertFalse(launcher["secret_values_recorded"])
+            self.assertEqual(
+                [{"name": "OPENAI_API_KEY", "present": True, "secret_material_recorded": False}],
+                launcher["required_env"],
+            )
+            self.assertEqual(["env:OPENAI_API_KEY"], launcher["provider_refs"])
+            self.assertFalse(launcher["provider_routing_authority"])
+            self.assertFalse(launcher["provider_auto_selection"])
+            self.assertFalse(launcher["provider_call"])
+            self.assertFalse(launcher["worker_launch"])
+            self.assertFalse(launcher["queue_item_created"])
+            self.assertIn("task-session-receipt", launcher["required_repo_visible_evidence"])
+            self.assertIn("--provider-ref env:OPENAI_API_KEY", launcher["receipt_dry_run_command"])
+            self.assertIn("task-session-provider-launcher-gate", {finding["code"] for finding in payload["findings"]})
+            self.assertIn("provider-launcher inspect reports secret-safe runtime configuration readiness only", launcher["authority_boundary"])
+            self.assertEqual(launcher, payload["conductor"]["provider_launcher"])
+            self.assertFalse(payload["authority"]["provider_runtime_config_authoritative"])
+            self.assertTrue(payload["capabilities"]["provider_runtime_launcher"])
+
+    def test_task_session_receipt_dry_run_reports_target_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "plan-session-1"\n'
+                'title: "Task Session Receipt"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "uncertain"\n'
+                'execution_slice: "next-live-work"\n'
+                'primary_roadmap_item: "next-live-work"\n'
+                'target_artifacts: ["src/mylittleharness/task_session.py"]\n'
+                'execution_policy: "current-phase-only"\n'
+                "auto_continue: false\n"
+                'closeout_boundary: "receipt route only"\n'
+                "---\n"
+                "# Task Session Receipt\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "task-session",
+                            "--dry-run",
+                            "--session-id",
+                            "session-receipt-1",
+                            "--objective",
+                            "Exercise the receipt route",
+                            "--runtime-owner",
+                            "symphony",
+                            "--runtime-backend",
+                            "openai-sdk",
+                            "--read-context",
+                            "project/project-state.md",
+                            "--write-scope",
+                            "src/mylittleharness/task_session.py",
+                            "--allowed-route",
+                            "evidence --record --apply",
+                            "--stop-condition",
+                            "fan-in required before closeout",
+                            "--required-output",
+                            "project/verification/agent-runs/session-receipt-1.json",
+                            "--evidence-ref",
+                            "project/verification/agent-runs/session-receipt-1.json",
+                        ]
+                    ),
+                    0,
+                )
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            target = root / "project/verification/task-sessions/session-receipt-1.json"
+            self.assertFalse(target.exists())
+            rendered = output.getvalue()
+            self.assertIn("MyLittleHarness task-session --dry-run", rendered)
+            self.assertIn("task-session-receipt-dry-run", rendered)
+            self.assertIn("would write task-session receipt", rendered)
+            self.assertIn("task-session-receipt-route-write", rendered)
+            self.assertIn("cannot launch workers, approve fan-in", rendered)
+
+    def test_task_session_receipt_apply_writes_repo_visible_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "plan-session-1"\n'
+                'title: "Task Session Receipt"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "uncertain"\n'
+                'execution_slice: "next-live-work"\n'
+                'primary_roadmap_item: "next-live-work"\n'
+                'target_artifacts: ["src/mylittleharness/task_session.py"]\n'
+                'execution_policy: "current-phase-only"\n'
+                "auto_continue: false\n"
+                'closeout_boundary: "receipt route only"\n'
+                "---\n"
+                "# Task Session Receipt\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "task-session",
+                            "--apply",
+                            "--session-id",
+                            "session-receipt-2",
+                            "--task-id",
+                            "task-42",
+                            "--objective",
+                            "Write a receipt artifact",
+                            "--runtime-owner",
+                            "symphony",
+                            "--runtime-backend",
+                            "openai-sdk",
+                            "--read-context",
+                            "project/project-state.md",
+                            "--write-scope",
+                            "src/mylittleharness/task_session.py",
+                            "--allowed-route",
+                            "evidence --record --apply",
+                            "--evidence-ref",
+                            "project/verification/agent-runs/session-receipt-2.json",
+                            "--claim-ref",
+                            "project/verification/work-claims/session-receipt-2.json",
+                            "--handoff-ref",
+                            "project/verification/handoffs/session-receipt-2.json",
+                        ]
+                    ),
+                    0,
+                )
+
+            rendered = output.getvalue()
+            self.assertIn("task-session-receipt-written", rendered)
+            target = root / "project/verification/task-sessions/session-receipt-2.json"
+            self.assertTrue(target.exists())
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual("mylittleharness.task-session.receipt.v1", payload["schema"])
+            self.assertEqual("task-session-receipt", payload["record_type"])
+            self.assertEqual("session-receipt-2", payload["session_id"])
+            self.assertEqual("task-42", payload["task_id"])
+            self.assertEqual("Write a receipt artifact", payload["objective"])
+            self.assertEqual("next-live-work", payload["execution_slice"])
+            self.assertEqual("symphony", payload["runtime"]["owner"])
+            self.assertEqual("openai-sdk", payload["runtime"]["backend"])
+            self.assertFalse(payload["runtime"]["provider_routing_authority"])
+            self.assertEqual(["project/project-state.md"], payload["read_context"])
+            self.assertEqual(["src/mylittleharness/task_session.py"], payload["write_scope"])
+            self.assertEqual(["evidence --record --apply"], payload["allowed_routes"])
+            self.assertEqual("MLH", payload["preflight"]["authority"]["lifecycle_authority"])
+            self.assertEqual("ready", payload["preflight"]["session"]["readiness"])
+            self.assertTrue(payload["preflight"]["capabilities"]["receipt_apply"])
+            self.assertFalse(payload["approvals"]["lifecycle"])
+            self.assertFalse(payload["approvals"]["fan_in"])
+            self.assertFalse(payload["approvals"]["provider_routing"])
+            self.assertIn(payload["dirty_start"]["state"], {"clean", "dirty", "non-git", "unknown"})
+            self.assertIn("cannot launch workers, approve fan-in", payload["authority_boundary"])
+
+            inspect_output = io.StringIO()
+            with redirect_stdout(inspect_output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--json"]), 0)
+            inspect_payload = json.loads(inspect_output.getvalue())
+            self.assertTrue(inspect_payload["capabilities"]["receipt_apply"])
+            self.assertFalse(inspect_payload["capabilities"]["fan_in_authority"])
+
+    def test_task_session_receipt_apply_refuses_lifecycle_write_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "task-session",
+                            "--apply",
+                            "--session-id",
+                            "bad-receipt",
+                            "--objective",
+                            "Attempt authority write scope",
+                            "--write-scope",
+                            "project/project-state.md",
+                        ]
+                    ),
+                    2,
+                )
+
+            self.assertFalse((root / "project/verification/task-sessions/bad-receipt.json").exists())
+            rendered = output.getvalue()
+            self.assertIn("task-session-receipt-refused", rendered)
+            self.assertIn("cannot include lifecycle authority paths: project/project-state.md", rendered)
+            self.assertIn("task-session receipt apply refused before writing receipt evidence", rendered)
+
     def test_dashboard_inspect_reports_read_only_cockpit_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -7031,6 +8919,77 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["nextLegalDryRun"]["approves_lifecycle"])
             self.assertIn("product-diff acceptance", payload["nextLegalDryRun"]["boundary"])
             self.assertIn("repo-visible files remain truth", payload["authority_boundary"])
+
+    def test_dashboard_json_auto_degrades_large_root_without_projection_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            research_dir = root / "project/research"
+            research_dir.mkdir(parents=True, exist_ok=True)
+            source_body = "UNIQUE-DASHBOARD-DEGRADED-SOURCE-BODY-SHOULD-NOT-LEAK"
+            for index in range(140):
+                (research_dir / f"large-{index:03d}.md").write_text(
+                    "---\n"
+                    f'title: "Large {index:03d}"\n'
+                    'status: "captured"\n'
+                    "---\n"
+                    f"# Large {index:03d}\n\n"
+                    f"{source_body} {index:03d}\n",
+                    encoding="utf-8",
+                )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with (
+                patch("mylittleharness.dashboard.build_projection", side_effect=AssertionError("should not rebuild")),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / ".mylittleharness/generated").exists())
+            rendered = output.getvalue()
+            self.assertNotIn(source_body, rendered)
+            payload = json.loads(rendered)
+            self.assertEqual("auto", payload["detail"])
+            self.assertEqual("degraded", payload["mode"])
+            self.assertTrue(payload["degraded"])
+            self.assertTrue(payload["projection"]["degraded"])
+            self.assertTrue(payload["projection"]["full_projection_skipped"])
+            self.assertEqual("bounded-degraded-default", payload["projection"]["degraded_reason"]["reason"])
+            self.assertGreaterEqual(payload["projection"]["source_count"], 120)
+            self.assertLessEqual(len(payload["projection"]["sourceSummary"]["sample"]), 40)
+            self.assertEqual("mylittleharness.projection-cache-posture.v1", payload["cachePosture"]["schema"])
+            self.assertFalse(payload["connectReadiness"]["cache"]["readOnlySurfacesExecuteRefresh"])
+            finding_codes = {
+                finding["code"]
+                for section in payload["sections"]
+                for finding in section["findings"]
+            }
+            self.assertIn("dashboard-projection-degraded", finding_codes)
+            self.assertIn("dashboard-projection-summary-degraded", finding_codes)
+
+    def test_dashboard_json_full_detail_keeps_complete_projection_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json", "--detail", "full"]), 0)
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual("full", payload["detail"])
+            self.assertEqual("full", payload["mode"])
+            self.assertFalse(payload["degraded"])
+            self.assertFalse(payload["projection"]["degraded"])
+            self.assertFalse(payload["projection"]["full_projection_skipped"])
+            self.assertGreaterEqual(payload["projection"]["link_record_count"], 0)
+            finding_codes = {
+                finding["code"]
+                for section in payload["sections"]
+                for finding in section["findings"]
+            }
+            self.assertIn("dashboard-projection", finding_codes)
+            self.assertNotIn("dashboard-projection-degraded", finding_codes)
 
     def test_dashboard_reports_mlhd_runtime_cockpit_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8056,7 +10015,10 @@ class CliTests(unittest.TestCase):
                             "--claim-id",
                             "claim-1",
                             "--release-condition",
-                            "handoff accepted",
+                            (
+                                "reviewed project/verification/handoffs/handoff-1.json and "
+                                "project/verification/agent-runs/run-1.md"
+                            ),
                             "--apply",
                         ]
                     ),
@@ -8064,7 +10026,32 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("work-claim-released", release_output.getvalue())
             self.assertIn("work-claim-completion-policy", release_output.getvalue())
-            self.assertEqual("released", json.loads(claim_path.read_text(encoding="utf-8"))["status"])
+            released_payload = json.loads(claim_path.read_text(encoding="utf-8"))
+            self.assertEqual("released", released_payload["status"])
+            self.assertEqual(
+                "mylittleharness.work-claim.completion-policy.v1",
+                released_payload["completion_policy"]["schema"],
+            )
+            self.assertEqual("repo-visible-evidence-only", released_payload["completion_policy"]["decision"])
+            self.assertFalse(released_payload["completion_policy"]["external_done_claims_authoritative"])
+            self.assertFalse(released_payload["completion_policy"]["approves_lifecycle"])
+            self.assertEqual(
+                [
+                    "project/verification/handoffs/handoff-1.json",
+                    "project/verification/agent-runs/run-1.md",
+                ],
+                released_payload["completion_evidence"]["repo_visible_refs"],
+            )
+
+            released_status_output = io.StringIO()
+            with redirect_stdout(released_status_output):
+                self.assertEqual(main(["--root", str(root), "claim", "--status"]), 0)
+            self.assertIn("work-claim-completion-policy", released_status_output.getvalue())
+
+            agents_check_output = io.StringIO()
+            with redirect_stdout(agents_check_output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+            self.assertIn("check-agents-coordination-evidence-work-claim-completion-policy", agents_check_output.getvalue())
 
     def test_claim_apply_refuses_concurrent_overlapping_create_while_mutation_lock_is_held(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -10381,6 +12368,119 @@ class CliTests(unittest.TestCase):
             self.assertIn("--verification", rendered)
             self.assertIn("docs_decision uncertain is allowed for provisional phase handoff", rendered)
 
+    def test_check_reports_phase_ready_posture_for_uncertain_docs_with_phase_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                )
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- plan_id: current-plan\n"
+                "- active_plan: project/implementation-plan.md\n"
+                "- docs_decision: uncertain\n"
+                "- state_writeback: phase 1 implementation completed\n"
+                "- verification: focused phase tests passed\n"
+                "- work_result: Result: partial; What was done: phase 1 implementation completed. How it was checked: focused phase tests passed. What remains: phase 2 docs verification.\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Current Plan"\n'
+                'status: "complete"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "complete"\n'
+                'docs_decision: "uncertain"\n'
+                'completion_policy: "through-closeout"\n'
+                "---\n"
+                "# Current Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `done`\n\n"
+                "### phase-2-verification-and-docs\n\n"
+                "- id: `phase-2-verification-and-docs`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("active-plan-phase-evidence", rendered)
+            self.assertIn("active-plan-through-closeout-pending-phases", rendered)
+            self.assertIn("the plan is not done", rendered)
+            self.assertIn("active-plan-docs-decision-provisional-phase-handoff", rendered)
+            self.assertIn("phase-ready provisional handoff", rendered)
+            self.assertIn(
+                "writeback --dry-run --active-phase phase-2-verification-and-docs --phase-status pending --docs-decision uncertain",
+                rendered,
+            )
+            self.assertNotIn("active-plan-docs-decision-uncertain", rendered)
+            self.assertNotIn('suggest --intent "docs decision closeout"', rendered)
+
+    def test_check_allows_phase_only_completed_handoff_without_through_closeout_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                )
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- plan_id: current-plan\n"
+                "- active_plan: project/implementation-plan.md\n"
+                "- docs_decision: uncertain\n"
+                "- state_writeback: phase 1 only implementation completed\n"
+                "- verification: focused phase tests passed\n"
+                "- work_result: Result: partial; What was done: explicit phase-only work completed. How it was checked: focused phase tests passed. What remains: handoff only.\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Current Plan"\n'
+                'status: "complete"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "complete"\n'
+                'docs_decision: "uncertain"\n'
+                'completion_policy: "phase-only"\n'
+                "---\n"
+                "# Current Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `done`\n\n"
+                "### phase-2-verification-and-docs\n\n"
+                "- id: `phase-2-verification-and-docs`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertNotIn("active-plan-through-closeout-pending-phases", rendered)
+            self.assertNotIn("active-plan-through-closeout-pending-evidence", rendered)
+
     def test_check_does_not_treat_remaining_verification_word_as_check_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
@@ -11303,6 +13403,137 @@ class CliTests(unittest.TestCase):
             self.assertIn("next_state=legal-dry-run-command; command=dry-run", rendered)
             self.assertIn("status=ready", rendered)
 
+    def test_writeback_accepts_neutral_explicit_decision_next_state_and_legacy_alias(self) -> None:
+        cases = (
+            ("explicit-decision-required", False),
+            ("human-decision-required", True),
+        )
+        for next_state, legacy_alias in cases:
+            with self.subTest(next_state=next_state), tempfile.TemporaryDirectory() as tmp:
+                root = make_active_live_root(Path(tmp), phase_status="pending")
+                state_path = root / "project/project-state.md"
+                state_path.write_text(
+                    state_path.read_text(encoding="utf-8").replace(
+                        'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                        'active_phase: "phase-1-implementation"\nphase_status: "pending"',
+                    ),
+                    encoding="utf-8",
+                )
+                (root / "project/implementation-plan.md").write_text(
+                    "---\n"
+                    'plan_id: "current-plan"\n'
+                    'title: "Actor Neutral Explicit Decision Next State"\n'
+                    'execution_slice: "actor-neutral-explicit-decision-next-state"\n'
+                    'primary_roadmap_item: "actor-neutral-explicit-decision-next-state"\n'
+                    'deliverable_class: "implementation"\n'
+                    "target_artifacts:\n"
+                    '  - "src/mylittleharness/writeback.py"\n'
+                    '  - "tests/test_cli.py"\n'
+                    'status: "pending"\n'
+                    'active_phase: "phase-1-implementation"\n'
+                    'phase_status: "pending"\n'
+                    "---\n"
+                    "# Actor Neutral Explicit Decision Next State\n\n"
+                    "Acceptance gate: next_state must preserve explicit-decision semantics.\n\n"
+                    "## Phases\n\n"
+                    "### phase-1-implementation\n\n"
+                    "- id: `phase-1-implementation`\n"
+                    "- status: `pending`\n",
+                    encoding="utf-8",
+                )
+
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = main(
+                        [
+                            "--root",
+                            str(root),
+                            "writeback",
+                            "--apply",
+                            "--phase-status",
+                            "complete",
+                            "--docs-decision",
+                            "not-needed",
+                            "--state-writeback",
+                            "Implemented actor-neutral explicit decision next_state in src/mylittleharness/writeback.py and tests/test_cli.py",
+                            "--verification",
+                            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed with exit 0",
+                            "--commit-decision",
+                            "manual policy",
+                            "--residual-risk",
+                            "No docs/API impact in phase 1; legacy spelling remains accepted as a compatibility alias",
+                            "--next-state",
+                            next_state,
+                        ]
+                    )
+
+                rendered = output.getvalue()
+                self.assertEqual(code, 0)
+                self.assertIn("writeback-next-state", rendered)
+                self.assertIn("next_state=explicit-decision-required", rendered)
+                self.assertIn("status=ready", rendered)
+                if legacy_alias:
+                    self.assertIn("writeback-next-state-legacy-alias", rendered)
+                state_text = state_path.read_text(encoding="utf-8")
+                self.assertIn("- next_state: explicit-decision-required", state_text)
+                self.assertNotIn("- next_state: human-decision-required", state_text)
+
+    def test_check_flags_legacy_human_decision_next_state_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                )
+                + "\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- docs_decision: not-needed\n"
+                "- state_writeback: Implemented actor-neutral next_state migration.\n"
+                "- verification: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed with exit 0\n"
+                "- commit_decision: manual policy\n"
+                "- residual_risk: none known\n"
+                "- next_state: human-decision-required\n"
+                "- carry_forward: migrate legacy spelling to explicit-decision-required\n"
+                "- work_result: Result: completed; What was done: Recorded legacy next_state fixture.\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Actor Neutral Explicit Decision Next State"\n'
+                'execution_slice: "actor-neutral-explicit-decision-next-state"\n'
+                'primary_roadmap_item: "actor-neutral-explicit-decision-next-state"\n'
+                'deliverable_class: "implementation"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/checks.py"\n'
+                '  - "src/mylittleharness/writeback.py"\n'
+                '  - "tests/test_cli.py"\n'
+                'status: "complete"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "complete"\n'
+                "---\n"
+                "# Actor Neutral Explicit Decision Next State\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `done`\n"
+                "- write_scope: `src/mylittleharness/checks.py`, `src/mylittleharness/writeback.py`, `tests/test_cli.py`\n"
+                "- verification_gates: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py` exits 0\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertIn("active-plan-next-state-legacy-alias", rendered)
+            self.assertIn("explicit-decision-required", rendered)
+
     def test_writeback_archive_blocks_uncertain_docs_decision_closeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
@@ -12045,6 +14276,29 @@ class CliTests(unittest.TestCase):
             self.assertIn("product_source_boundary=disclosed-out-of-scope", rendered)
             self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
 
+    def test_product_diff_disclosure_accepts_not_accepted_by_closeout_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            posture = product_diff_scope_posture(product_root)
+            closeout = {
+                "residual_risk": "Out-of-scope product files were not accepted by this closeout: docs/out.md.",
+                "state_writeback": "Implemented product-diff-scope-gate in src/allowed.py",
+            }
+
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture):
+                findings = product_diff_write_scope_findings(
+                    load_inventory(root),
+                    closeout,
+                    completion_reason="writeback closeout",
+                    apply=True,
+                    code_prefix="writeback",
+                )
+
+            self.assertEqual(1, len(findings))
+            self.assertEqual("info", findings[0].severity)
+            self.assertEqual("writeback-product-diff-write-scope-disclosed", findings[0].code)
+            self.assertIn("closeout evidence explicitly leaves those paths unaccepted", findings[0].message)
+
     def test_product_diff_disclosure_requires_every_out_of_scope_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, product_root = make_product_diff_scope_fixture(Path(tmp))
@@ -12220,6 +14474,56 @@ class CliTests(unittest.TestCase):
             self.assertIn("- status: `done`", plan_text)
             self.assertIn("- docs_decision: uncertain", plan_text)
 
+    def test_writeback_phase_complete_uncertain_docs_with_evidence_reports_provisional_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "current-plan"\n'
+                'title: "Current Plan"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "pending"\n'
+                "---\n"
+                "# Current Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "uncertain",
+                        "--state-writeback",
+                        "phase 1 implementation completed",
+                        "--verification",
+                        "focused phase tests passed",
+                        "--work-result",
+                        "Result: partial; What was done: phase 1 implementation completed. How it was checked: focused phase tests passed. What remains: phase 2 docs verification.",
+                    ]
+                )
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-ready-for-closeout-boundary", rendered)
+            self.assertIn("phase-ready provisional handoff", rendered)
+            self.assertIn("final closeout/archive still requires docs_decision updated/not-needed", rendered)
+            self.assertNotIn("writeback-active-plan-archived", rendered)
+
     def test_writeback_phase_advance_uncertain_docs_records_provisional_evidence_without_stale_carry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="in_progress")
@@ -12295,6 +14599,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("provisional phase evidence", dry_rendered)
             self.assertIn("writeback-phase-advancement", dry_rendered)
+            self.assertIn("legal continuation route for through-closeout plans", dry_rendered)
             self.assertNotIn("writeback-closeout-identity-refused", dry_rendered)
 
             apply_output = io.StringIO()
@@ -12304,6 +14609,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(apply_code, 0)
             self.assertIn("provisional phase evidence", rendered)
             self.assertIn("writeback-phase-advancement", rendered)
+            self.assertIn("legal continuation route for through-closeout plans", rendered)
             self.assertNotIn("previous validation passed", rendered)
 
             state_text = state.read_text(encoding="utf-8")
@@ -14436,6 +16742,72 @@ class CliTests(unittest.TestCase):
             self.assertIn("- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`", roadmap_text)
             self.assertIn("- `carry_forward`: `Keep roadmap sequencing advisory only.`", roadmap_text)
 
+    def test_roadmap_add_apply_retries_transient_windows_replace_lock(self) -> None:
+        class SharingViolation(OSError):
+            @property
+            def winerror(self) -> int:
+                return 32
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            before = snapshot_tree(root)
+            attempts = {"count": 0}
+            original_replace_once = atomic_files._replace_path_once
+
+            def flaky_replace_once(source_path: Path, target_path: Path) -> None:
+                if target_path == root / "project/roadmap.md" and attempts["count"] < 2:
+                    attempts["count"] += 1
+                    raise SharingViolation("sharing violation")
+                original_replace_once(source_path, target_path)
+
+            output = io.StringIO()
+            with (
+                patch.object(atomic_files, "_replace_path_once", side_effect=flaky_replace_once),
+                patch.object(atomic_files.time, "sleep") as sleep,
+                redirect_stdout(output),
+            ):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "windows-roadmap-lock-retry",
+                        "--title",
+                        "Windows Roadmap Lock Retry",
+                        "--status",
+                        "accepted",
+                        "--order",
+                        "75",
+                        "--target-artifact",
+                        "src/mylittleharness/atomic_files.py",
+                        "--target-artifact",
+                        "src/mylittleharness/roadmap.py",
+                        "--verification-summary",
+                        "Roadmap apply retries transient Windows replace locks.",
+                        "--docs-decision",
+                        "not-needed",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0, rendered)
+            self.assertIn("roadmap-written", rendered)
+            self.assertIn("wrote route project/roadmap.md", rendered)
+            self.assertEqual(2, attempts["count"])
+            self.assertEqual(2, sleep.call_count)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/roadmap.md"], changed)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            self.assertIn("### Windows Roadmap Lock Retry", roadmap_text)
+            self.assertFalse((root / "project/roadmap.md.roadmap.tmp").exists())
+            self.assertFalse((root / "project/roadmap.md.roadmap.backup").exists())
+
     def test_roadmap_add_many_dry_run_reports_all_items_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -14545,6 +16917,120 @@ class CliTests(unittest.TestCase):
             self.assertIn("### Batch Roadmap Two", roadmap_text)
             second_block = roadmap_text.split("### Batch Roadmap Two", 1)[1]
             self.assertIn('- `dependencies`: `["batch-roadmap-one"]`', second_block)
+
+    def test_roadmap_update_many_dry_run_reports_batch_closeout_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            archive_rel = "project/archive/plans/2026-06-06-batch-closeout.md"
+            archive_path = root / archive_rel
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_text("# Batch Closeout\n", encoding="utf-8")
+            manifest = root / "roadmap-update-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "roadmap-operationalization-rail",
+                                "status": "done",
+                                "related_plan": archive_rel,
+                                "archived_plan": archive_rel,
+                                "verification_summary": "Batch closeout sync tests passed.",
+                                "docs_decision": "not-needed",
+                                "carry_forward": "No lifecycle movement is implied.",
+                            },
+                            {
+                                "item_id": "minimal-roadmap-mutation-rail",
+                                "status": "done",
+                                "related_plan": archive_rel,
+                                "archived_plan": archive_rel,
+                                "verification_summary": "Batch closeout sync tests passed.",
+                                "docs_decision": "not-needed",
+                                "carry_forward": "No lifecycle movement is implied.",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--dry-run", "--action", "update-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-batch-dry-run", rendered)
+            self.assertIn("requested action: update-many", rendered)
+            self.assertIn("would process 2 roadmap item(s) through one update-many batch", rendered)
+            self.assertIn("would update item 1: roadmap-operationalization-rail", rendered)
+            self.assertIn("would update roadmap item: roadmap-operationalization-rail", rendered)
+            self.assertIn("would update roadmap item: minimal-roadmap-mutation-rail", rendered)
+            self.assertEqual(1, rendered.count("would write route project/roadmap.md"))
+
+    def test_roadmap_update_many_apply_writes_roadmap_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            archive_rel = "project/archive/plans/2026-06-06-batch-closeout.md"
+            archive_path = root / archive_rel
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_text("# Batch Closeout\n", encoding="utf-8")
+            manifest = root / "roadmap-update-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "roadmap-operationalization-rail",
+                                "status": "done",
+                                "related_plan": archive_rel,
+                                "archived_plan": archive_rel,
+                                "verification_summary": "Batch closeout sync tests passed.",
+                                "docs_decision": "not-needed",
+                                "carry_forward": "No lifecycle movement is implied.",
+                            },
+                            {
+                                "item_id": "minimal-roadmap-mutation-rail",
+                                "status": "done",
+                                "related_plan": archive_rel,
+                                "archived_plan": archive_rel,
+                                "verification_summary": "Batch closeout sync tests passed.",
+                                "docs_decision": "not-needed",
+                                "carry_forward": "No lifecycle movement is implied.",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--apply", "--action", "update-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("roadmap-batch-written", rendered)
+            self.assertIn("process 2 roadmap item(s) through one update-many batch", rendered)
+            self.assertIn("roadmap-route-write", rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/roadmap.md"], changed)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            first_block = roadmap_text.split("### Roadmap Operationalization Rail", 1)[1].split("### Minimal Roadmap Mutation Rail", 1)[0]
+            second_block = roadmap_text.split("### Minimal Roadmap Mutation Rail", 1)[1]
+            for block in (first_block, second_block):
+                self.assertIn("- `status`: `done`", block)
+                self.assertIn(f"- `related_plan`: `{archive_rel}`", block)
+                self.assertIn(f"- `archived_plan`: `{archive_rel}`", block)
+                self.assertIn("- `verification_summary`: `Batch closeout sync tests passed.`", block)
+                self.assertIn("- `docs_decision`: `not-needed`", block)
+                self.assertIn("- `carry_forward`: `No lifecycle movement is implied.`", block)
 
     def test_roadmap_add_many_accepts_simple_yaml_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -15355,6 +17841,65 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("project/archive/plans/stale-done-1.md", roadmap_text)
             self.assertIn("- Compacted done roadmap item `done-1`: archived plan `project/archive/plans/done-1.md`.", roadmap_text)
             self.assertIn("- Compacted done roadmap item `done-2`: archived plan `project/archive/plans/done-2.md`.", roadmap_text)
+
+    def test_check_and_normalize_clean_stale_archived_history_for_live_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            write_roadmap_with_done_tail(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_path.write_text(
+                roadmap_path.read_text(encoding="utf-8").replace(
+                    "Durable history remains in archived plans.\n\n",
+                    "Durable history remains in archived plans.\n\n"
+                    "- Compacted done roadmap item `next-live-work`: archived plan `project/archive/plans/stale-next-live-work.md`.\n\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            before_check = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                check_code = main(["--root", str(root), "check"])
+
+            check_rendered = output.getvalue()
+            self.assertEqual(check_code, 0)
+            self.assertEqual(before_check, snapshot_tree(root))
+            self.assertIn("roadmap-archived-history-stale-tail", check_rendered)
+            self.assertIn("next-live-work", check_rendered)
+            self.assertIn("roadmap normalize --dry-run", check_rendered)
+
+            before_dry_run = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                dry_code = main(["--root", str(root), "roadmap", "normalize", "--dry-run"])
+
+            dry_rendered = output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before_dry_run, snapshot_tree(root))
+            self.assertIn("roadmap-archived-history-stale-tail", dry_rendered)
+            self.assertIn("would remove stale Archived Completed History entry for live roadmap item(s): next-live-work", dry_rendered)
+            self.assertIn("would change field: archived_completed_history", dry_rendered)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                apply_code = main(["--root", str(root), "roadmap", "normalize", "--apply"])
+
+            apply_rendered = output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertIn("roadmap-archived-history-stale-tail", apply_rendered)
+            self.assertIn("remove stale Archived Completed History entry for live roadmap item(s): next-live-work", apply_rendered)
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            self.assertIn("### Next Live Work", roadmap_text)
+            self.assertNotIn("stale-next-live-work", roadmap_text)
+            self.assertNotIn("- Compacted done roadmap item `next-live-work`", roadmap_text)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                check_code = main(["--root", str(root), "check"])
+
+            self.assertEqual(check_code, 0)
+            self.assertNotIn("roadmap-archived-history-stale-tail", output.getvalue())
 
     def test_roadmap_update_replays_compacted_done_item_from_archived_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -17478,6 +20023,7 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("plan-roadmap-sync", rendered)
+            self.assertIn("plan-roadmap-atomic-marker-sync", rendered)
             self.assertIn("plan-roadmap-changed-field", rendered)
             self.assertIn("minimal-roadmap-mutation-rail", rendered)
 
@@ -17518,6 +20064,7 @@ class CliTests(unittest.TestCase):
                 'domain_context: "Adopt the live roadmap route and mutation rail as one advisory slice."',
                 '  - "src/mylittleharness/planning.py"',
                 'execution_policy: "current-phase-only"',
+                'completion_policy: "through-closeout"',
                 'closeout_boundary: "explicit closeout/writeback only"',
                 'source_incubation: "project/plan-incubation/roadmap.md"',
                 'source_research: "project/research/slice.md"',
@@ -18766,6 +21313,89 @@ class CliTests(unittest.TestCase):
                 plan_text,
             )
 
+    def test_plan_apply_keeps_cli_help_coupling_when_roadmap_targets_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/next-state-cli-scope-gap.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "next-state-cli-scope-gap"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# next-state-cli-scope-gap\n\n"
+                "## Entries\n\n"
+                "### 2026-06-06\n\n"
+                "[MLH-Fix-Candidate] claimed_contract: roadmap item actor-neutral-explicit-decision-next-state "
+                "covered next_state token migration; effective_owner: active plan target_artifacts/write_scope omitted "
+                "src/mylittleharness/cli_parser.py even after plan --update-active dry-run with explicit task input "
+                "named it; manual_step: operator had to find and carry user-facing --next-state help text coupling "
+                "by rg and residual risk instead of a legal widened plan; expected_owner_command: plan or roadmap "
+                "synthesis should include CLI parser/help artifacts for token migration coupling or expose a bounded "
+                "scope-widening route; affected_routes: plan, roadmap, writeback, transition, check, "
+                "src/mylittleharness/cli_parser.py; safe_boundary: observation only, no automatic closeout, archive, "
+                "roadmap done, product edit, staging, commit, or next-plan opening.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Next State Cli Scope Gap\n\n"
+                "- `id`: `next-state-cli-scope-gap`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `next-state-cli-scope-gap`\n"
+                "- `slice_goal`: `Preserve next_state token migration CLI help coupling.`\n"
+                "- `slice_members`: `[\"next-state-cli-scope-gap\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `plan synthesis only`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: ``\n"
+                "- `archived_plan`: ``\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/writeback.py\", \"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Plan synthesis should include CLI parser help ownership.`\n"
+                "- `docs_decision`: `uncertain`\n"
+                "- `carry_forward`: `The CLI help surface belongs in the same implementation scope as --next-state token migrations.`\n"
+                "- `supersedes`: `[]`\n"
+                "- `superseded_by`: `[]`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "next-state-cli-scope-gap",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-synthesis-target-artifact-pressure", rendered)
+
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('  - "src/mylittleharness/writeback.py"', plan_text)
+            self.assertIn('  - "src/mylittleharness/cli_parser.py"', plan_text)
+            self.assertIn('  - "tests/test_cli.py"', plan_text)
+            self.assertIn(
+                "- write_scope: `src/mylittleharness/writeback.py`, "
+                "`src/mylittleharness/cli_parser.py`, `tests/test_cli.py`",
+                plan_text,
+            )
+
     def test_plan_apply_work_result_ignores_lifecycle_words_in_derived_objective(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -19470,6 +22100,7 @@ class CliTests(unittest.TestCase):
             plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
             self.assertIn('title: "Plan Synthesis Rail"', plan_text)
             self.assertIn('docs_decision: "uncertain"', plan_text)
+            self.assertIn('completion_policy: "phase-only"', plan_text)
             self.assertIn("Use explicit task input only.", plan_text)
             self.assertIn("## Refusal Conditions", plan_text)
 
@@ -19542,6 +22173,56 @@ class CliTests(unittest.TestCase):
                         "Create a deterministic active plan.",
                         "--roadmap-item",
                         "minimal-roadmap-mutation-rail",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("rolled back completed target writes", output.getvalue())
+
+    def test_plan_apply_rolls_back_bundled_roadmap_and_source_on_late_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            source_rel = "project/plan-incubation/roadmap.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "Roadmap Source"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# Roadmap Source\n",
+                encoding="utf-8",
+            )
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            roadmap_text = roadmap_text.replace("- `source_incubation`: ``", f"- `source_incubation`: `{source_rel}`", 1)
+            roadmap_text = roadmap_text.replace("- `related_plan`: `project/implementation-plan.md`", "- `related_plan`: ``", 2)
+            roadmap_text = roadmap_text.replace(
+                "- `target_artifacts`: `[]`\n",
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\"]`\n",
+                2,
+            )
+            roadmap_path.write_text(roadmap_text, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            failing_replace = fail_once_when_replace_targets(source_path)
+            with patch("mylittleharness.atomic_files._replace_path", side_effect=failing_replace), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Bundled Marker Plan",
+                        "--objective",
+                        "Sync bundled roadmap relationships atomically.",
+                        "--roadmap-item",
+                        "roadmap-operationalization-rail",
                     ]
                 )
 
@@ -20433,6 +23114,51 @@ class CliTests(unittest.TestCase):
             self.assertIn("- docs_decision: updated", state_text)
             self.assertIn("- verification: targeted harvest test passed", state_text)
             self.assertIn("- residual_risk: none known", state_text)
+
+    def test_writeback_from_active_plan_keeps_same_request_product_diff_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"\nproduct_source_root:',
+                    'phase_status: "complete"\nproduct_source_root:',
+                ),
+                encoding="utf-8",
+            )
+            posture = product_diff_scope_posture(product_root)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with patch("mylittleharness.vcs.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--archive-active-plan",
+                        "--from-active-plan",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Archived product-diff-scope-gate without accepting unrelated product diff.",
+                        "--verification",
+                        "Focused writeback archive disclosure regression passed.",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "Out-of-scope product dirty diff docs/out.md remains unaccepted and outside this slice.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-from-active-plan-request-fields", rendered)
+            self.assertIn("writeback-product-diff-write-scope-disclosed", rendered)
+            self.assertNotIn("writeback-product-diff-write-scope-blocked", rendered)
+            self.assertNotIn("dry-run refused before apply", rendered)
 
     def test_writeback_from_active_plan_falls_back_to_state_closeout_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -21755,6 +24481,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("active-plan-source-incubation-related-plan-drift", output.getvalue())
 
+    def test_check_reports_bundled_roadmap_related_plan_marker_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            write_sample_roadmap(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            roadmap_text = roadmap_text.replace("- `related_plan`: `project/implementation-plan.md`", "- `related_plan`: ``", 1)
+            roadmap_path.write_text(roadmap_text, encoding="utf-8")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Bundled Marker Plan"\n'
+                'primary_roadmap_item: "roadmap-operationalization-rail"\n'
+                "covered_roadmap_items:\n"
+                '  - "roadmap-operationalization-rail"\n'
+                '  - "minimal-roadmap-mutation-rail"\n'
+                "---\n"
+                "# Bundled Marker Plan\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-bundled-related-plan-marker-drift", rendered)
+            self.assertIn("roadmap-operationalization-rail (related_plan=<empty>)", rendered)
+            self.assertIn("next_safe_command=mylittleharness --root <root> plan --dry-run --update-active --roadmap-item roadmap-operationalization-rail", rendered)
+            self.assertIn("roadmap-bundled-related-plan-marker-boundary", rendered)
+
     def test_check_reports_missing_accepted_roadmap_source_incubation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -21991,6 +24750,81 @@ class CliTests(unittest.TestCase):
             self.assertIn("coverage_matrix=1; roadmap_bh_ids=1", rendered)
             self.assertNotIn("bug-hunt-traceability-gap", rendered)
 
+    def test_check_counts_compacted_done_roadmap_bh_ids_from_archived_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/continuous-bug-hunt-ledger.md").write_text(
+                "---\n"
+                'title: "Continuous Bug Hunt Ledger"\n'
+                'status: "active"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# Continuous Bug Hunt Ledger\n\n"
+                "### BH-20260529-002 - Covered by compacted roadmap owner\n",
+                encoding="utf-8",
+            )
+            (root / "project/verification/bug-hunt-roadmap-coverage.md").write_text(
+                "---\n"
+                'title: "Bug Hunt Coverage"\n'
+                'status: "active"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# Bug Hunt Coverage\n\n"
+                "| BH id | Status | Owner / disposition | Evidence |\n"
+                "| --- | --- | --- | --- |\n",
+                encoding="utf-8",
+            )
+            write_roadmap_with_done_tail(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_path.write_text(
+                roadmap_path.read_text(encoding="utf-8").replace(
+                    "- `docs_decision`: `updated`\n"
+                    "- `carry_forward`: `Carry forward 1.`\n",
+                    "- `docs_decision`: `updated`\n"
+                    "- `bh_ids`: `BH-20260529-002`\n"
+                    "- `carry_forward`: `Carry forward 1.`\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "roadmap",
+                            "--apply",
+                            "--action",
+                            "update",
+                            "--item-id",
+                            "next-live-work",
+                            "--status",
+                            "active",
+                        ]
+                    ),
+                    0,
+                )
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            self.assertNotIn("### Done 1", roadmap_text)
+            self.assertIn(
+                "- Compacted done roadmap item `done-1`: archived plan `project/archive/plans/done-1.md`; bh_ids `BH-20260529-002`.",
+                roadmap_text,
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("bug-hunt-traceability-complete", rendered)
+            self.assertIn("covers 1 numeric ledger id(s)", rendered)
+            self.assertIn("coverage_matrix=0; roadmap_bh_ids=1", rendered)
+            self.assertNotIn("bug-hunt-traceability-gap", rendered)
+
     def test_check_warns_on_uncovered_bug_hunt_ledger_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -22124,6 +24958,92 @@ class CliTests(unittest.TestCase):
             self.assertIn("readiness='blocked-active-plan-open'", rendered)
             self.assertIn("current active plan is open for other roadmap item(s)", rendered)
             self.assertIn("writeback --dry-run --phase-status complete", rendered)
+
+    def test_check_blocks_roadmap_dependency_while_active_plan_is_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "open-dependency-plan"\n'
+                'title: "Open Dependency Plan"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "uncertain"\n'
+                'execution_policy: "current-phase-only"\n'
+                'completion_policy: "phase-only"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/roadmap.py"\n'
+                "---\n"
+                "# Open Dependency Plan\n\n"
+                "## Phases\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                "- status: `pending`\n"
+                "- write_scope: `src/mylittleharness/roadmap.py`\n",
+                encoding="utf-8",
+            )
+            source_rel = "project/plan-incubation/downstream.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'related_roadmap_item: "downstream-accepted-item"\n'
+                "---\n"
+                "# Downstream\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Upstream Active Plan\n\n"
+                "- `id`: `upstream-active-plan`\n"
+                "- `status`: `active`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `upstream-active-plan`\n"
+                "- `dependencies`: `[]`\n"
+                "- `related_plan`: `project/implementation-plan.md`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`\n"
+                "- `verification_summary`: `Active plan is still open.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "\n"
+                "### Downstream Accepted Item\n\n"
+                "- `id`: `downstream-accepted-item`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `20`\n"
+                "- `execution_slice`: `downstream-accepted-item`\n"
+                "- `dependencies`: `[\"upstream-active-plan\"]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `target_artifacts`: `[\"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Must wait for upstream closeout.`\n"
+                "- `docs_decision`: `not-needed`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0, rendered)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("item='downstream-accepted-item'", rendered)
+            self.assertIn("readiness='blocked-active-plan-open'", rendered)
+            self.assertIn("dependency 'upstream-active-plan' is active and current active plan is open", rendered)
+            self.assertNotIn("item='downstream-accepted-item'; slice='downstream-accepted-item'; status='accepted'; readiness='ready-to-plan'", rendered)
 
     def test_check_blocks_meta_feedback_scope_gap_before_empty_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -22694,7 +25614,52 @@ class CliTests(unittest.TestCase):
             self.assertIn("writeback-phase-closeout-handoff-sequence", rendered)
             self.assertIn("writeback --dry-run --phase-status complete --docs-decision uncertain", rendered)
             self.assertIn("--archive-active-plan --roadmap-item minimal-roadmap-mutation-rail --roadmap-status done", rendered)
+            self.assertIn('--state-writeback "completed the current phase"', rendered)
+            self.assertIn('--verification "focused writeback tests passed"', rendered)
+            self.assertIn('--commit-decision "manual commit policy"', rendered)
+            self.assertIn("carries recorded closeout evidence fields forward", rendered)
+            self.assertNotIn('--state-writeback "<text>"', rendered)
             self.assertIn("omit explicit --active-phase", rendered)
+
+    def test_writeback_dry_run_reports_state_closeout_authority_in_archive_handoff_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- active_plan: project/implementation-plan.md\n"
+                "- docs_decision: not-needed\n"
+                "- state_writeback: phase evidence already recorded\n"
+                "- verification: focused archive preview tests passed\n"
+                "- commit_decision: manual commit policy\n"
+                "- residual_risk: lifecycle close still requires explicit archive dry-run review\n"
+                "- carry_forward: no archive approval is implied\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--dry-run", "--archive-active-plan"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-phase-closeout-handoff-sequence", rendered)
+            self.assertIn('--docs-decision not-needed', rendered)
+            self.assertIn('--state-writeback "phase evidence already recorded"', rendered)
+            self.assertIn('--verification "focused archive preview tests passed"', rendered)
+            self.assertIn('--commit-decision "manual commit policy"', rendered)
+            self.assertIn(
+                '--residual-risk "lifecycle close still requires explicit archive dry-run review"',
+                rendered,
+            )
+            self.assertIn('--carry-forward "no archive approval is implied"', rendered)
+            self.assertIn("carries recorded closeout evidence fields forward", rendered)
+            self.assertNotIn('--state-writeback "<text>"', rendered)
 
     def test_writeback_archive_active_plan_syncs_completed_status_into_archived_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -25344,6 +28309,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", read_then_write_codes)
             self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", read_then_write_codes)
 
+    def test_hooks_pre_tool_allows_grouped_read_only_ledger_extraction_but_blocks_grouped_writes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            ledger_path = "project/" + "verification/continuous-bug-hunt-ledger.md"
+            grouped_read_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"@(Get-Content {ledger_path}) | Select-String roadmap",
+                }
+            )
+            grouped_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"@(Set-Content {ledger_path} '# bypass')",
+                }
+            )
+
+            grouped_read_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], grouped_read_input)
+            grouped_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], grouped_write_input)
+
+            grouped_read_codes = {finding["code"] for finding in grouped_read_payload["findings"]}
+            self.assertFalse(grouped_read_payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", grouped_read_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", grouped_read_codes)
+
+            grouped_write_codes = {finding["code"] for finding in grouped_write_payload["findings"]}
+            self.assertTrue(grouped_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", grouped_write_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", grouped_write_codes)
+
     def test_hooks_pre_tool_allows_git_diff_lifecycle_inspection_and_surfaces_matrix(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -25365,6 +28362,127 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", finding_codes)
             self.assertIn("hooks-policy-active-plan-roadmap-intake-matrix", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_source_explicit_read_only_subagent_delegation_prompt(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            roadmap_path = "project/" + "roadmap.md"
+            product_ref = (product_root / "src" / "allowed.py").as_posix()
+            prompt = (
+                "Read-only architecture research only. Inspect repo-visible evidence/navigation refs "
+                f"{state_path}, {roadmap_path}, and configured product source {product_ref}. "
+                "Do not write files, do not mutate lifecycle, do not stage/commit/push. "
+                "Return a concise research report."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "multi_agent_v1.spawn_agent",
+                    "parameters": {"prompt": prompt, "agent": "researcher"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-subagent-delegation", finding_codes)
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_delegation_prompt_context_with_protected_route_mentions(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            archive_path = "project/" + "archive/plans/reviewed-closeout.md"
+            evidence_path = "project/" + "verification/agent-runs/reviewed-finalization.md"
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Start a background worker. Context only for the new worker: protected route names "
+                f"{state_path}, {archive_path}, {evidence_path}, and product root {product_ref}. "
+                "The current tool call is only a delegation launch. The worker must use reviewed local "
+                "VCS finalization boundaries and MLH dry-run/apply routes before any mutation."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Reviewed closeout follow-up"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_warns_for_reviewed_local_vcs_delegation_prompt(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            evidence_path = "project/" + "verification/worker-run-receipts/reviewed-worker.json"
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Audit and commitize reviewed local-only VCS checkpointing for exact narrow MLH route "
+                f"boundaries. Navigation refs only: {state_path}, {evidence_path}, and product file {product_ref}. "
+                "The worker may coordinate git add and git commit for the reviewed exact checkpoint only, "
+                "must keep route boundaries intact, and must do not push or do not release."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Reviewed local checkpoint"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-warn-reviewed-local-vcs-delegation", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_blocks_subagent_delegation_prompt_with_lifecycle_shortcuts(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            product_ref = (product_root / "src" / "allowed.py").as_posix()
+            prompt = (
+                "Read-only research, then use "
+                f"{state_path} and {product_ref} to run my"
+                + "littleharness --root . writeback --"
+                + "apply --phase-status complete and "
+                + "gi"
+                + "t commit the result."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "multi_agent_v1.spawn_agent",
+                    "parameters": {"prompt": prompt, "agent": "researcher"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-subagent-delegation", finding_codes)
 
     def test_hooks_pre_tool_uses_apply_patch_targets_not_body_route_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -26247,6 +29365,72 @@ class CliTests(unittest.TestCase):
                 {finding["code"] for finding in payload["findings"]},
             )
 
+    def test_hooks_pre_tool_allows_read_only_product_source_python_smoke(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_src = product_root / "src"
+            product_src.mkdir()
+            rogue_target = product_src / "rogue.py"
+            dashboard_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        f"python -c \"import sys; sys.path.insert(0, r'{product_src}'); "
+                        "from mylittleharness.cli import main; "
+                        f"raise SystemExit(main(['--root', r'{root}', 'dashboard', '--inspect', '--json']))\""
+                    ),
+                }
+            )
+            task_session_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        f"$env:PYTHONPATH='{product_src}'; "
+                        f"py -m mylittleharness --root {root} task-session --inspect --json"
+                    ),
+                }
+            )
+            apply_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        f"python -c \"import sys; sys.path.insert(0, r'{product_src}'); "
+                        "from mylittleharness.cli import main; "
+                        f"raise SystemExit(main(['--root', r'{root}', 'task-session', '--apply', '--session-id', 's1']))\""
+                    ),
+                }
+            )
+            write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"python -c \"from pathlib import Path; Path(r'{rogue_target}').write_text('x')\"",
+                }
+            )
+
+            dashboard_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], dashboard_input)
+            task_session_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], task_session_input)
+            apply_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], apply_input)
+            write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], write_input)
+
+            for checked_payload in (dashboard_payload, task_session_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-read-only-product-source-smoke", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+
+            apply_codes = {finding["code"] for finding in apply_payload["findings"]}
+            self.assertTrue(apply_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", apply_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-product-source-smoke", apply_codes)
+
+            write_codes = {finding["code"] for finding in write_payload["findings"]}
+            self.assertTrue(write_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-direct-edit", write_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-product-source-smoke", write_codes)
+
     def test_hooks_pre_tool_allows_product_root_git_status_with_worktree_option(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -26378,6 +29562,362 @@ class CliTests(unittest.TestCase):
                     self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", commit_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
                     self.assertIn("prior staged-diff review", commit_messages)
+
+    def _write_post_closeout_lifecycle_finalization_fixture(
+        self,
+        root: Path,
+        *,
+        post_closeout: bool = True,
+        phase_status: str = "complete",
+    ) -> tuple[str, str, str, str]:
+        state_rel = "project/" + "project-state.md"
+        archive_rel = "project/" + "archive/plans/reviewed-closeout.md"
+        blocked_rel = "project/" + "verification/agent-runs/reviewed-finalization-blocked.md"
+        succeeded_rel = "project/" + "verification/agent-runs/reviewed-finalization.md"
+        (root / archive_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / blocked_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / archive_rel).write_text("# Reviewed Closeout\n", encoding="utf-8")
+        for rel, status in ((blocked_rel, "blocked"), (succeeded_rel, "succeeded")):
+            (root / rel).write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                f'record_id: "{Path(rel).stem}"\n'
+                f'status: "{status}"\n'
+                "---\n"
+                "# Agent Run\n",
+                encoding="utf-8",
+            )
+        state_path = root / state_rel
+        state_text = state_path.read_text(encoding="utf-8")
+        if post_closeout:
+            state_text = state_text.replace(
+                'active_plan: ""\n---',
+                f'active_plan: ""\nphase_status: "complete"\nlast_archived_plan: "{archive_rel}"\n---',
+                1,
+            )
+        else:
+            state_text = state_text.replace(
+                f'phase_status: "{phase_status}"',
+                f'phase_status: "{phase_status}"\nlast_archived_plan: "{archive_rel}"',
+                1,
+            )
+        state_path.write_text(
+            state_text
+            + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            + "- docs_decision: not-needed\n"
+            + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        return state_rel, archive_rel, blocked_rel, succeeded_rel
+
+    def _write_reviewed_worker_receipt_checkpoint_fixture(self, root: Path) -> tuple[str, str, str]:
+        receipt_rel = "project/" + "verification/worker-run-receipts/launch-1-worker-1.json"
+        log_rel = "project/" + "verification/logs/launch-1-worker-1.jsonl"
+        smoke_rel = "project/" + "verification/smoke.md"
+        (root / receipt_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / log_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / log_rel).write_text('{"event":"queued"}\n{"event":"completed"}\n', encoding="utf-8")
+        (root / smoke_rel).write_text('# Smoke\n\npassed\n', encoding="utf-8")
+        (root / receipt_rel).write_text(
+            json.dumps(
+                {
+                    "schema": "mylittleharness.worker-run-receipt.v1",
+                    "record_type": "worker-run-receipt",
+                    "receipt_id": "launch-1-worker-1",
+                    "launch_id": "launch-1",
+                    "worker_id": "worker-1",
+                    "runtime_status": "exited",
+                    "worker_status": "succeeded",
+                    "verification_verdict": "passed",
+                    "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, archive, Git, release, or provider routing",
+                    "event_history_summary": "Repo-visible event stream recorded queued and completed events; private SDK traces excluded.",
+                    "event_history_redaction": "private-traces-excluded",
+                    "private_trace_policy": "private SDK traces are excluded; repo-visible evidence only and cannot approve lifecycle.",
+                    "event_stream_refs": [log_rel],
+                    "verification_refs": [smoke_rel],
+                    "event_history": {"summary": "source-bound evidence only", "approves_lifecycle": False},
+                    "private_traces": {"stored": False, "private_traces_authoritative": False},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return receipt_rel, log_rel, smoke_rel
+
+    def test_hooks_pre_tool_allows_neighbor_live_root_reviewed_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = self._write_reviewed_worker_receipt_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": "git add -- " + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{neighbor_root}" add -- ' + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_blocks_neighbor_live_root_unsafe_checkpoint_with_precise_message(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            self._write_reviewed_worker_receipt_checkpoint_fixture(neighbor_root)
+            cases = {
+                "broad_add": f'git -C "{neighbor_root}" add .',
+                "unrelated_file": f'git -C "{neighbor_root}" add -- README.md',
+            }
+
+            for name, command in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(current_root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertIn("actual command workdir/root", messages)
+                    self.assertIn("exact existing MLH route/evidence files", messages)
+
+    def test_hooks_pre_tool_allows_reviewed_post_closeout_lifecycle_vcs_finalization_payload(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            staged = self._write_post_closeout_lifecycle_finalization_fixture(root)
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "commit -F reviewed-message.txt",
+                    "parameters": {"staged_files": list(staged)},
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=staged):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertIn("prior reviewed staged lifecycle/evidence diff", messages)
+            self.assertIn("does not approve lifecycle content, archive, push, release", messages)
+
+    def test_hooks_pre_tool_keeps_unsafe_post_closeout_lifecycle_vcs_finalization_blocked(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "closed")
+            staged = self._write_post_closeout_lifecycle_finalization_fixture(root)
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = staged
+            unsafe_commands = {
+                "missing_message": "git " + "commit",
+                "explicit_pathspec": "git " + 'commit -m "x" -- ' + state_rel,
+                "disallowed_option": "git " + 'commit --amend -m "x"',
+                "shell_separator": "git " + 'commit -m "x"; ' + "git " + "push origin main",
+            }
+            for name, command in unsafe_commands.items():
+                with self.subTest(name=name):
+                    hook_input = json.dumps(
+                        {
+                            "toolName": "shell_command",
+                            "command": command,
+                            "parameters": {"staged_files": list(staged)},
+                        }
+                    )
+                    with patch("mylittleharness.hooks._git_staged_paths", return_value=staged):
+                        payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
+
+            active_root = make_active_live_root(Path(tmp) / "active", phase_status="pending")
+            active_staged = self._write_post_closeout_lifecycle_finalization_fixture(
+                active_root,
+                post_closeout=False,
+                phase_status="pending",
+            )
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "commit -F reviewed-message.txt",
+                    "parameters": {"staged_files": list(active_staged)},
+                }
+            )
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=active_staged):
+                active_payload = hook_event_payload(load_inventory(active_root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            active_codes = {finding["code"] for finding in active_payload["findings"]}
+            self.assertTrue(active_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", active_codes)
+
+            incoherent_staged = (state_rel, succeeded_rel)
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=incoherent_staged):
+                incoherent_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            bad_evidence_rel = "project/" + "verification/agent-runs/not-reviewed.md"
+            (root / bad_evidence_rel).write_text("# Missing frontmatter\n", encoding="utf-8")
+            unreviewed_staged = (state_rel, archive_rel, bad_evidence_rel)
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=unreviewed_staged):
+                unreviewed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            for checked_payload in (incoherent_payload, unreviewed_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertTrue(checked_payload["block"])
+                self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
+
+    def test_hooks_pre_tool_allows_product_source_workdir_exact_staging_and_nonforce_push_after_closeout(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src" / "mylittleharness").mkdir(parents=True)
+            (product_root / "tests").mkdir()
+            (product_root / "src" / "mylittleharness" / "hooks.py").write_text("# hooks\n", encoding="utf-8")
+            (product_root / "tests" / "test_cli.py").write_text("def test_cli():\n    assert True\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "add -- src/mylittleharness/hooks.py tests/test_cli.py",
+                }
+            )
+            push_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "push origin main",
+                }
+            )
+            stage_git_c_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + f'-C "{product_root}" add -- src/mylittleharness/hooks.py tests/test_cli.py',
+                }
+            )
+
+            stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            stage_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_git_c_input)
+            push_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], push_input)
+
+            stage_codes = {finding["code"] for finding in stage_payload["findings"]}
+            stage_git_c_codes = {finding["code"] for finding in stage_git_c_payload["findings"]}
+            push_codes = {finding["code"] for finding in push_payload["findings"]}
+
+            self.assertFalse(stage_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-staging", stage_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", stage_codes)
+            self.assertFalse(stage_git_c_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-staging", stage_git_c_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", stage_git_c_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", stage_git_c_codes)
+            self.assertFalse(push_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-push", push_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", push_codes)
+
+    def test_hooks_pre_tool_keeps_product_source_workdir_unsafe_vcs_forms_blocked_after_closeout(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src").mkdir(parents=True)
+            (product_root / "src" / "allowed.py").write_text("ALLOWED = True\n", encoding="utf-8")
+            symlink_path = product_root / "src" / "link.py"
+            symlink_case: dict[str, str] = {}
+            try:
+                os.symlink(product_root / "src" / "allowed.py", symlink_path)
+                symlink_case["symlink_add"] = "git " + "add -- src/link.py"
+            except (NotImplementedError, OSError):
+                pass
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            cases = {
+                "broad_add": "git " + "add .",
+                "git_c_broad_add": "git " + f'-C "{product_root}" add .',
+                "directory_add": "git " + "add -- src",
+                "wildcard_add": "git " + "add -- *",
+                "missing_add": "git " + "add -- src/missing.py",
+                "escape_add": "git " + "add -- ../operator/project/project-state.md",
+                "force_push_long": "git " + "push --force origin main",
+                "force_push_short": "git " + "push -f origin main",
+                "mirror_push": "git " + "push --mirror",
+                "delete_push": "git " + "push origin --delete main",
+                "delete_refspec_push": "git " + "push origin :main",
+                "force_refspec_push": "git " + "push origin +main",
+                "explicit_tag_ref_push": "git " + "push origin refs/tags/v1.0.0",
+                "tag_prefix_ref_push": "git " + "push origin tags/v1.0.0",
+                "bare_version_tag_push": "git " + "push origin v1.0.0",
+                **symlink_case,
+            }
+
+            for name, command in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "workdir": str(product_root), "command": command}),
+                    )
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+                    self.assertIn("only exact staging of reviewed existing files", messages)
 
     def test_hooks_pre_tool_blocks_broad_post_closeout_git_mutation(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -26667,6 +30207,45 @@ class CliTests(unittest.TestCase):
                 rogue_messages,
             )
 
+    def test_hooks_pre_tool_distinguishes_temp_fixture_lifecycle_write_targets(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "operator")
+            fixture_root = Path(tmp) / "fixture"
+            fixture_root.mkdir()
+            baseline = snapshot_tree(root)
+            fixture_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(fixture_root),
+                    "command": "New-Item -ItemType Directory -Force project; Set-Content -Path project/project-state.md -Value '# fixture'",
+                }
+            )
+            escape_target = Path(os.path.relpath(root / "project" / "project-state.md", fixture_root)).as_posix()
+            escape_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(fixture_root),
+                    "command": f"Set-Content -Path {escape_target} -Value '# bypass'",
+                }
+            )
+
+            fixture_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], fixture_input)
+            escape_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], escape_input)
+
+            fixture_codes = {finding["code"] for finding in fixture_payload["findings"]}
+            self.assertFalse(fixture_payload["block"])
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", fixture_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", fixture_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", fixture_codes)
+
+            escape_codes = {finding["code"] for finding in escape_payload["findings"]}
+            self.assertTrue(escape_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", escape_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", escape_codes)
+            self.assertEqual(baseline, snapshot_tree(root))
+
     def test_hooks_pre_tool_product_root_write_without_active_plan_suggests_plan_route(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -26797,6 +30376,76 @@ class CliTests(unittest.TestCase):
             self.assertTrue(extra_write_payload["block"])
             self.assertIn("hooks-policy-block-lifecycle-authority-path", extra_write_codes)
 
+    def test_hooks_pre_tool_allows_evidence_record_route_but_blocks_direct_agent_run_writes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            state_rel = "project/" + "project-state.md"
+            smoke_rel = "project/" + "verification/smoke.md"
+            agent_run_rel = "project/" + "verification/agent-runs/run-1.md"
+            base_record_command = (
+                "mylittleharness --root . evidence --record {mode} "
+                "--record-id run-1 --role coder --actor codex --task task "
+                "--assigned-scope scope --runtime local-shell --worktree-id wt "
+                "--status succeeded --stop-reason done --attempt-budget 1/1 "
+                f"--input-ref {state_rel} --output-ref {smoke_rel} "
+                "--claimed-path src/mylittleharness/hooks.py "
+                "--changed-file src/mylittleharness/hooks.py "
+                f"--command \"Set-Content {agent_run_rel} quoted-evidence-only\" "
+                f"--verification-ref {smoke_rel} --docs-decision not-needed --residual-risk none"
+            )
+            dry_run_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": base_record_command.format(mode="--dry-run"),
+                }
+            )
+            apply_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": base_record_command.format(mode="--apply"),
+                }
+            )
+            missing_record_id_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . evidence --record --dry-run "
+                        f"--output-ref {agent_run_rel}"
+                    ),
+                }
+            )
+            direct_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Set-Content -Path {agent_run_rel} -Value '# bypass'",
+                }
+            )
+
+            dry_run_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], dry_run_input)
+            apply_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], apply_input)
+            missing_record_id_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], missing_record_id_input)
+            direct_write_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
+
+            for checked_payload in (dry_run_payload, apply_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+            missing_record_id_codes = {finding["code"] for finding in missing_record_id_payload["findings"]}
+            self.assertTrue(missing_record_id_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", missing_record_id_codes)
+            self.assertNotIn("hooks-policy-allow-mlh-owner-route-evidence-paths", missing_record_id_codes)
+
+            direct_write_codes = {finding["code"] for finding in direct_write_payload["findings"]}
+            self.assertTrue(direct_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", direct_write_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_write_codes)
+
     def test_hooks_pre_tool_allows_literal_powershell_splatted_mlh_owner_route(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -26826,6 +30475,19 @@ class CliTests(unittest.TestCase):
             splatted_data_mentions_mode = (
                 "$argsList = @('--root', '.', 'writeback', '--residual-risk', 'mentions --dry-run only')\n"
                 "mylittleharness @argsList"
+            )
+            splatted_phase_writeback = (
+                "$phase = 'complete'\n"
+                "$docs = 'not-needed'\n"
+                "$stateWriteback = 'task_scope: hook splat route through project/project-state.md'\n"
+                "$argsList = @(\n"
+                "  '--root', '.',\n"
+                "  'writeback', '--dry-run',\n"
+                "  '--phase-status', $phase,\n"
+                "  '--docs-decision', $docs,\n"
+                "  '--state-writeback', $stateWriteback\n"
+                ")\n"
+                "& mylittleharness @argsList"
             )
 
             owner_payload = hook_event_payload(
@@ -26858,12 +30520,26 @@ class CliTests(unittest.TestCase):
                 [],
                 json.dumps({"toolName": "shell_command", "command": splatted_data_mentions_mode}),
             )
+            phase_writeback_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": splatted_phase_writeback}),
+            )
 
             owner_codes = {finding["code"] for finding in owner_payload["findings"]}
             self.assertFalse(owner_payload["block"])
+            self.assertIn("hooks-policy-allow-powershell-mlh-owner-route-splat", owner_codes)
             self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", owner_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", owner_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", owner_codes)
+
+            phase_writeback_codes = {finding["code"] for finding in phase_writeback_payload["findings"]}
+            self.assertFalse(phase_writeback_payload["block"])
+            self.assertIn("hooks-policy-allow-powershell-mlh-owner-route-splat", phase_writeback_codes)
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", phase_writeback_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", phase_writeback_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", phase_writeback_codes)
 
             extra_write_codes = {finding["code"] for finding in extra_write_payload["findings"]}
             self.assertTrue(extra_write_payload["block"])
@@ -28217,6 +31893,7 @@ class CliTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("mylittleharness.adapter.build_projection", side_effect=AssertionError("should not rebuild")),
+                patch("mylittleharness.dashboard.build_projection", side_effect=AssertionError("dashboard should not rebuild")),
                 patch("sys.stdin", io.StringIO(json.dumps(message) + "\n")),
                 redirect_stdout(output),
             ):
@@ -28676,6 +32353,33 @@ class CliTests(unittest.TestCase):
             self.assertIn("full-text-no-matches", rendered)
             self.assertNotIn("text match for 'QueryTerm'", rendered)
 
+    def test_intelligence_unified_query_stages_full_text_on_large_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            (root / "README.md").write_text("# Readme\n" + "LargeQueryNeedle lives here.\n" * 2600, encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intelligence", "--query", "LargeQueryNeedle"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("intelligence-query-expansion", rendered)
+            self.assertIn("staged modes: full text", rendered)
+            self.assertIn("search-match", rendered)
+            self.assertNotIn("projection-index-query-current", rendered)
+
+    def test_intelligence_focus_search_unified_query_stages_full_text_on_large_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            (root / "README.md").write_text("# Readme\n" + "LargeFocusNeedle lives here.\n" * 2600, encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", "LargeFocusNeedle"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("staged modes: full text", rendered)
+            self.assertIn("search-match", rendered)
+            self.assertNotIn("projection-index-query-current", rendered)
+
     def test_intelligence_reports_no_matches_for_missing_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -28714,6 +32418,27 @@ class CliTests(unittest.TestCase):
             self.assertIn("search-no-matches", rendered)
             self.assertNotIn("repo-map-surface", rendered)
             self.assertNotIn("backlink-reference", rendered)
+
+    def test_intelligence_focus_search_does_not_build_unselected_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            blocked = AssertionError("unselected intelligence focus section was evaluated")
+            output = io.StringIO()
+            with (
+                patch("mylittleharness.checks.diagnostic_drift_findings", side_effect=blocked),
+                patch("mylittleharness.checks.deep_research_rubric_recovery_findings", side_effect=blocked),
+                patch("mylittleharness.checks._repo_map_findings", side_effect=blocked),
+                patch("mylittleharness.checks._backlink_findings", side_effect=blocked),
+                patch("mylittleharness.checks._fan_in_findings", side_effect=blocked),
+                patch("mylittleharness.checks._projection_findings", side_effect=blocked),
+                redirect_stdout(output),
+            ):
+                code = main(["--root", str(root), "intelligence", "--focus", "search", "--path", ".agents/docmap.yaml"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("Search", rendered)
+            self.assertIn("search-path-match", rendered)
+            self.assertNotIn("\nRepo Map\n", rendered)
 
     def test_intelligence_focus_projection_reports_in_memory_projection_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -31450,6 +35175,8 @@ class CliTests(unittest.TestCase):
             self.assertIsNotNone(source_hash)
             assert source_hash is not None
             self.assertIn("plan-cancel-route-write", dry_rendered)
+            self.assertIn("plan-cancel-command-registry-owner", dry_rendered)
+            self.assertIn("src/mylittleharness/command_discovery.py", dry_rendered)
             self.assertIn("would restore roadmap item", dry_rendered)
 
             apply_output = io.StringIO()
@@ -31470,6 +35197,7 @@ class CliTests(unittest.TestCase):
             rendered = apply_output.getvalue()
             self.assertEqual(apply_code, 0)
             self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("plan-cancel-command-registry-owner", rendered)
             state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
             self.assertIn('plan_status: "none"', state_text)
             self.assertIn('active_plan: ""', state_text)
@@ -31481,6 +35209,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("- `status`: `accepted`", block)
             self.assertNotIn("- `related_plan`: `project/implementation-plan.md`", block)
             self.assertIn("no closeout, archive", rendered)
+
+    def test_suggest_intent_routes_plan_cancel_and_static_command_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "cancel accidental plan activation"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("cancel-accidental-plan-activation", rendered)
+            self.assertIn("plan-cancel --dry-run", rendered)
+            self.assertIn("source-hash", rendered)
+
+            commands = set(COMMANDS)
+            self.assertIn("plan-cancel", commands)
 
     def test_plan_cancel_refuses_without_reviewed_source_hash_or_after_hash_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -31900,6 +35644,54 @@ class CliTests(unittest.TestCase):
             self.assertNotIn(("route-metadata-changed-route-status", spec_rel), codes_by_source)
             self.assertFalse(any(finding.source == spec_rel and "source_members" in finding.message for finding in changed))
 
+    def test_check_warns_for_evidence_looking_product_doc_without_blanket_frontmatter_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            docs_dir = root / "docs"
+            docs_dir.mkdir(parents=True, exist_ok=True)
+            (root / "README.md").write_text("# Root README\n", encoding="utf-8")
+            (root / "AGENTS.md").write_text("# Operator Contract\n", encoding="utf-8")
+            (docs_dir / "switching-verification.md").write_text(
+                "# Switching Verification\n\nEvidence gathered during manual switching checks.\n",
+                encoding="utf-8",
+            )
+            (docs_dir / "plain-guide.md").write_text("# Plain Guide\n\nProduct usage notes.\n", encoding="utf-8")
+
+            inventory = load_inventory(root)
+            findings = audit_link_findings(inventory)
+            validation = validation_findings(inventory)
+
+            evidence_sources = {
+                finding.source for finding in findings if finding.code == "product-doc-evidence-posture"
+            }
+            self.assertEqual(evidence_sources, {"docs/switching-verification.md"})
+            self.assertTrue(
+                any(
+                    finding.code == "product-doc-frontmatter-optional"
+                    and finding.source == "docs/switching-verification.md"
+                    for finding in findings
+                )
+            )
+            evidence_messages = [
+                finding.message for finding in findings if finding.code == "product-doc-evidence-posture"
+            ]
+            self.assertTrue(any("project/verification/*.md" in message for message in evidence_messages))
+            self.assertTrue(any("no automatic rewrite or route move" in message for message in evidence_messages))
+            self.assertFalse(
+                any(
+                    finding.source in {"README.md", "AGENTS.md", "docs/plain-guide.md"}
+                    and finding.code == "product-doc-evidence-posture"
+                    for finding in findings
+                )
+            )
+            self.assertFalse(
+                any(
+                    finding.source in {"README.md", "AGENTS.md", "docs/switching-verification.md", "docs/plain-guide.md"}
+                    and finding.code in {"lifecycle-frontmatter", "research-frontmatter"}
+                    for finding in validation
+                )
+            )
+
     def test_check_errors_for_lifecycle_markdown_missing_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -31977,6 +35769,87 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("check-lifecycle-provenance-active-lifecycle", rendered)
             self.assertIn("check-lifecycle-provenance-unknown-owner", rendered)
+
+    def test_git_subprocess_uses_utf8_replace_decoding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[dict[str, object]] = []
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append(kwargs)
+                return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+
+            with (
+                patch("mylittleharness.vcs._git_executable", return_value="git"),
+                patch("mylittleharness.vcs.subprocess.run", side_effect=fake_run),
+            ):
+                result = vcs_module._run_git(root, ("rev-parse", "--is-inside-work-tree"), None)
+
+            self.assertIsInstance(result, subprocess.CompletedProcess)
+            self.assertEqual("utf-8", calls[0]["encoding"])
+            self.assertEqual("replace", calls[0]["errors"])
+
+    def test_probe_vcs_degrades_when_git_status_stdout_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                command_tuple = tuple(command)
+                if "--is-inside-work-tree" in command_tuple:
+                    return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+                if "--show-toplevel" in command_tuple:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"{root}\n", stderr="")
+                if "status" in command_tuple:
+                    return subprocess.CompletedProcess(command, 0, stdout=None, stderr="decode failed")
+                raise AssertionError(f"unexpected git command: {command_tuple}")
+
+            posture = probe_vcs(root, runner=runner)
+
+            self.assertTrue(posture.git_available)
+            self.assertTrue(posture.is_worktree)
+            self.assertEqual("unknown", posture.state)
+            self.assertEqual(str(root), posture.top_level)
+            self.assertIn("decode failed", posture.detail)
+
+    def test_probe_vcs_preserves_non_ascii_porcelain_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected_path = "project/plan-incubation/\u0446\u0435\u043b\u044c.md"
+
+            def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                command_tuple = tuple(command)
+                if "--is-inside-work-tree" in command_tuple:
+                    return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+                if "--show-toplevel" in command_tuple:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"{root}\n", stderr="")
+                if "status" in command_tuple:
+                    return subprocess.CompletedProcess(command, 0, stdout=f"?? {expected_path}\n", stderr="")
+                raise AssertionError(f"unexpected git command: {command_tuple}")
+
+            posture = probe_vcs(root, runner=runner)
+
+            self.assertEqual("dirty", posture.state)
+            self.assertEqual((VcsChangedPath("??", expected_path),), posture.changed_paths)
+            self.assertEqual((VcsChangedPath("??", expected_path),), posture.changed_samples)
+
+    def test_check_quick_omits_full_source_inventory_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--quick"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("MyLittleHarness check --quick", rendered)
+            self.assertIn("Quick Summary", rendered)
+            self.assertIn("source_inventory_hidden:", rendered)
+            self.assertIn("Dirty Route Summary", rendered)
+            self.assertIn("Actionable Findings", rendered)
+            self.assertNotIn("\nSources\n", rendered)
 
 
 class EncodingLimitedTextStream:
