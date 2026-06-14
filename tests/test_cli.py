@@ -29766,6 +29766,60 @@ class CliTests(unittest.TestCase):
         )
         return hardening_archive_rel, acceptance_archive_rel, research_rel
 
+    def _write_meta_feedback_checkpoint_fixture(self, root: Path) -> tuple[str, str]:
+        hook_note_rel = "project/" + "plan-incubation/reviewed-hook-overblock.md"
+        commit_note_rel = "project/" + "plan-incubation/product-source-exact-acceptance-commit-hook-overblock.md"
+        (root / hook_note_rel).parent.mkdir(parents=True, exist_ok=True)
+        for rel, title, expected_owner in (
+            (hook_note_rel, "reviewed hook overblock", "hooks, meta-feedback, and checkpoint staging"),
+            (commit_note_rel, "product source exact acceptance commit hook overblock", "hooks and local product acceptance commit"),
+        ):
+            (root / rel).write_text(
+                "---\n"
+                f'topic: "{title}"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-14"\n'
+                'updated: "2026-06-14"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                f"# {title}\n\n"
+                "## Provenance\n\n"
+                "- Source: MyLittleHarness incubation route\n"
+                "- Non-authority note: incubation is temporary synthesis; promoted research/spec/plan/state remains authority when accepted.\n\n"
+                "## Meta-feedback Cluster\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                f"- `canonical_id`: `{Path(rel).stem}`\n"
+                "- `signal_type`: `agent-operability-hook-analysis`\n"
+                f"- `expected_owner_command`: `{expected_owner}`\n"
+                "- `occurrence_count`: `1`\n"
+                "- `affected_routes`: `[\"src/mylittleharness/hooks.py\", \"tests/test_cli.py\"]`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+                "## Entries\n\n"
+                "### 2026-06-14\n\n"
+                "[MLH-Fix-Candidate]\n\n"
+                "Problem: pre-tool hook overblocked an exact reviewed local-only checkpoint staging command.\n\n"
+                "Meta-feedback intake fields:\n"
+                "- signal_type: agent-operability-hook-analysis\n"
+                "- hook_event: pre-tool-use\n"
+                "- blocked_surface: git add -- exact project/plan-incubation/*.md checkpoint notes\n"
+                "- expected_owner_command: hooks, meta-feedback, and checkpoint staging\n"
+                "- safe_boundary: evidence only; do not weaken broad git add/reset/checkout/clean/force-push guards and do not approve lifecycle, archive, roadmap, staging, commit, push, or release automatically\n"
+                "- authority_boundary: operating-memory capture only; roadmap promotion requires explicit roadmap review; no automatic lifecycle movement, closeout, archive, staging, commit, push, or next-plan opening.\n",
+                encoding="utf-8",
+            )
+        state_rel = "project/" + "project-state.md"
+        state_path = root / state_rel
+        state_text = state_path.read_text(encoding="utf-8")
+        state_path.write_text(
+            state_text.replace(
+                'active_plan: ""\n---',
+                'active_plan: ""\nphase_status: "complete"\n---',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        return hook_note_rel, commit_note_rel
+
     def test_hooks_pre_tool_allows_neighbor_live_root_reviewed_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -29830,6 +29884,82 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertIn("deferred research/archive route packages", messages)
+
+    def test_hooks_pre_tool_allows_neighbor_meta_feedback_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = self._write_meta_feedback_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            stage_command = "gi" + "t add -- "
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": stage_command + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": ("gi" + f't -C "{neighbor_root}" add -- ') + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("meta-feedback/incubation blocker notes", messages)
+
+    def test_hooks_pre_tool_blocks_unreviewed_incubation_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            note_rel = "project/" + "plan-incubation/unreviewed-idea.md"
+            (neighbor_root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (neighbor_root / note_rel).write_text(
+                "---\n"
+                'topic: "unreviewed idea"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# Unreviewed Idea\n\n"
+                "A normal incubating note without meta-feedback cluster or fix-candidate evidence.\n",
+                encoding="utf-8",
+            )
+            state_path = neighbor_root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f'git -C "{neighbor_root}" add -- {note_rel}'}),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertIn("path_classes=incubation", messages)
+            self.assertIn("meta-feedback/incubation-blocker-notes", messages)
 
     def test_hooks_pre_tool_blocks_neighbor_live_root_unsafe_checkpoint_with_precise_message(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

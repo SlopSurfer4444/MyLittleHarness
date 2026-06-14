@@ -1736,7 +1736,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-allow-reviewed-local-vcs-checkpoint",
                 (
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
-                    "files in the actual command workdir/root, including deferred research/archive route packages; "
+                    "files in the actual command workdir/root, including deferred research/archive route packages "
+                    "and meta-feedback/incubation blocker notes; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
                     "decisions remain blocked"
                 ),
@@ -3723,6 +3724,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     deferred_package_paths = _coherent_deferred_route_package_checkpoint_paths(inventory, normalized)
     if deferred_package_paths:
         return deferred_package_paths
+    meta_feedback_paths = _coherent_meta_feedback_checkpoint_paths(inventory, normalized)
+    if meta_feedback_paths:
+        return meta_feedback_paths
     return set()
 
 
@@ -3754,10 +3758,64 @@ def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, path
     return paths
 
 
+def _coherent_meta_feedback_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    if not paths or any(not _is_meta_feedback_incubation_route_path(path) for path in paths):
+        return set()
+    if not all(_is_reviewed_meta_feedback_incubation_file(inventory, path) for path in paths):
+        return set()
+    return paths
+
+
+def _is_meta_feedback_incubation_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/plan-incubation/") and rel.endswith(".md")
+
+
+def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) -> bool:
+    if not _is_meta_feedback_incubation_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    source = str(data.get("source") or "").strip().casefold()
+    body = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :])
+    content = body.casefold()
+    has_route_provenance = source == "mylittleharness incubation route" or "source: mylittleharness incubation route" in content
+    has_meta_feedback_cluster = "mylittleharness-meta-feedback-cluster v1" in content
+    has_fix_candidate = "[mlh-fix-candidate" in content
+    has_hook_blocker_scope = "hook" in content and ("overblock" in content or "blocked_surface" in content)
+    has_boundary = (
+        "safe_boundary" in content
+        or "authority_boundary" in content
+        or (("cannot approve" in content or "no approval" in content) and "lifecycle" in content)
+    )
+    return has_route_provenance and has_meta_feedback_cluster and has_fix_candidate and has_hook_blocker_scope and has_boundary
+
+
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
-        "worker-run-receipt-refs,deferred-research/archive-package"
+        "worker-run-receipt-refs,deferred-research/archive-package,meta-feedback/incubation-blocker-notes"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
@@ -3788,6 +3846,8 @@ def _reviewed_local_vcs_checkpoint_path_classes(paths: set[str]) -> str:
         classes.append("worker-run-receipts")
     if any(_is_deferred_research_route_path(path) for path in paths):
         classes.append("research")
+    if any(_is_meta_feedback_incubation_route_path(path) for path in paths):
+        classes.append("incubation")
     if len(classes) == 0:
         classes.append("other-route")
     return ",".join(classes)
