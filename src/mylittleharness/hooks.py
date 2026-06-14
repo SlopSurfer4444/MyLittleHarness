@@ -687,6 +687,12 @@ def hook_run_sections(inventory: Inventory, hook_id: str, hook_args: list[str], 
             )
         )
         return [("Event", event_findings), ("Boundary", _hook_boundary_findings())]
+    if hook_id == HOOK_PRE_COMMIT:
+        return [
+            ("Event", event_findings),
+            ("Git Pre-Commit Advisory", _git_pre_commit_findings(inventory, hook_args)),
+            ("Boundary", _hook_boundary_findings()),
+        ]
     if hook_id in FIRST_CONTACT_HOOKS:
         return [
             ("Event", event_findings),
@@ -1184,13 +1190,43 @@ def _hook_first_contact_adoption_findings(inventory: Inventory) -> list[Finding]
 
 def _hook_event_findings() -> list[Finding]:
     return [
-        Finding("info", "hooks-event", f"runnable hook event: {HOOK_PRE_COMMIT}; delegates to preflight and remains warning-only"),
+        Finding("info", "hooks-event", f"runnable hook event: {HOOK_PRE_COMMIT}; emits a fast advisory report and remains warning-only"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_AGENT_STATUS}; reports root posture without writing files"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_SESSION_START}; emits first-contact context without writing files"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_USER_PROMPT_SUBMIT}; emits dashboard-first context for prompt routing"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_PRE_TOOL_USE}; warns or blocks deterministic shortcut attempts before tool execution"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_POST_TOOL_USE}; reports post-tool shortcut posture without writing files"),
         Finding("info", "hooks-event", f"runnable hook event: {HOOK_STOP}; warns about dangling lifecycle tails before final response"),
+    ]
+
+
+def _git_pre_commit_findings(inventory: Inventory, hook_args: list[str]) -> list[Finding]:
+    cleaned_args = _clean_hook_args(hook_args)
+    arg_summary = ", ".join(cleaned_args) if cleaned_args else "none"
+    return [
+        Finding(
+            "info",
+            "hooks-git-pre-commit-fast-path",
+            (
+                "git-pre-commit uses a bounded warning-only path; it does not run full preflight, "
+                "scan the whole dirty tree, mutate files, stage, commit, push, or approve lifecycle movement"
+            ),
+        ),
+        Finding(
+            "info",
+            "hooks-git-pre-commit-root",
+            f"root kind: {inventory.root_kind}; root={inventory.root}",
+        ),
+        Finding(
+            "info",
+            "hooks-git-pre-commit-args",
+            f"git hook args: {arg_summary}",
+        ),
+        Finding(
+            "info",
+            "hooks-git-pre-commit-next",
+            "run explicit MLH check or dashboard commands outside the Git hook when deeper diagnostics are needed",
+        ),
     ]
 
 
@@ -1491,10 +1527,12 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_product_source_vcs_stage = _is_product_source_vcs_stage_command(inventory, data, command)
     allow_product_source_vcs_commit = _is_product_source_vcs_commit_command(inventory, data, command)
     allow_product_source_vcs_push = _is_product_source_vcs_push_command(inventory, data, command)
+    allow_product_source_vcs_finalization = _is_product_source_vcs_finalization_sequence(inventory, data, command)
     allow_product_source_vcs_command = (
         allow_product_source_vcs_stage
         or allow_product_source_vcs_commit
         or allow_product_source_vcs_push
+        or allow_product_source_vcs_finalization
     )
     reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, data, command)
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
@@ -1753,6 +1791,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "allowed narrow local VCS commit command for a coherent staged lifecycle route set backed by "
                     "active-phase-complete writeback evidence; " + "gi" + "t commit -F" + " is treated as a message-file option, "
                     "while lowercase -f, amend, push, reset, clean, and generated/runtime cache commits remain blocked"
+                ),
+            )
+        )
+    if allow_product_source_vcs_finalization:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-product-source-vcs-finalization-sequence",
+                (
+                    "allowed exact product-source VCS finalization sequence after plan_status=none; "
+                    "the sequence may only stage exact reviewed product files, run cached diff check, and "
+                    "commit with an explicit message file, while push, amend, reset, clean, broad add, "
+                    "release, and lifecycle decisions remain unapproved"
                 ),
             )
         )
@@ -3326,6 +3377,47 @@ def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, ob
             return False
         operands.append(clean)
     return len(operands) <= 2
+
+
+def _is_product_source_vcs_finalization_sequence(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if _has_active_plan(inventory):
+        return False
+    segments = _simple_shell_sequence_segments(command)
+    if len(segments) not in {2, 3}:
+        return False
+    start = 0
+    if len(segments) == 3:
+        if not _is_product_source_vcs_stage_command(inventory, data, segments[0]):
+            return False
+        start = 1
+    return (
+        _is_product_source_cached_diff_check_command(inventory, data, segments[start])
+        and _is_product_source_vcs_commit_command(inventory, data, segments[start + 1])
+    )
+
+
+def _simple_shell_sequence_segments(command: str) -> list[str]:
+    if "\n" in command or "&&" in command or "||" in command or "|" in command:
+        return []
+    segments = [segment.strip() for segment in str(command or "").split(";")]
+    if any(not segment for segment in segments):
+        return []
+    return segments
+
+
+def _is_product_source_cached_diff_check_command(
+    inventory: Inventory, data: dict[str, object], command: str
+) -> bool:
+    base_root, product_root = _product_source_vcs_roots(inventory, data, command)
+    if base_root is None or product_root is None:
+        return False
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand != "diff" or subcommand_index < 0:
+        return False
+    args = [_clean_token(token) for token in tokens[subcommand_index + 1 :] if _clean_token(token)]
+    if not args:
+        return False
+    return set(args) == {"--cached", "--check"}
 
 
 def _looks_like_product_source_tag_push_ref(ref: str) -> bool:

@@ -27373,8 +27373,14 @@ class CliTests(unittest.TestCase):
             run_rendered = run_output.getvalue()
             self.assertEqual(before_run, snapshot_tree_bytes(root))
             self.assertIn("hooks-run-event", run_rendered)
-            self.assertIn("preflight-boundary", run_rendered)
+            self.assertIn("hooks-git-pre-commit-fast-path", run_rendered)
+            self.assertNotIn("preflight-boundary", run_rendered)
             self.assertIn("hooks are sensors", run_rendered)
+
+            guarded_output = io.StringIO()
+            with patch("mylittleharness.hooks.preflight_sections", side_effect=AssertionError("git pre-commit must stay fast")), redirect_stdout(guarded_output):
+                self.assertEqual(main(["--root", str(root), "hooks", "--run", "git-pre-commit", "--", "--cached"]), 0)
+            self.assertIn("hooks-git-pre-commit-fast-path", guarded_output.getvalue())
 
     def test_hooks_session_start_emits_first_contact_context_payload_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -29720,7 +29726,7 @@ class CliTests(unittest.TestCase):
             'status: "imported"\n'
             'topic: "worker event-history receipt hardening"\n'
             'title: "Worker Event History Receipt Hardening"\n'
-            'derived_from: "research-import cli"\n'
+            'derived_from: "symphony-packet-007-microscope"\n'
             "source_hashes:\n"
             f'  - "imported_text sha256={research_hash}"\n'
             "---\n"
@@ -30137,6 +30143,30 @@ class CliTests(unittest.TestCase):
                     "command": "git " + f'-C "{product_root}" commit -F reviewed-message.txt',
                 }
             )
+            finalization_sequence_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "git "
+                        + f'-C "{product_root}" add -- src/mylittleharness/hooks.py tests/test_cli.py; '
+                        + "git "
+                        + f'-C "{product_root}" diff --cached --check; '
+                        + "git "
+                        + f'-C "{product_root}" commit -F reviewed-message.txt'
+                    ),
+                }
+            )
+            unsafe_sequence_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "git "
+                        + f'-C "{product_root}" add -- src/mylittleharness/hooks.py; '
+                        + "git "
+                        + f'-C "{product_root}" push --force origin main'
+                    ),
+                }
+            )
             grep_git_c_input = json.dumps(
                 {
                     "toolName": "shell_command",
@@ -30148,6 +30178,8 @@ class CliTests(unittest.TestCase):
             stage_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_git_c_input)
             commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
             commit_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_git_c_input)
+            finalization_sequence_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], finalization_sequence_input)
+            unsafe_sequence_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], unsafe_sequence_input)
             grep_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], grep_git_c_input)
             push_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], push_input)
 
@@ -30155,6 +30187,8 @@ class CliTests(unittest.TestCase):
             stage_git_c_codes = {finding["code"] for finding in stage_git_c_payload["findings"]}
             commit_codes = {finding["code"] for finding in commit_payload["findings"]}
             commit_git_c_codes = {finding["code"] for finding in commit_git_c_payload["findings"]}
+            finalization_sequence_codes = {finding["code"] for finding in finalization_sequence_payload["findings"]}
+            unsafe_sequence_codes = {finding["code"] for finding in unsafe_sequence_payload["findings"]}
             grep_git_c_codes = {finding["code"] for finding in grep_git_c_payload["findings"]}
             push_codes = {finding["code"] for finding in push_payload["findings"]}
 
@@ -30172,6 +30206,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-commit", commit_git_c_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", commit_git_c_codes)
             self.assertNotIn("hooks-policy-block-product-root-direct-edit", commit_git_c_codes)
+            self.assertFalse(finalization_sequence_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-finalization-sequence", finalization_sequence_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finalization_sequence_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finalization_sequence_codes)
+            self.assertTrue(unsafe_sequence_payload["block"])
+            self.assertNotIn("hooks-policy-allow-product-source-vcs-finalization-sequence", unsafe_sequence_codes)
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_sequence_codes)
             self.assertFalse(grep_git_c_payload["block"])
             self.assertNotIn("hooks-policy-block-product-root-path", grep_git_c_codes)
             self.assertFalse(push_payload["block"])
