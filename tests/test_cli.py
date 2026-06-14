@@ -28430,6 +28430,90 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_delegation_prompt_context_with_runtime_backend_language(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            roadmap_path = "project/" + "roadmap.md"
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Create a project thread for Elixir runtime/backend packaging review. Context only: "
+                f"inspect {state_path}, {roadmap_path}, and product file {product_ref}. "
+                "The worker should read and report; do not write files, do not mutate lifecycle, "
+                "and do not stage/commit/push."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Runtime backend packaging review"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertTrue(
+                {
+                    "hooks-policy-allow-delegation-prompt-context",
+                    "hooks-policy-allow-read-only-subagent-delegation",
+                }
+                & finding_codes
+            )
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_lifecycle_dry_run_closeout_text_paths_with_stderr_capture(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            command = (
+                "$out = mylittleharness --root . transition --dry-run --archive-active-plan "
+                "--current-roadmap-item hook-policy --current-roadmap-status superseded "
+                '--docs-decision not-needed '
+                '--residual-risk "Unaccepted carry-forward paths: '
+                "src/mylittleharness/adapter.py; src/mylittleharness/cli.py; "
+                "tests/test_package_metadata.py; "
+                f"product reference {product_ref}. "
+                'No lifecycle, Git, archive, staging, commit, push, or release authority." '
+                '2>&1; $out | Select-String -Pattern "Result"'
+            )
+            hook_input = json.dumps({"toolName": "shell_command", "workdir": str(root), "command": command})
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+            self.assertNotIn("hooks-policy-block-code-write-without-plan", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+
+    def test_hooks_pre_tool_blocks_real_redirection_to_out_of_scope_product_source(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            target = (product_root / "src" / "mylittleharness" / "adapter.py").as_posix()
+            command = (
+                "mylittleharness --root . transition --dry-run --archive-active-plan "
+                "--current-roadmap-item hook-policy --current-roadmap-status superseded "
+                '--docs-decision not-needed --residual-risk "reviewed closeout text" '
+                f"> {target}"
+            )
+            hook_input = json.dumps({"toolName": "shell_command", "workdir": str(root), "command": command})
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+
     def test_hooks_pre_tool_warns_for_reviewed_local_vcs_delegation_prompt(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -28489,6 +28573,26 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-allow-read-only-subagent-delegation", finding_codes)
+
+    def test_hooks_pre_tool_blocks_subagent_delegation_prompt_that_launches_runtime(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = "Inspect route context, then launch runtime for provider routing."
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Unsafe runtime launch"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
 
     def test_hooks_pre_tool_uses_apply_patch_targets_not_body_route_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -29772,6 +29876,114 @@ class CliTests(unittest.TestCase):
         )
         return hardening_archive_rel, acceptance_archive_rel, research_rel
 
+    def _write_verification_decision_checkpoint_fixture(self, root: Path) -> tuple[str, str, str, str, str]:
+        decision_rel = "project/" + "decisions/2026-06-14-clean-tree-evidence-package-checkpoint.md"
+        handoff_rel = "project/" + "verification/handoffs/sample-planner-to-implementer.json"
+        claim_rel = "project/" + "verification/work-claims/sample-planner.json"
+        session_rel = "project/" + "verification/task-sessions/sample-conductor-turn-1.json"
+        queue_fixture_rel = "project/" + "verification/queue-runner-fixtures/sample-proof.txt"
+        for rel in (decision_rel, handoff_rel, claim_rel, session_rel, queue_fixture_rel):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / decision_rel).write_text(
+            "---\n"
+            'title: "Clean-tree evidence package checkpoint"\n'
+            'status: "draft"\n'
+            'route: "decisions"\n'
+            'created: "2026-06-14"\n'
+            "---\n"
+            "# Clean-tree evidence package checkpoint\n\n"
+            "## Scope\n\n"
+            "- Files reviewed: `project/verification/handoffs`, `project/verification/work-claims`, "
+            "`project/verification/task-sessions`, and `project/verification/queue-runner-fixtures`.\n\n"
+            "## Review\n\n"
+            "- All JSON parsed, queue-runner-fixtures were reviewed as proof files, and sampled records carry "
+            "authority boundaries.\n"
+            "- This package is evidence-only; no lifecycle, Git, provider routing, release, or roadmap approval.\n\n"
+            "## Result\n\n"
+            "- docs_decision: not-needed\n"
+            "- The package may be checkpointed separately from product source changes.\n",
+            encoding="utf-8",
+        )
+        (root / handoff_rel).write_text(
+            json.dumps(
+                {
+                    "schema": "mylittleharness.handoff-packet.v1",
+                    "record_type": "handoff-packet",
+                    "handoff_id": "sample-planner-to-implementer",
+                    "authority_boundary": (
+                        "handoff packets are evidence only; they do not grant lifecycle, roadmap, archive, "
+                        "Git, provider, release, daemon, or closeout authority"
+                    ),
+                    "allowed_routes": ["verification"],
+                    "status": "created",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / claim_rel).write_text(
+            json.dumps(
+                {
+                    "schema": "mylittleharness.work-claim.v1",
+                    "record_type": "work-claim",
+                    "claim_id": "sample-planner",
+                    "authority_boundary": (
+                        "work claims coordinate fan-in only; they cannot approve lifecycle transitions, "
+                        "archive, staging, commit, or release"
+                    ),
+                    "claim_kind": "read",
+                    "status": "released",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / session_rel).write_text(
+            json.dumps(
+                {
+                    "schema": "mylittleharness.task-session.receipt.v1",
+                    "record_type": "task-session-receipt",
+                    "session_id": "sample-conductor-turn-1",
+                    "authority_boundary": (
+                        "task-session receipts record runtime intent but cannot launch workers, approve fan-in, "
+                        "move lifecycle, archive, stage, commit, push, release, or choose providers"
+                    ),
+                    "approvals": {
+                        "fan_in": False,
+                        "git": False,
+                        "lifecycle": False,
+                        "provider_routing": False,
+                        "route_proposal": False,
+                    },
+                    "runtime": {"backend": "openai-sdk", "provider_routing_authority": False},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / queue_fixture_rel).write_text(
+            "Symphony SDK queue runner proof\nitem: sample\nrole: verifier\n",
+            encoding="utf-8",
+        )
+        state_rel = "project/" + "project-state.md"
+        state_path = root / state_rel
+        state_text = state_path.read_text(encoding="utf-8")
+        state_path.write_text(
+            state_text.replace(
+                'active_plan: ""\n---',
+                'active_plan: ""\nphase_status: "complete"\n---',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        return decision_rel, handoff_rel, claim_rel, session_rel, queue_fixture_rel
+
     def _write_meta_feedback_checkpoint_fixture(self, root: Path) -> tuple[str, str]:
         hook_note_rel = "project/" + "plan-incubation/reviewed-hook-overblock.md"
         commit_note_rel = "project/" + "plan-incubation/product-source-exact-acceptance-commit-hook-overblock.md"
@@ -29890,6 +30102,63 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertIn("deferred research/archive route packages", messages)
+
+    def test_hooks_pre_tool_allows_neighbor_verification_decision_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = self._write_verification_decision_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            stage_command = "gi" + "t add -- "
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": stage_command + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": ("gi" + f't -C "{neighbor_root}" add -- ') + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("decision-backed verification evidence packages", messages)
+
+            unsafe_payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": (
+                            "gi"
+                            + f't -C "{neighbor_root}" add -- '
+                            + stage_paths
+                            + " project/project-state.md"
+                        ),
+                    }
+                ),
+            )
+            unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
+            unsafe_messages = "\n".join(str(finding["message"]) for finding in unsafe_payload["findings"])
+            self.assertTrue(unsafe_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
+            self.assertIn("path_classes=state", unsafe_messages)
 
     def test_hooks_pre_tool_allows_neighbor_meta_feedback_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

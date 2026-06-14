@@ -207,7 +207,8 @@ SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r"\bgit\s+(?:push|reset|checkout|clean|restore|rm|mv)\b|"
     r"\b(?:--force|-f|--mirror|--delete|--amend|--all|--no-verify)\b|"
     r"\b(?:bypass|skip\s+dry-run|skip\s+review|skip\s+check)\b|"
-    r"\b(?:provider|daemon|runtime|launcher)\b|"
+    r"\b(?:start|launch|serve|run)\s+(?:provider|daemon|runtime|launcher)\b|"
+    r"\b(?:provider\s+routing|daemon\s+launch|runtime\s+launch|launcher\s+config)\b|"
     r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|apply_patch)\b"
     r")"
 )
@@ -1775,7 +1776,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
                     "files in the actual command workdir/root, including deferred research/archive route packages "
-                    "and meta-feedback/incubation blocker notes; "
+                    "meta-feedback/incubation blocker notes, and reviewed decision-backed verification evidence packages; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
                     "decisions remain blocked"
                 ),
@@ -2468,6 +2469,8 @@ def _write_path_option_value(raw: str, clean: str) -> str:
 
 def _inline_redirection_target(raw: str) -> str:
     stripped = str(raw or "").strip(" \t\r\n\"'`")
+    if _is_shell_fd_duplication_redirection(stripped):
+        return ""
     match = re.match(r"^(?:\d+|\*)?(>>?)(.+)$", stripped)
     if match:
         return _path_argument_value(match.group(2))
@@ -3813,6 +3816,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
                 return set()
             allowed.update(receipt_allowed)
         return normalized if normalized <= allowed else set()
+    verification_package_paths = _coherent_verification_decision_checkpoint_paths(inventory, normalized)
+    if verification_package_paths:
+        return verification_package_paths
     deferred_package_paths = _coherent_deferred_route_package_checkpoint_paths(inventory, normalized)
     if deferred_package_paths:
         return deferred_package_paths
@@ -3820,6 +3826,28 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     if meta_feedback_paths:
         return meta_feedback_paths
     return set()
+
+
+def _coherent_verification_decision_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    decision_paths = {path for path in paths if _is_checkpoint_decision_route_path(path)}
+    verification_paths = {path for path in paths if _is_verification_checkpoint_route_path(path)}
+    if not decision_paths or not verification_paths or paths != decision_paths | verification_paths:
+        return set()
+    if not all(_is_reviewed_verification_decision_file(inventory, path, verification_paths) for path in decision_paths):
+        return set()
+    if not all(_is_reviewed_verification_checkpoint_file(inventory, path) for path in verification_paths):
+        return set()
+    return paths
 
 
 def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
@@ -3868,6 +3896,161 @@ def _coherent_meta_feedback_checkpoint_paths(inventory: Inventory, paths: set[st
     return paths
 
 
+def _is_checkpoint_decision_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/decisions/") and rel.endswith(".md")
+
+
+def _is_verification_checkpoint_route_path(path: str) -> bool:
+    return bool(_verification_checkpoint_path_class(path))
+
+
+def _verification_checkpoint_path_class(path: str) -> str:
+    rel = _normalize_hook_path(path).casefold()
+    if _is_agent_run_evidence_route_path(rel):
+        return "agent-runs"
+    prefixes = {
+        "project/verification/handoffs/": "handoffs",
+        "project/verification/work-claims/": "work-claims",
+        "project/verification/task-sessions/": "task-sessions",
+        "project/verification/queue-runner-fixtures/": "queue-runner-fixtures",
+    }
+    for prefix, route_class in prefixes.items():
+        if rel.startswith(prefix) and not rel.endswith("/"):
+            return route_class
+    return ""
+
+
+def _is_reviewed_verification_decision_file(
+    inventory: Inventory,
+    path: str,
+    verification_paths: set[str],
+) -> bool:
+    if not _is_checkpoint_decision_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    content = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :]).casefold()
+    route_classes = {
+        route_class
+        for route_class in (_verification_checkpoint_path_class(path) for path in verification_paths)
+        if route_class
+    }
+    if not route_classes or any(route_class not in content for route_class in route_classes):
+        return False
+    has_checkpoint_scope = "checkpoint" in content and ("evidence-only" in content or "evidence only" in content)
+    has_non_authority_boundary = (
+        ("cannot approve" in content or "do not approve" in content or "do not grant" in content or "no lifecycle" in content)
+        and "lifecycle" in content
+        and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
+    )
+    return has_checkpoint_scope and has_non_authority_boundary
+
+
+def _is_reviewed_verification_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    route_class = _verification_checkpoint_path_class(path)
+    if not route_class:
+        return False
+    if route_class == "agent-runs":
+        return _is_reviewed_agent_run_evidence_file(inventory, path)
+    if route_class == "queue-runner-fixtures":
+        return _is_reviewed_queue_runner_fixture_file(inventory, path)
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".json":
+            return False
+        data = json.loads(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    expected = {
+        "handoffs": ("mylittleharness.handoff-packet.v1", "handoff-packet"),
+        "work-claims": ("mylittleharness.work-claim.v1", "work-claim"),
+        "task-sessions": ("mylittleharness.task-session.receipt.v1", "task-session-receipt"),
+    }.get(route_class)
+    if expected is None:
+        return False
+    schema, record_type = expected
+    if str(data.get("schema") or "").strip() != schema:
+        return False
+    if str(data.get("record_type") or "").strip() != record_type:
+        return False
+    if _route_evidence_grants_authority(data):
+        return False
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True).casefold()
+    return _route_evidence_text_has_non_authority_boundary(encoded)
+
+
+def _is_reviewed_queue_runner_fixture_file(inventory: Inventory, path: str) -> bool:
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    content = text.casefold()
+    return bool(content.strip()) and "queue runner" in content and "proof" in content
+
+
+def _route_evidence_grants_authority(value: object) -> bool:
+    authority_keys = {
+        "archive",
+        "approves_lifecycle",
+        "closeout",
+        "external_runtime_approves_lifecycle",
+        "fan_in",
+        "git",
+        "lifecycle",
+        "private_trace_authoritative",
+        "private_traces_authoritative",
+        "provider_routing",
+        "provider_routing_authority",
+        "release",
+        "roadmap",
+        "route_proposal",
+        "staging",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and key.strip().casefold() in authority_keys and item is True:
+                return True
+            if _route_evidence_grants_authority(item):
+                return True
+    elif isinstance(value, list):
+        return any(_route_evidence_grants_authority(item) for item in value)
+    return False
+
+
+def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
+    content = text.casefold()
+    return (
+        (
+            "cannot approve" in content
+            or "do not approve" in content
+            or "do not grant" in content
+            or "cannot" in content
+        )
+        and ("lifecycle" in content or "roadmap" in content)
+        and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
+    )
+
+
 def _is_meta_feedback_incubation_route_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.startswith("project/plan-incubation/") and rel.endswith(".md")
@@ -3907,7 +4090,8 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
-        "worker-run-receipt-refs,deferred-research/archive-package,meta-feedback/incubation-blocker-notes"
+        "worker-run-receipt-refs,verification/decision-evidence-package,"
+        "deferred-research/archive-package,meta-feedback/incubation-blocker-notes"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
@@ -3936,6 +4120,16 @@ def _reviewed_local_vcs_checkpoint_path_classes(paths: set[str]) -> str:
         classes.append("agent-run-evidence")
     if any(_is_worker_run_receipt_route_path(path) for path in paths):
         classes.append("worker-run-receipts")
+    if any(_is_checkpoint_decision_route_path(path) for path in paths):
+        classes.append("decisions")
+    verification_classes = sorted(
+        {
+            route_class
+            for route_class in (_verification_checkpoint_path_class(path) for path in paths)
+            if route_class
+        }
+    )
+    classes.extend(verification_classes)
     if any(_is_deferred_research_route_path(path) for path in paths):
         classes.append("research")
     if any(_is_meta_feedback_incubation_route_path(path) for path in paths):
@@ -4530,11 +4724,18 @@ def _looks_like_write_command(command: str) -> bool:
 
 def _is_shell_redirection_token(raw: str, clean: str) -> bool:
     stripped = raw.strip(" \t\r\n\"'`")
+    if _is_shell_fd_duplication_redirection(stripped):
+        return False
     return (
         clean in {">", ">>"}
         or stripped in {">", ">>"}
         or bool(re.match(r"^(?:\d+|\*)?>>?", stripped))
     )
+
+
+def _is_shell_fd_duplication_redirection(value: str) -> bool:
+    stripped = str(value or "").strip(" \t\r\n\"'`").rstrip(";")
+    return bool(re.match(r"^(?:\d+|\*)?>&\d+$", stripped))
 
 
 def _is_shell_command_separator(raw: str, clean: str) -> bool:
