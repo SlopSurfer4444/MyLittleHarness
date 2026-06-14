@@ -59,6 +59,13 @@ AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
+RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA = "mylittleharness.runtime-guard-preflight-receipt.v1"
+CHECKPOINT_RESUME_RECEIPT_SCHEMA = "mylittleharness.checkpoint-resume-receipt.v1"
+CHILD_AGENT_FANOUT_RECEIPT_SCHEMA = "mylittleharness.child-agent-fanout-receipt.v1"
+CAPABILITY_FENCE_DECISION_RECEIPT_SCHEMA = "mylittleharness.capability-fence-decision-receipt.v1"
+RUNTIME_BROKER_PROVIDER_RECEIPT_SCHEMA = "mylittleharness.runtime-broker-provider-receipt.v1"
+ARTIFACT_LINEAGE_RECEIPT_SCHEMA = "mylittleharness.artifact-lineage-receipt.v1"
+WORKER_WORKTREE_SESSION_RECEIPT_SCHEMA = "mylittleharness.worker-worktree-session-receipt.v1"
 RUNTIME_STATE_NAMESPACE_ID = "runtime_state_namespace.v1"
 COORDINATION_RECORD_DIRS = (
     "project/verification/work-claims",
@@ -188,15 +195,103 @@ WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS = (
     "approves_release",
     "lifecycle_accepted",
     "approves_closeout",
-    "approves_target_repo_acceptance",
-    "approves_fan_in",
     "approves_cleanup",
+    "approves_fan_in",
+    "approves_launch",
+    "approves_worker_launch",
+    "approves_route_proposal",
+    "approves_target_repo_acceptance",
     "private_trace_authoritative",
     "private_traces_authoritative",
     "sdk_trace_authoritative",
     "trace_approves_lifecycle",
     "event_history_approves_lifecycle",
     "event_stream_approves_lifecycle",
+    "launch_approved",
+    "launch_authorized",
+    "worker_launch_approved",
+    "provider_routing_approved",
+    "route_proposal_accepted",
+    "target_repo_accepted",
+    "dirty_worktree_approved",
+    "bypass_approved",
+    "native_hook_authoritative",
+    "provider_proof_authoritative",
+    "fallback_hook_proof_authoritative",
+    "checkpoint_authoritative",
+    "checkpoint_approves_lifecycle",
+    "checkpoint_approves_launch",
+    "resume_approves_lifecycle",
+    "resume_authorized",
+    "replay_approves_lifecycle",
+    "replay_approves_verification",
+    "queue_success_approves_lifecycle",
+    "run_completion_approves_lifecycle",
+    "backpressure_approves_lifecycle",
+    "backpressure_verdict_authoritative",
+    "approves_verification",
+    "verification_accepted",
+    "capability_fence_authoritative",
+    "capability_fence_approves_lifecycle",
+    "capability_fence_approves_launch",
+    "capability_fence_approves_fan_in",
+    "capability_fence_approves_verification",
+    "capability_fence_approves_provider_routing",
+    "tool_authorization_approved",
+    "tool_authorization_authoritative",
+    "tool_authorization_approves_lifecycle",
+    "tool_authorization_approves_launch",
+    "tool_authorization_approves_fan_in",
+    "tool_authorization_approves_verification",
+    "tool_authorization_approves_provider_routing",
+    "broker_dispatch_approved",
+    "broker_dispatch_authoritative",
+    "broker_dispatch_approves_lifecycle",
+    "broker_dispatch_approves_launch",
+    "broker_dispatch_approves_provider_routing",
+    "provider_routing_authoritative",
+    "provider_routing_approves_lifecycle",
+    "workspace_mount_authoritative",
+    "workspace_mount_approves_lifecycle",
+    "workspace_mount_approves_target_repo_acceptance",
+    "workspace_cleanup_authorized",
+    "workspace_cleanup_approved",
+    "credential_projection_approved",
+    "credential_projection_authoritative",
+    "credential_projection_approves_lifecycle",
+    "telemetry_authoritative",
+    "telemetry_approves_lifecycle",
+    "worktree_session_authoritative",
+    "worktree_session_approves_lifecycle",
+    "worktree_session_approves_launch",
+    "worktree_session_approves_cleanup",
+    "worktree_session_approves_verification",
+    "worktree_session_approves_target_repo_acceptance",
+    "terminal_pane_authoritative",
+    "terminal_capture_approves_lifecycle",
+    "status_dashboard_authoritative",
+    "status_dashboard_approves_lifecycle",
+    "wait_success_approves_lifecycle",
+    "sandbox_authoritative",
+    "sandbox_approves_lifecycle",
+    "sandbox_approves_launch",
+    "merge_success_approves_lifecycle",
+    "merge_success_approves_target_repo_acceptance",
+    "cleanup_success_approves_lifecycle",
+    "cleanup_success_approves_git",
+    "artifact_lineage_authoritative",
+    "artifact_lineage_approves_lifecycle",
+    "artifact_lineage_approves_verification",
+    "artifact_lineage_approves_target_repo_acceptance",
+    "artifact_acceptance_authorized",
+    "artifact_accepted",
+    "lineage_verification_approved",
+    "lineage_verification_authoritative",
+    "lineage_verification_approves_lifecycle",
+    "signature_authoritative",
+    "signature_approves_lifecycle",
+    "hmac_authoritative",
+    "hmac_approves_lifecycle",
 )
 WORKER_RUN_RECEIPT_EVENT_HISTORY_REDACTION_STATUSES = {
     "none",
@@ -254,6 +349,25 @@ WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_TARGETS = (
     "staging",
     "commit",
     "push",
+    "launch",
+    "worker launch",
+    "broker",
+    "workspace",
+    "credential",
+    "telemetry",
+    "worktree",
+    "terminal",
+    "pane",
+    "dashboard",
+    "wait",
+    "sandbox",
+    "merge",
+    "artifact",
+    "artifact lineage",
+    "lineage",
+    "hash chain",
+    "signature",
+    "hmac",
     "route proposal",
     "target-repo",
     "target repo",
@@ -275,6 +389,492 @@ WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS = (
     "non-authoritative",
     "evidence only",
     "evidence-only",
+)
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_STATUSES = {
+    "not-run",
+    "passed",
+    "failed",
+    "blocked",
+    "skipped",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_READINESS = {
+    "not-ready",
+    "ready",
+    "blocked",
+    "degraded",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_REPLAY_STATUSES = {
+    "not-recorded",
+    "not-required",
+    "replayed",
+    "stale",
+    "blocked",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_WORKTREE_STATUSES = {
+    "clean",
+    "dirty-reviewed",
+    "dirty-unreviewed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_HOOK_PROOF_LEVELS = {
+    "native",
+    "fallback",
+    "synthetic",
+    "not-recorded",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_PROVIDER_PROOF_LEVELS = {
+    "not-configured",
+    "env-present",
+    "configured",
+    "provider-called",
+    "not-recorded",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_REF_FIELDS = (
+    "dispatch_refs",
+    "mailbox_refs",
+    "worktree_refs",
+    "runtime_readiness_refs",
+    "hook_proof_refs",
+    "provider_proof_refs",
+    "leader_lifecycle_refs",
+)
+WORKER_RUN_RECEIPT_RUNTIME_GUARD_CONTAINERS = (
+    "unsafe_bypass",
+    "worktree",
+    "hook_proof",
+    "provider_proof",
+)
+WORKER_RUN_RECEIPT_CHECKPOINT_STATUSES = {
+    "not-required",
+    "created",
+    "failed",
+    "blocked",
+    "not-supported",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CHECKPOINT_KINDS = {
+    "compute",
+    "message-snapshot",
+    "event-tail",
+    "object-snapshot",
+    "mixed",
+    "none",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RESUME_STATUSES = {
+    "not-required",
+    "required",
+    "resumed",
+    "blocked",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RESTORE_STRATEGIES = {
+    "none",
+    "checkpoint-restore",
+    "snapshot-tail-replay",
+    "event-tail-replay",
+    "customer-hydrated",
+    "manual",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CHECKPOINT_FAILURE_STATUSES = {
+    "none",
+    "in-progress",
+    "failed",
+    "retrying",
+    "exhausted",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_IDEMPOTENCY_POSTURES = {
+    "not-recorded",
+    "present",
+    "reused",
+    "collision-detected",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BACKPRESSURE_MODES = {
+    "off",
+    "shadow",
+    "dry-run",
+    "enforced",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BACKPRESSURE_VERDICTS = {
+    "not-checked",
+    "allow",
+    "throttle",
+    "block",
+    "fail-open",
+    "fail-closed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BACKPRESSURE_STALE_POSTURES = {
+    "not-stale",
+    "stale-fail-open",
+    "stale-fail-closed",
+    "stale-block",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BACKPRESSURE_FAILURE_POSTURES = {
+    "none",
+    "fail-open",
+    "fail-closed",
+    "block",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CHECKPOINT_RESUME_REF_FIELDS = (
+    "durable_task_run_refs",
+    "event_readback_refs",
+    "checkpoint_refs",
+    "resume_message_refs",
+    "replay_refs",
+    "backpressure_verdict_refs",
+    "snapshot_refs",
+)
+WORKER_RUN_RECEIPT_CHILD_FANOUT_STATUSES = {
+    "planned",
+    "launched",
+    "running",
+    "completed",
+    "failed",
+    "blocked",
+    "skipped",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CHILD_FANOUT_REF_FIELDS = (
+    "coordination_refs",
+    "dispatch_refs",
+    "mailbox_refs",
+    "handoff_refs",
+    "work_claim_refs",
+    "route_receipt_refs",
+    "fan_in_refs",
+)
+WORKER_RUN_RECEIPT_CHILD_FANOUT_CHILD_REF_FIELDS = (
+    "task_refs",
+    "prompt_refs",
+    "output_refs",
+    "event_history_refs",
+    "verification_refs",
+)
+WORKER_RUN_RECEIPT_CHILD_FANOUT_RUNTIME_REF_FIELDS = (
+    "runtime_readiness_refs",
+    "worktree_refs",
+    "hook_proof_refs",
+    "provider_proof_refs",
+    "bypass_refs",
+)
+WORKER_RUN_RECEIPT_CAPABILITY_FENCE_STATUSES = {
+    "not-evaluated",
+    "allow",
+    "partial-allow",
+    "deny",
+    "blocked",
+    "requires-approval",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CAPABILITY_FENCE_APPROVAL_STATES = {
+    "not-required",
+    "requested",
+    "pending",
+    "granted",
+    "denied",
+    "expired",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CAPABILITY_FENCE_AUDIT_STATUSES = {
+    "not-recorded",
+    "recorded",
+    "verified",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CAPABILITY_FENCE_REF_FIELDS = (
+    "policy_refs",
+    "role_profile_refs",
+    "tool_manifest_refs",
+    "task_session_refs",
+    "claim_refs",
+    "handoff_refs",
+    "runtime_guard_refs",
+    "provider_posture_refs",
+    "approval_refs",
+    "audit_refs",
+    "mcp_gateway_refs",
+)
+WORKER_RUN_RECEIPT_CAPABILITY_FENCE_CAPABILITY_LIST_FIELDS = (
+    "requested_capabilities",
+    "allowed_capabilities",
+    "denied_capabilities",
+    "restricted_routes",
+    "forbidden_routes",
+)
+WORKER_RUN_RECEIPT_RUNTIME_BROKER_STATUSES = {
+    "not-configured",
+    "registering",
+    "registered",
+    "joined",
+    "running",
+    "withdrawn",
+    "orphaned",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_PROVIDER_STATUSES = {
+    "not-configured",
+    "available",
+    "default",
+    "disabled",
+    "withdrawn",
+    "degraded",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BROKER_REGISTRATION_STATUSES = {
+    "not-started",
+    "started",
+    "verified",
+    "joined",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BROKER_SERVER_STATUSES = {
+    "not-started",
+    "running",
+    "stopped",
+    "unreachable",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_BROKER_DISPATCH_STATUSES = {
+    "not-requested",
+    "eligible",
+    "dispatched",
+    "blocked",
+    "withdrawn",
+    "orphaned",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKSPACE_ISOLATION_STATUSES = {
+    "not-recorded",
+    "shared",
+    "isolated",
+    "clone-per-agent",
+    "worktree-per-agent",
+    "fallback",
+    "unavailable",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKSPACE_CLEANUP_STATUSES = {
+    "not-requested",
+    "guarded",
+    "completed",
+    "blocked",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_CREDENTIAL_PROJECTION_STATUSES = {
+    "not-requested",
+    "scoped",
+    "projected",
+    "blocked",
+    "missing",
+    "redacted",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_APPROVAL_MODES = {
+    "manual-required",
+    "auto-proposed",
+    "full-auto-observed",
+    "disabled",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_TELEMETRY_STATUSES = {
+    "not-recorded",
+    "local-only",
+    "exported",
+    "redacted",
+    "disabled",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_RUNTIME_BROKER_PROVIDER_REF_FIELDS = (
+    "broker_refs",
+    "provider_refs",
+    "workspace_refs",
+    "mount_refs",
+    "path_guard_refs",
+    "cleanup_refs",
+    "credential_refs",
+    "token_refs",
+    "approval_refs",
+    "resume_refs",
+    "telemetry_refs",
+    "event_refs",
+)
+WORKER_RUN_RECEIPT_RUNTIME_BROKER_PROVIDER_CONTAINERS = (
+    "broker",
+    "provider",
+    "workspace",
+    "credentials",
+    "cleanup",
+    "resume",
+    "telemetry",
+)
+WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_STATUSES = {
+    "not-recorded",
+    "recorded",
+    "verified",
+    "failed",
+    "partial",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_ARTIFACT_HASH_STATUSES = {
+    "not-recorded",
+    "recorded",
+    "verified",
+    "mismatch",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_ARTIFACT_SIGNATURE_STATUSES = {
+    "not-required",
+    "not-recorded",
+    "recorded",
+    "verified",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_VERIFICATION_STATUSES = {
+    "not-run",
+    "passed",
+    "failed",
+    "blocked",
+    "partial",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_REF_FIELDS = (
+    "output_refs",
+    "input_refs",
+    "parent_refs",
+    "prompt_refs",
+    "verification_refs",
+    "signature_refs",
+    "lineage_refs",
+    "audit_refs",
+)
+WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_CONTAINERS = (
+    "hash_chain",
+    "signature",
+    "hmac",
+    "producer",
+    "verification",
+)
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_STATUSES = {
+    "not-recorded",
+    "planned",
+    "prepared",
+    "launched",
+    "running",
+    "captured",
+    "closed",
+    "cleaned-up",
+    "failed",
+    "blocked",
+    "stale",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_WORKTREE_STATUSES = {
+    "not-recorded",
+    "clean",
+    "dirty-reviewed",
+    "dirty-unreviewed",
+    "missing",
+    "removed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_PROMPT_STATUSES = {
+    "not-recorded",
+    "rendered",
+    "written",
+    "injected",
+    "consumed",
+    "file-only",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_CAPTURE_STATUSES = {
+    "not-recorded",
+    "captured",
+    "partial",
+    "failed",
+    "stale",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_SANDBOX_STATUSES = {
+    "not-recorded",
+    "validated",
+    "enforced",
+    "degraded",
+    "bypassed",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_MERGE_CLEANUP_STATUSES = {
+    "not-requested",
+    "guarded",
+    "completed",
+    "blocked",
+    "failed",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_CONCURRENCY_STATUSES = {
+    "not-recorded",
+    "bounded",
+    "unbounded",
+    "waiting",
+    "throttled",
+    "complete",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_WAIT_STATUSES = {
+    "not-required",
+    "waiting",
+    "completed",
+    "timed-out",
+    "agent-disappeared",
+    "worktree-removed-after-merge",
+    "unknown",
+}
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_REF_FIELDS = (
+    "worktree_refs",
+    "branch_refs",
+    "prompt_refs",
+    "prompt_file_refs",
+    "status_refs",
+    "capture_refs",
+    "session_refs",
+    "sandbox_refs",
+    "merge_refs",
+    "cleanup_refs",
+    "wait_refs",
+    "concurrency_refs",
+    "dashboard_refs",
+)
+WORKER_RUN_RECEIPT_WORKTREE_SESSION_CONTAINERS = (
+    "worktree",
+    "prompt",
+    "session",
+    "status_capture",
+    "sandbox",
+    "merge_cleanup",
+    "concurrency",
 )
 AGENT_RUN_ROUTE_PROPOSAL_FIELDS = ("route_proposals", "recommended_next_routes", "recommended_next_route")
 ROUTE_PROPOSAL_FORBIDDEN_TERMS = {
@@ -1405,8 +2005,23 @@ def _worker_run_receipt_metadata_findings(
     findings.extend(_worker_run_receipt_status_namespace_findings(rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_non_authority_findings(rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_event_history_findings(rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_runtime_guard_preflight_findings(root, rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_checkpoint_resume_findings(root, rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_child_agent_fanout_findings(root, rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_capability_fence_decision_findings(root, rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_runtime_broker_provider_findings(root, rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_worktree_session_findings(root, rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_artifact_lineage_findings(root, rel_path, data, code_prefix))
     for field in ("task_input_refs", "event_stream_refs", "output_refs", "verification_refs"):
-        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, field, data.get(field), code))
+        for value in _frontmatter_string_list(data.get(field)):
+            conflict = _root_relative_path_conflict(value)
+            if conflict:
+                findings.append(Finding("warn", code, f"worker run receipt {field} path {conflict}: {value}", rel_path))
+            else:
+                target = root / value
+                boundary_violation = source_path_boundary_violation(root, target, label=f"worker run receipt {field}")
+                if boundary_violation is not None:
+                    findings.append(Finding("warn", code, boundary_violation.message, rel_path))
     return findings
 
 
@@ -1486,11 +2101,9 @@ def _worker_run_receipt_non_authority_findings(rel_path: str, data: dict[str, ob
     return findings
 
 
-
 def _worker_run_receipt_event_history_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
     findings: list[Finding] = []
-    code = f"{code_prefix}-authority-boundary"
-
+    code = f"{code_prefix}-event-history"
     redaction = str(data.get("event_history_redaction") or "").strip()
     if redaction and redaction not in WORKER_RUN_RECEIPT_EVENT_HISTORY_REDACTION_STATUSES:
         findings.append(
@@ -1503,7 +2116,9 @@ def _worker_run_receipt_event_history_findings(rel_path: str, data: dict[str, ob
         )
 
     summary = data.get("event_history_summary")
-    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt event_history_summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
         findings.append(
             Finding(
                 "warn",
@@ -1512,17 +2127,17 @@ def _worker_run_receipt_event_history_findings(rel_path: str, data: dict[str, ob
                 rel_path,
             )
         )
-    elif summary not in (None, "") and not isinstance(summary, str):
-        findings.append(Finding("warn", code, "worker run receipt event_history_summary must be a string when present", rel_path))
 
     private_trace_policy = data.get("private_trace_policy")
-    if isinstance(private_trace_policy, str):
+    if private_trace_policy not in (None, "") and not isinstance(private_trace_policy, str):
+        findings.append(Finding("warn", code, "worker run receipt private_trace_policy must be a string when present", rel_path))
+    elif isinstance(private_trace_policy, str) and private_trace_policy.strip():
         if not _worker_run_receipt_private_trace_policy_is_non_authority(private_trace_policy):
             findings.append(
                 Finding(
                     "warn",
                     code,
-                    "worker run receipt private_trace_policy must explicitly keep private SDK traces non-authoritative and repo-visible evidence for recovery",
+                    "worker run receipt private_trace_policy must explicitly keep private SDK traces non-authoritative and repo-visible evidence authoritative for recovery",
                     rel_path,
                 )
             )
@@ -1535,90 +2150,1084 @@ def _worker_run_receipt_event_history_findings(rel_path: str, data: dict[str, ob
                     rel_path,
                 )
             )
-    elif private_trace_policy not in (None, ""):
-        findings.append(Finding("warn", code, "worker run receipt private_trace_policy must be a string when present", rel_path))
 
-    for label in ("event_history", "private_traces"):
-        value = data.get(label)
-        if isinstance(value, dict):
-            findings.extend(_worker_run_receipt_event_history_container_findings(rel_path, label, value, code_prefix))
-        elif value not in (None, ""):
-            findings.append(Finding("warn", code, f"worker run receipt {label} must be an object when present", rel_path))
+    for field in ("event_history", "private_traces"):
+        findings.extend(_worker_run_receipt_event_history_container_findings(rel_path, field, data.get(field), code_prefix))
     return findings
 
 
 def _worker_run_receipt_event_history_container_findings(
     rel_path: str,
-    label: str,
-    value: dict[str, object],
+    field: str,
+    value: object,
     code_prefix: str,
 ) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, dict):
+        return [Finding("warn", f"{code_prefix}-event-history", f"worker run receipt {field} must be an object when present", rel_path)]
     findings: list[Finding] = []
-    code = f"{code_prefix}-authority-boundary"
-    for field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
-        if _worker_run_receipt_truthy(value.get(field)):
+    for authority_field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+        if _worker_run_receipt_truthy(value.get(authority_field)):
             findings.append(
                 Finding(
                     "warn",
-                    code,
-                    f"worker run receipt {label}.{field} must remain false; event history and private traces are evidence only",
+                    f"{code_prefix}-event-history",
+                    f"worker run receipt {field}.{authority_field} must remain false; event histories and private traces are evidence only",
                     rel_path,
                 )
             )
-    authority = value.get("authority")
-    if isinstance(authority, dict):
-        for field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
-            if _worker_run_receipt_truthy(authority.get(field)):
-                findings.append(
-                    Finding(
-                        "warn",
-                        code,
-                        f"worker run receipt {label}.authority.{field} must remain false; event history and private traces are evidence only",
-                        rel_path,
-                    )
-                )
-    elif authority not in (None, ""):
-        findings.append(Finding("warn", code, f"worker run receipt {label}.authority must be an object when present", rel_path))
-
     summary = value.get("summary")
     if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
         findings.append(
             Finding(
                 "warn",
-                code,
-                f"worker run receipt {label}.summary must not claim event history approves lifecycle or external authority",
+                f"{code_prefix}-event-history",
+                f"worker run receipt {field}.summary must not claim event history approves lifecycle or external authority",
+                rel_path,
+            )
+        )
+    policy = value.get("private_trace_policy")
+    if isinstance(policy, str) and policy.strip() and _worker_run_receipt_private_trace_authority_claim(policy):
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-event-history",
+                f"worker run receipt {field}.private_trace_policy must not treat private SDK traces as authoritative approval evidence",
                 rel_path,
             )
         )
     return findings
 
 
-def _worker_run_receipt_event_history_authority_claim(value: str) -> bool:
-    text = " ".join(value.casefold().split())
-    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
-        return False
-    return any(verb in text for verb in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_VERBS) and any(
-        target in text for target in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_TARGETS
+def _worker_run_receipt_runtime_guard_preflight_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("runtime_guard_preflight")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-runtime-guard"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt runtime_guard_preflight must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if schema and schema != RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt runtime_guard_preflight schema should be {RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if label and (
+        "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt runtime_guard_preflight non_authority must explicitly label preflight as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    status_specs = (
+        ("preflight_status", WORKER_RUN_RECEIPT_RUNTIME_GUARD_STATUSES, "runtime guard preflight"),
+        ("mission_preconditions_status", WORKER_RUN_RECEIPT_RUNTIME_GUARD_STATUSES, "mission preconditions"),
+        ("runtime_readiness", WORKER_RUN_RECEIPT_RUNTIME_GUARD_READINESS, "runtime readiness"),
+        ("replay_status", WORKER_RUN_RECEIPT_RUNTIME_GUARD_REPLAY_STATUSES, "replay"),
+        ("worktree_status", WORKER_RUN_RECEIPT_RUNTIME_GUARD_WORKTREE_STATUSES, "worktree"),
     )
+    for field, allowed, label in status_specs:
+        status = str(value.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt runtime_guard_preflight {field} must use the {label} namespace: {status}",
+                    rel_path,
+                )
+            )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt runtime_guard_preflight summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt runtime_guard_preflight summary must not claim preflight approves launch, lifecycle, or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(_worker_run_receipt_false_authority_container_findings(rel_path, "runtime_guard_preflight", value, code_prefix))
+    for field in WORKER_RUN_RECEIPT_RUNTIME_GUARD_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"runtime_guard_preflight.{field}", value.get(field), code))
+    for field in WORKER_RUN_RECEIPT_RUNTIME_GUARD_CONTAINERS:
+        findings.extend(_worker_run_receipt_runtime_guard_container_findings(root, rel_path, field, value.get(field), code_prefix))
+    return findings
 
 
-def _worker_run_receipt_private_trace_policy_is_non_authority(value: str) -> bool:
-    text = " ".join(value.casefold().split())
-    has_trace_source = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS)
-    has_non_authority = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_NON_AUTHORITY_TOKENS)
-    has_repo_visible_recovery = (
-        "repo-visible" in text or "durable evidence" in text or "evidence only" in text or "evidence-only" in text
+def _worker_run_receipt_checkpoint_resume_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("checkpoint_resume")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-checkpoint-resume"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt checkpoint_resume must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if not schema:
+        findings.append(Finding("warn", code, "worker run receipt checkpoint_resume missing required field: schema", rel_path))
+    elif schema != CHECKPOINT_RESUME_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt checkpoint_resume schema should be {CHECKPOINT_RESUME_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if not label or (
+        "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt checkpoint_resume non_authority must explicitly label checkpoint/resume as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    status_specs = (
+        ("checkpoint_status", WORKER_RUN_RECEIPT_CHECKPOINT_STATUSES, "checkpoint"),
+        ("checkpoint_kind", WORKER_RUN_RECEIPT_CHECKPOINT_KINDS, "checkpoint kind"),
+        ("resume_status", WORKER_RUN_RECEIPT_RESUME_STATUSES, "resume"),
+        ("restore_strategy", WORKER_RUN_RECEIPT_RESTORE_STRATEGIES, "restore strategy"),
+        ("replay_status", WORKER_RUN_RECEIPT_RUNTIME_GUARD_REPLAY_STATUSES, "replay"),
+        ("checkpoint_failure_status", WORKER_RUN_RECEIPT_CHECKPOINT_FAILURE_STATUSES, "checkpoint failure"),
+        ("idempotency_posture", WORKER_RUN_RECEIPT_IDEMPOTENCY_POSTURES, "idempotency"),
+        ("backpressure_mode", WORKER_RUN_RECEIPT_BACKPRESSURE_MODES, "backpressure mode"),
+        ("backpressure_verdict", WORKER_RUN_RECEIPT_BACKPRESSURE_VERDICTS, "backpressure verdict"),
+        ("backpressure_stale_posture", WORKER_RUN_RECEIPT_BACKPRESSURE_STALE_POSTURES, "backpressure stale posture"),
+        ("backpressure_failure_posture", WORKER_RUN_RECEIPT_BACKPRESSURE_FAILURE_POSTURES, "backpressure failure posture"),
     )
-    return has_trace_source and has_non_authority and has_repo_visible_recovery
+    for field, allowed, label in status_specs:
+        status = str(value.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt checkpoint_resume {field} must use the {label} namespace: {status}",
+                    rel_path,
+                )
+            )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt checkpoint_resume summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt checkpoint_resume summary must not claim checkpoint, replay, queue, backpressure, run, lifecycle, or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(
+        _worker_run_receipt_false_authority_container_findings(
+            rel_path,
+            "checkpoint_resume",
+            value,
+            code_prefix,
+            evidence_label="checkpoint/resume/backpressure evidence",
+        )
+    )
+    for field in WORKER_RUN_RECEIPT_CHECKPOINT_RESUME_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"checkpoint_resume.{field}", value.get(field), code))
+    return findings
 
 
-def _worker_run_receipt_private_trace_authority_claim(value: str) -> bool:
-    text = " ".join(value.casefold().split())
-    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
-        return False
-    has_trace_source = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS)
-    has_authority = "authoritative" in text or "authority" in text or "approval" in text or "approve" in text
-    return has_trace_source and has_authority
+def _worker_run_receipt_child_agent_fanout_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("child_agent_fanout")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-child-fanout"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt child_agent_fanout must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if not schema:
+        findings.append(Finding("warn", code, "worker run receipt child_agent_fanout missing required field: schema", rel_path))
+    elif schema != CHILD_AGENT_FANOUT_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt child_agent_fanout schema should be {CHILD_AGENT_FANOUT_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    for field in ("parent_run_id",):
+        if not isinstance(value.get(field), str) or not str(value.get(field) or "").strip():
+            findings.append(Finding("warn", code, f"worker run receipt child_agent_fanout missing required field: {field}", rel_path))
+
+    fanout_status = str(value.get("fanout_status") or "").strip()
+    if not fanout_status:
+        findings.append(Finding("warn", code, "worker run receipt child_agent_fanout missing required field: fanout_status", rel_path))
+    elif fanout_status not in WORKER_RUN_RECEIPT_CHILD_FANOUT_STATUSES:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt child_agent_fanout fanout_status must use the child fanout namespace: {fanout_status}",
+                rel_path,
+            )
+        )
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if not label or (
+        "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt child_agent_fanout non_authority must explicitly label fanout as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt child_agent_fanout summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt child_agent_fanout summary must not claim fanout approves lifecycle or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(
+        _worker_run_receipt_false_authority_container_findings(
+            rel_path,
+            "child_agent_fanout",
+            value,
+            code_prefix,
+            evidence_label="child agent fanout evidence",
+        )
+    )
+    for field in WORKER_RUN_RECEIPT_CHILD_FANOUT_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"child_agent_fanout.{field}", value.get(field), code))
+
+    findings.extend(_worker_run_receipt_child_fanout_runtime_posture_findings(root, rel_path, value.get("runtime_posture"), code_prefix))
+    findings.extend(_worker_run_receipt_child_fanout_children_findings(root, rel_path, value.get("children"), code_prefix))
+    return findings
+
+
+def _worker_run_receipt_child_fanout_runtime_posture_findings(
+    root: Path,
+    rel_path: str,
+    value: object,
+    code_prefix: str,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-child-fanout"
+    label = "child_agent_fanout.runtime_posture"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, f"worker run receipt {label} must be an object when present", rel_path)]
+
+    findings = _worker_run_receipt_false_authority_container_findings(
+        rel_path,
+        label,
+        value,
+        code_prefix,
+        evidence_label="child fanout runtime posture evidence",
+    )
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, f"worker run receipt {label}.summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {label}.summary must not claim fanout approves lifecycle or external authority",
+                rel_path,
+            )
+        )
+    for field in WORKER_RUN_RECEIPT_CHILD_FANOUT_RUNTIME_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"{label}.{field}", value.get(field), code))
+    return findings
+
+
+def _worker_run_receipt_child_fanout_children_findings(
+    root: Path,
+    rel_path: str,
+    value: object,
+    code_prefix: str,
+) -> list[Finding]:
+    code = f"{code_prefix}-child-fanout"
+    if not isinstance(value, list):
+        return [Finding("warn", code, "worker run receipt child_agent_fanout missing required list field: children", rel_path)]
+
+    findings: list[Finding] = []
+    for index, child in enumerate(value):
+        label = f"child_agent_fanout.children[{index}]"
+        if not isinstance(child, dict):
+            findings.append(Finding("warn", code, f"worker run receipt {label} must be an object", rel_path))
+            continue
+        for field in ("child_id", "role"):
+            if not isinstance(child.get(field), str) or not str(child.get(field) or "").strip():
+                findings.append(Finding("warn", code, f"worker run receipt {label} missing required field: {field}", rel_path))
+        for field in ("agent_type", "provider_type", "model", "target_root", "residual_risk"):
+            field_value = child.get(field)
+            if field_value not in (None, "") and not isinstance(field_value, str):
+                findings.append(Finding("warn", code, f"worker run receipt {label}.{field} must be a string when present", rel_path))
+
+        status_specs = (
+            ("worker_status", WORKER_RUN_RECEIPT_WORKER_STATUSES, "worker"),
+            ("runtime_status", WORKER_RUN_RECEIPT_RUNTIME_STATUSES, "runtime"),
+            ("workflow_status", WORKER_RUN_RECEIPT_WORKFLOW_STATUSES, "workflow"),
+            ("verification_verdict", WORKER_RUN_RECEIPT_VERIFICATION_VERDICTS, "verification verdict"),
+            ("lifecycle_status", WORKER_RUN_RECEIPT_LIFECYCLE_STATUSES, "MLH lifecycle"),
+        )
+        for field, allowed, namespace_label in status_specs:
+            status = str(child.get(field) or "").strip()
+            if status and status not in allowed:
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {label}.{field} must use the {namespace_label} namespace: {status}",
+                        rel_path,
+                    )
+                )
+        worker_status = str(child.get("worker_status") or "").strip()
+        if worker_status in WORKER_RUN_RECEIPT_FORBIDDEN_WORKER_STATUS_TERMS:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {label}.worker_status must not carry lifecycle or verification status: {worker_status}",
+                    rel_path,
+                )
+            )
+
+        summary = child.get("summary")
+        if summary not in (None, "") and not isinstance(summary, str):
+            findings.append(Finding("warn", code, f"worker run receipt {label}.summary must be a string when present", rel_path))
+        elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {label}.summary must not claim child worker evidence approves lifecycle or external authority",
+                    rel_path,
+                )
+            )
+        residual_risk = child.get("residual_risk")
+        if isinstance(residual_risk, str) and _worker_run_receipt_event_history_authority_claim(residual_risk):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {label}.residual_risk must not claim child worker evidence approves lifecycle or external authority",
+                    rel_path,
+                )
+            )
+
+        findings.extend(
+            _worker_run_receipt_false_authority_container_findings(
+                rel_path,
+                label,
+                child,
+                code_prefix,
+                evidence_label="child worker evidence",
+            )
+        )
+        for field in WORKER_RUN_RECEIPT_CHILD_FANOUT_CHILD_REF_FIELDS:
+            findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"{label}.{field}", child.get(field), code))
+    return findings
+
+
+def _worker_run_receipt_capability_fence_decision_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("capability_fence_decision")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-capability-fence"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt capability_fence_decision must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if not schema:
+        findings.append(Finding("warn", code, "worker run receipt capability_fence_decision missing required field: schema", rel_path))
+    elif schema != CAPABILITY_FENCE_DECISION_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt capability_fence_decision schema should be {CAPABILITY_FENCE_DECISION_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    for field in ("fence_id", "capability_profile"):
+        if not isinstance(value.get(field), str) or not str(value.get(field) or "").strip():
+            findings.append(Finding("warn", code, f"worker run receipt capability_fence_decision missing required field: {field}", rel_path))
+
+    fence_status = str(value.get("fence_status") or "").strip()
+    if not fence_status:
+        findings.append(Finding("warn", code, "worker run receipt capability_fence_decision missing required field: fence_status", rel_path))
+    elif fence_status not in WORKER_RUN_RECEIPT_CAPABILITY_FENCE_STATUSES:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt capability_fence_decision fence_status must use the capability fence namespace: {fence_status}",
+                rel_path,
+            )
+        )
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if not label or (
+        "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt capability_fence_decision non_authority must explicitly label capability fence as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    status_specs = (
+        ("approval_state", WORKER_RUN_RECEIPT_CAPABILITY_FENCE_APPROVAL_STATES, "capability fence approval"),
+        ("audit_status", WORKER_RUN_RECEIPT_CAPABILITY_FENCE_AUDIT_STATUSES, "capability fence audit"),
+    )
+    for field, allowed, label in status_specs:
+        status = str(value.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt capability_fence_decision {field} must use the {label} namespace: {status}",
+                    rel_path,
+                )
+            )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt capability_fence_decision summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt capability_fence_decision summary must not claim tool authorization approves lifecycle or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(
+        _worker_run_receipt_false_authority_container_findings(
+            rel_path,
+            "capability_fence_decision",
+            value,
+            code_prefix,
+            evidence_label="capability fence decision evidence",
+        )
+    )
+    for field in WORKER_RUN_RECEIPT_CAPABILITY_FENCE_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"capability_fence_decision.{field}", value.get(field), code))
+    for field in WORKER_RUN_RECEIPT_CAPABILITY_FENCE_CAPABILITY_LIST_FIELDS:
+        findings.extend(_worker_run_receipt_capability_fence_list_findings(rel_path, field, value.get(field), code))
+    return findings
+
+
+def _worker_run_receipt_capability_fence_list_findings(
+    rel_path: str,
+    field: str,
+    value: object,
+    code: str,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    entries = _frontmatter_string_list(value)
+    if not entries:
+        return [Finding("warn", code, f"worker run receipt capability_fence_decision.{field} must be a string or list of strings when present", rel_path)]
+    findings: list[Finding] = []
+    for entry in entries:
+        if _worker_run_receipt_event_history_authority_claim(entry):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt capability_fence_decision.{field} must not claim capability authorization approves lifecycle or external authority: {entry}",
+                    rel_path,
+                )
+            )
+    return findings
+
+
+def _worker_run_receipt_runtime_broker_provider_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("runtime_broker_provider")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-runtime-broker-provider"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt runtime_broker_provider must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if not schema:
+        findings.append(Finding("warn", code, "worker run receipt runtime_broker_provider missing required field: schema", rel_path))
+    elif schema != RUNTIME_BROKER_PROVIDER_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt runtime_broker_provider schema should be {RUNTIME_BROKER_PROVIDER_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    for field in ("broker_id", "provider_id"):
+        if not isinstance(value.get(field), str) or not str(value.get(field) or "").strip():
+            findings.append(Finding("warn", code, f"worker run receipt runtime_broker_provider missing required field: {field}", rel_path))
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if not label or (
+        "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt runtime_broker_provider non_authority must explicitly label runtime broker/provider as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    status_specs = (
+        ("broker_status", WORKER_RUN_RECEIPT_RUNTIME_BROKER_STATUSES, "runtime broker"),
+        ("provider_status", WORKER_RUN_RECEIPT_RUNTIME_PROVIDER_STATUSES, "runtime provider"),
+        ("registration_status", WORKER_RUN_RECEIPT_BROKER_REGISTRATION_STATUSES, "broker registration"),
+        ("join_status", WORKER_RUN_RECEIPT_BROKER_REGISTRATION_STATUSES, "broker join"),
+        ("server_status", WORKER_RUN_RECEIPT_BROKER_SERVER_STATUSES, "broker server"),
+        ("dispatch_status", WORKER_RUN_RECEIPT_BROKER_DISPATCH_STATUSES, "broker dispatch"),
+        ("workspace_isolation_status", WORKER_RUN_RECEIPT_WORKSPACE_ISOLATION_STATUSES, "workspace isolation"),
+        ("workspace_cleanup_status", WORKER_RUN_RECEIPT_WORKSPACE_CLEANUP_STATUSES, "workspace cleanup"),
+        ("credential_projection_status", WORKER_RUN_RECEIPT_CREDENTIAL_PROJECTION_STATUSES, "credential projection"),
+        ("approval_mode", WORKER_RUN_RECEIPT_APPROVAL_MODES, "approval mode"),
+        ("resume_status", WORKER_RUN_RECEIPT_RESUME_STATUSES, "resume"),
+        ("telemetry_status", WORKER_RUN_RECEIPT_TELEMETRY_STATUSES, "telemetry"),
+    )
+    for field, allowed, label in status_specs:
+        status = str(value.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt runtime_broker_provider {field} must use the {label} namespace: {status}",
+                    rel_path,
+                )
+            )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt runtime_broker_provider summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt runtime_broker_provider summary must not claim broker/provider evidence approves launch, lifecycle, provider routing, cleanup, credential projection, telemetry, or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(
+        _worker_run_receipt_false_authority_container_findings(
+            rel_path,
+            "runtime_broker_provider",
+            value,
+            code_prefix,
+            evidence_label="runtime broker/provider evidence",
+        )
+    )
+    for field in WORKER_RUN_RECEIPT_RUNTIME_BROKER_PROVIDER_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"runtime_broker_provider.{field}", value.get(field), code))
+    for field in WORKER_RUN_RECEIPT_RUNTIME_BROKER_PROVIDER_CONTAINERS:
+        findings.extend(_worker_run_receipt_runtime_broker_provider_container_findings(root, rel_path, field, value.get(field), code_prefix))
+    return findings
+
+
+def _worker_run_receipt_runtime_broker_provider_container_findings(
+    root: Path,
+    rel_path: str,
+    field: str,
+    value: object,
+    code_prefix: str,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-runtime-broker-provider"
+    label = f"runtime_broker_provider.{field}"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, f"worker run receipt {label} must be an object when present", rel_path)]
+
+    findings = _worker_run_receipt_false_authority_container_findings(
+        rel_path,
+        label,
+        value,
+        code_prefix,
+        evidence_label="runtime broker/provider evidence",
+    )
+    summary = value.get("summary")
+    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {label}.summary must not claim broker/provider evidence approves launch, lifecycle, provider routing, cleanup, credential projection, telemetry, or external authority",
+                rel_path,
+            )
+        )
+    for ref_field in WORKER_RUN_RECEIPT_RUNTIME_BROKER_PROVIDER_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"{label}.{ref_field}", value.get(ref_field), code))
+    return findings
+
+
+def _worker_run_receipt_worktree_session_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("worker_worktree_session")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-worktree-session"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt worker_worktree_session must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if not schema:
+        findings.append(Finding("warn", code, "worker run receipt worker_worktree_session missing required field: schema", rel_path))
+    elif schema != WORKER_WORKTREE_SESSION_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt worker_worktree_session schema should be {WORKER_WORKTREE_SESSION_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    for field in ("session_id", "worktree_session_status"):
+        if not isinstance(value.get(field), str) or not str(value.get(field) or "").strip():
+            findings.append(Finding("warn", code, f"worker run receipt worker_worktree_session missing required field: {field}", rel_path))
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if not label or (
+        "worktree" not in label
+        or "session" not in label
+        or "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt worker_worktree_session non_authority must explicitly label worktree/session as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    status_specs = (
+        ("worktree_session_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_STATUSES, "worktree session"),
+        ("worktree_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_WORKTREE_STATUSES, "worktree"),
+        ("prompt_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_PROMPT_STATUSES, "prompt"),
+        ("status_capture_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_CAPTURE_STATUSES, "status/capture"),
+        ("sandbox_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_SANDBOX_STATUSES, "sandbox"),
+        ("merge_cleanup_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_MERGE_CLEANUP_STATUSES, "merge/cleanup"),
+        ("concurrency_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_CONCURRENCY_STATUSES, "concurrency"),
+        ("wait_status", WORKER_RUN_RECEIPT_WORKTREE_SESSION_WAIT_STATUSES, "wait"),
+    )
+    for field, allowed, status_label in status_specs:
+        status = str(value.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt worker_worktree_session {field} must use the {status_label} namespace: {status}",
+                    rel_path,
+                )
+            )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt worker_worktree_session summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt worker_worktree_session summary must not claim worktree/session evidence approves lifecycle, launch, cleanup, Git, provider routing, verification, target-repo acceptance, or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(
+        _worker_run_receipt_false_authority_container_findings(
+            rel_path,
+            "worker_worktree_session",
+            value,
+            code_prefix,
+            evidence_label="worktree/session evidence",
+        )
+    )
+    for field in WORKER_RUN_RECEIPT_WORKTREE_SESSION_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"worker_worktree_session.{field}", value.get(field), code))
+    for field in WORKER_RUN_RECEIPT_WORKTREE_SESSION_CONTAINERS:
+        findings.extend(_worker_run_receipt_worktree_session_container_findings(root, rel_path, field, value.get(field), code_prefix))
+    return findings
+
+
+def _worker_run_receipt_worktree_session_container_findings(
+    root: Path,
+    rel_path: str,
+    field: str,
+    value: object,
+    code_prefix: str,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-worktree-session"
+    label = f"worker_worktree_session.{field}"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, f"worker run receipt {label} must be an object when present", rel_path)]
+
+    findings = _worker_run_receipt_false_authority_container_findings(
+        rel_path,
+        label,
+        value,
+        code_prefix,
+        evidence_label="worktree/session evidence",
+    )
+    summary = value.get("summary")
+    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {label}.summary must not claim worktree/session evidence approves lifecycle, launch, cleanup, Git, provider routing, verification, target-repo acceptance, or external authority",
+                rel_path,
+            )
+        )
+    for ref_field in WORKER_RUN_RECEIPT_WORKTREE_SESSION_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"{label}.{ref_field}", value.get(ref_field), code))
+    return findings
+
+
+def _worker_run_receipt_artifact_lineage_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    value = data.get("artifact_lineage")
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-artifact-lineage"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, "worker run receipt artifact_lineage must be an object when present", rel_path)]
+
+    findings: list[Finding] = []
+    schema = str(value.get("schema") or "").strip()
+    if not schema:
+        findings.append(Finding("warn", code, "worker run receipt artifact_lineage missing required field: schema", rel_path))
+    elif schema != ARTIFACT_LINEAGE_RECEIPT_SCHEMA:
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt artifact_lineage schema should be {ARTIFACT_LINEAGE_RECEIPT_SCHEMA}: {schema}",
+                rel_path,
+            )
+        )
+
+    for field in ("lineage_id", "lineage_status"):
+        if not isinstance(value.get(field), str) or not str(value.get(field) or "").strip():
+            findings.append(Finding("warn", code, f"worker run receipt artifact_lineage missing required field: {field}", rel_path))
+
+    label = str(value.get("non_authority") or "").strip().casefold()
+    if not label or (
+        "lineage" not in label
+        or "evidence" not in label
+        or not any(token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority"))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt artifact_lineage non_authority must explicitly label artifact lineage as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+
+    status_specs = (
+        ("lineage_status", WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_STATUSES, "artifact lineage"),
+        ("content_hash_status", WORKER_RUN_RECEIPT_ARTIFACT_HASH_STATUSES, "artifact content hash"),
+        ("parent_hash_status", WORKER_RUN_RECEIPT_ARTIFACT_HASH_STATUSES, "artifact parent hash"),
+        ("signature_status", WORKER_RUN_RECEIPT_ARTIFACT_SIGNATURE_STATUSES, "artifact signature"),
+        ("hmac_status", WORKER_RUN_RECEIPT_ARTIFACT_SIGNATURE_STATUSES, "artifact hmac"),
+        (
+            "lineage_verification_status",
+            WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_VERIFICATION_STATUSES,
+            "artifact lineage verification",
+        ),
+    )
+    for field, allowed, status_label in status_specs:
+        status = str(value.get(field) or "").strip()
+        if status and status not in allowed:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt artifact_lineage {field} must use the {status_label} namespace: {status}",
+                    rel_path,
+                )
+            )
+
+    summary = value.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", code, "worker run receipt artifact_lineage summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                "worker run receipt artifact_lineage summary must not claim artifact lineage approves lifecycle, verification, artifact acceptance, or external authority",
+                rel_path,
+            )
+        )
+
+    findings.extend(
+        _worker_run_receipt_false_authority_container_findings(
+            rel_path,
+            "artifact_lineage",
+            value,
+            code_prefix,
+            evidence_label="artifact lineage evidence",
+        )
+    )
+    for field in WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"artifact_lineage.{field}", value.get(field), code))
+    for field in WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_CONTAINERS:
+        findings.extend(_worker_run_receipt_artifact_lineage_container_findings(root, rel_path, field, value.get(field), code_prefix))
+    return findings
+
+
+def _worker_run_receipt_artifact_lineage_container_findings(
+    root: Path,
+    rel_path: str,
+    field: str,
+    value: object,
+    code_prefix: str,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-artifact-lineage"
+    label = f"artifact_lineage.{field}"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, f"worker run receipt {label} must be an object when present", rel_path)]
+
+    findings = _worker_run_receipt_false_authority_container_findings(
+        rel_path,
+        label,
+        value,
+        code_prefix,
+        evidence_label="artifact lineage evidence",
+    )
+    summary = value.get("summary")
+    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {label}.summary must not claim artifact lineage approves lifecycle, verification, artifact acceptance, or external authority",
+                rel_path,
+            )
+        )
+    for ref_field in WORKER_RUN_RECEIPT_ARTIFACT_LINEAGE_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"{label}.{ref_field}", value.get(ref_field), code))
+    return findings
+
+
+def _worker_run_receipt_runtime_guard_container_findings(
+    root: Path,
+    rel_path: str,
+    field: str,
+    value: object,
+    code_prefix: str,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    code = f"{code_prefix}-runtime-guard"
+    container_label = f"runtime_guard_preflight.{field}"
+    if not isinstance(value, dict):
+        return [Finding("warn", code, f"worker run receipt {container_label} must be an object when present", rel_path)]
+
+    findings = _worker_run_receipt_false_authority_container_findings(rel_path, container_label, value, code_prefix)
+    summary = value.get("summary")
+    if isinstance(summary, str) and _worker_run_receipt_event_history_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {container_label}.summary must not claim runtime guard evidence approves launch, lifecycle, or external authority",
+                rel_path,
+            )
+        )
+
+    if field == "hook_proof":
+        proof_level = str(value.get("proof_level") or "").strip()
+        if proof_level and proof_level not in WORKER_RUN_RECEIPT_RUNTIME_GUARD_HOOK_PROOF_LEVELS:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {container_label}.proof_level must use the hook proof vocabulary: {proof_level}",
+                    rel_path,
+                )
+            )
+        if proof_level in {"fallback", "synthetic", "not-recorded", "unknown"} and isinstance(summary, str) and _worker_run_receipt_native_hook_overclaim(summary):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {container_label}.summary must not claim native hook proof when proof_level is {proof_level}",
+                    rel_path,
+                )
+            )
+    if field == "provider_proof":
+        proof_level = str(value.get("proof_level") or "").strip()
+        if proof_level and proof_level not in WORKER_RUN_RECEIPT_RUNTIME_GUARD_PROVIDER_PROOF_LEVELS:
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {container_label}.proof_level must use the provider proof vocabulary: {proof_level}",
+                    rel_path,
+                )
+            )
+        if proof_level != "provider-called" and isinstance(summary, str) and _worker_run_receipt_provider_call_overclaim(summary):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {container_label}.summary must not claim provider-call proof when proof_level is {proof_level or 'missing'}",
+                    rel_path,
+                )
+            )
+
+    for ref_field in WORKER_RUN_RECEIPT_RUNTIME_GUARD_REF_FIELDS:
+        findings.extend(_worker_run_receipt_ref_list_findings(root, rel_path, f"{container_label}.{ref_field}", value.get(ref_field), code))
+    return findings
+
+
+def _worker_run_receipt_false_authority_container_findings(
+    rel_path: str,
+    label: str,
+    value: dict[str, object],
+    code_prefix: str,
+    *,
+    evidence_label: str = "runtime guard evidence",
+) -> list[Finding]:
+    findings: list[Finding] = []
+    code = f"{code_prefix}-authority-boundary"
+    for authority_field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+        if _worker_run_receipt_truthy(value.get(authority_field)):
+            findings.append(
+                Finding(
+                    "warn",
+                    code,
+                    f"worker run receipt {label}.{authority_field} must remain false; {evidence_label} cannot approve launch, lifecycle, or external authority",
+                    rel_path,
+                )
+            )
+    authority = value.get("authority")
+    if isinstance(authority, dict):
+        for authority_field in WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS:
+            if _worker_run_receipt_truthy(authority.get(authority_field)):
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {label}.authority.{authority_field} must remain false; {evidence_label} is evidence only",
+                        rel_path,
+                    )
+                )
+    elif authority not in (None, ""):
+        findings.append(Finding("warn", code, f"worker run receipt {label}.authority must be an object when present", rel_path))
+    return findings
+
 
 def _worker_run_receipt_ref_list_findings(root: Path, rel_path: str, field: str, value: object, code: str) -> list[Finding]:
     if value in (None, ""):
@@ -1637,6 +3246,48 @@ def _worker_run_receipt_ref_list_findings(root: Path, rel_path: str, field: str,
         if boundary_violation is not None:
             findings.append(Finding("warn", code, boundary_violation.message, rel_path))
     return findings
+
+
+def _worker_run_receipt_native_hook_overclaim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in ("no native hook", "not native hook", "without native hook", "native hook proof not")):
+        return False
+    return "native hook" in text and any(token in text for token in ("proof", "installed", "authorizes", "approves", "ready"))
+
+
+def _worker_run_receipt_provider_call_overclaim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in ("no provider call", "without provider call", "provider call not", "not called")):
+        return False
+    return any(token in text for token in ("provider call", "provider-called", "called provider")) or (
+        "provider" in text and "routing" in text and any(token in text for token in ("approved", "approves", "authorizes", "ready"))
+    )
+
+
+def _worker_run_receipt_event_history_authority_claim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
+        return False
+    return any(verb in text for verb in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_VERBS) and any(
+        target in text for target in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_TARGETS
+    )
+
+
+def _worker_run_receipt_private_trace_policy_is_non_authority(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    has_trace_source = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS)
+    has_non_authority = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_NON_AUTHORITY_TOKENS)
+    has_repo_visible_recovery = "repo-visible" in text or "durable evidence" in text or "evidence only" in text or "evidence-only" in text
+    return has_trace_source and has_non_authority and has_repo_visible_recovery
+
+
+def _worker_run_receipt_private_trace_authority_claim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
+        return False
+    has_trace_source = any(token in text for token in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS)
+    has_authority = "authoritative" in text or "authority" in text or "approval" in text or "approve" in text
+    return has_trace_source and has_authority
 
 
 def _worker_run_receipt_source_hash_findings(root: Path, rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
@@ -1726,7 +3377,49 @@ def _worker_run_receipt_boundary_findings(code_prefix: str = "worker-run-receipt
         Finding(
             "info",
             f"{code_prefix}-event-history",
-            "event history refs are source-bound evidence; event_history_summary and event streams record receipt provenance, private SDK traces must be redacted/summarized/excluded/non-authoritative, and neither can approve lifecycle, fan-in, roadmap, archive, Git, provider routing, release, or cleanup",
+            "event history refs are source-bound evidence; private SDK traces must be redacted, summarized, or excluded and cannot approve lifecycle authority",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-runtime-guard",
+            "runtime_guard_preflight is nested source-bound evidence for preflight, worktree, bypass, hook, provider, and readiness posture; it cannot approve launch or lifecycle authority",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-checkpoint-resume",
+            "checkpoint_resume is nested source-bound evidence for durable task/run refs, checkpoint/resume posture, replay refs, idempotency, and backpressure; queue success, checkpoint creation, replay success, and backpressure verdicts cannot approve lifecycle authority",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-child-fanout",
+            "child_agent_fanout is nested source-bound evidence for parent/child worker coordination; child worker success, fan-in readiness, worktree posture, bypass posture, hook proof, provider proof, and private traces cannot approve lifecycle authority",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-capability-fence",
+            "capability_fence_decision is nested source-bound evidence for tool/capability policy decisions; allow, deny, approval, audit, gateway, or policy outcomes cannot approve lifecycle, launch, fan-in, verification acceptance, roadmap status, archive, Git, provider routing, release, cleanup, or target-repo acceptance",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-runtime-broker-provider",
+            "runtime_broker_provider is nested source-bound evidence for runtime broker/provider, workspace, credential, resume, cleanup, and telemetry posture; broker dispatch, provider defaulting, workspace mounts, credential projection, resume, cleanup, telemetry export, worker success, or reviewer approval cannot approve lifecycle authority",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-worktree-session",
+            "worker_worktree_session is nested source-bound evidence for worktree/session/pane refs, prompt refs, status/capture refs, sandbox posture, bounded concurrency, wait, merge, and cleanup posture; terminal panes, dashboards, wait success, sandbox declarations, merge success, cleanup success, worker success, or reviewer approval cannot approve lifecycle authority",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-artifact-lineage",
+            "artifact_lineage is nested source-bound evidence for output/input artifact lineage, producer/prompt/model/cost metadata, hash/signature/HMAC posture, and verification refs; lineage records, signatures, HMAC chains, worker success, reviewer approval, or verifier pass cannot approve lifecycle authority",
             WORKER_RUN_RECEIPTS_DIR_REL,
         ),
     ]
@@ -1847,16 +3540,15 @@ def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -
     if record_id != expected_record_id:
         return None, [Finding(severity, "agent-run-record-refused", f"existing agent run record_id {record_id!r} does not match route target {expected_record_id!r}", target_rel)]
 
-    source_refs = _record_source_refs(data)
+    source_refs_with_self = _record_source_refs(data)
+    source_refs = tuple(ref for ref in source_refs_with_self if not _same_root_relative_path(ref, target_rel))
+    self_refs = tuple(ref for ref in source_refs_with_self if _same_root_relative_path(ref, target_rel))
     if not source_refs:
-        return None, [Finding(severity, "agent-run-record-refused", "existing agent run record has no source-bound refs to refresh", target_rel)]
-    self_refs = [ref for ref in source_refs if _same_root_relative_path(ref, target_rel)]
-    if self_refs:
         return None, [
             Finding(
                 severity,
                 "agent-run-record-refused",
-                f"existing agent run record source refs include its own target {target_rel}; self-referential source hashes cannot be made stable",
+                f"existing agent run record has no source-bound refs to refresh after excluding its own target {target_rel}",
                 target_rel,
             )
         ]
@@ -1872,6 +3564,15 @@ def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -
             target_rel,
         )
     ]
+    if self_refs:
+        findings.append(
+            Finding(
+                "info",
+                "agent-run-record-refresh-self-ref-ignored",
+                f"ignored self-referential source refs while refreshing source_hashes: {', '.join(self_refs)}",
+                target_rel,
+            )
+        )
     findings.extend(hash_findings)
     return plan, findings
 
