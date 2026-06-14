@@ -4131,12 +4131,17 @@ def _is_reviewed_memory_hygiene_incubation_file(inventory: Inventory, path: str)
         str(data.get(key) or "").strip()
         for key in ("lifecycle_status", "resolution", "last_reconciled", "resolved_by")
     )
+    has_meta_feedback_evidence = (
+        "mylittleharness-meta-feedback-cluster v1" in content
+        or "meta-feedback intake fields" in content
+        or "signal_type:" in content
+    )
     return (
         source == "mylittleharness incubation route"
         and status in {"incubating", "implemented", "archived", "deferred", "rejected"}
-        and has_reconciliation_metadata
+        and (has_reconciliation_metadata or has_meta_feedback_evidence)
         and "non-authority" in content
-        and "mylittleharness-meta-feedback-cluster v1" in content
+        and has_meta_feedback_evidence
         and "lifecycle" in content
         and ("staging" in content or "commit" in content or "git" in content)
     )
@@ -4407,6 +4412,7 @@ def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
     return (
         (
             "cannot approve" in content
+            or "does not approve" in content
             or "do not approve" in content
             or "do not grant" in content
             or "cannot" in content

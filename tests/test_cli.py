@@ -30084,9 +30084,10 @@ class CliTests(unittest.TestCase):
         )
         return hook_note_rel, commit_note_rel
 
-    def _write_memory_hygiene_checkpoint_fixture(self, root: Path) -> tuple[str, str, str, str, str, str, str, str]:
+    def _write_memory_hygiene_checkpoint_fixture(self, root: Path) -> tuple[str, str, str, str, str, str, str, str, str]:
         route_prefix = 'project/'
         active_note_rel = route_prefix + "plan-incubation/live-reviewed-followup.md"
+        legacy_note_rel = route_prefix + "plan-incubation/legacy-reviewed-followup.md"
         deleted_note_rel = route_prefix + "plan-incubation/covered-old-note.md"
         archive_reference_rel = route_prefix + "archive/reference/incubation/2026-06-15-covered-old-note.md"
         archive_plan_rel = route_prefix + "archive/plans/2026-06-15-covered-old-note.md"
@@ -30096,6 +30097,7 @@ class CliTests(unittest.TestCase):
         claim_rel = route_prefix + "verification/work-claims/memory-hygiene-review.json"
         for rel in (
             active_note_rel,
+            legacy_note_rel,
             deleted_note_rel,
             archive_reference_rel,
             archive_plan_rel,
@@ -30127,16 +30129,34 @@ class CliTests(unittest.TestCase):
                 'created: "2026-06-15"\n'
                 'updated: "2026-06-15"\n'
                 'source: "MyLittleHarness incubation route"\n'
-                'lifecycle_status: "archived-covered"\n'
-                'resolution: "covered-by-archive"\n'
-                'last_reconciled: "2026-06-15"\n'
-                f'resolved_by: "{archive_plan_rel}"\n'
                 "---\n"
                 f"# {topic}\n\n"
                 + incubation_body,
                 encoding="utf-8",
             )
         (root / deleted_note_rel).unlink()
+        (root / legacy_note_rel).write_text(
+            "---\n"
+            'topic: "legacy reviewed followup"\n'
+            'status: "incubating"\n'
+            'created: "2026-06-15"\n'
+            'updated: "2026-06-15"\n'
+            'source: "MyLittleHarness incubation route"\n'
+            'lifecycle_status: "archived-covered"\n'
+            'resolution: "covered-by-archive"\n'
+            'last_reconciled: "2026-06-15"\n'
+            f'resolved_by: "{archive_plan_rel}"\n'
+            "---\n"
+            "# legacy reviewed followup\n\n"
+            "## Provenance\n\n"
+            "- Source: MyLittleHarness incubation route\n"
+            "- Non-authority note: incubation is temporary synthesis; promoted research/spec/plan/state remains authority when accepted.\n\n"
+            "## Meta-feedback Intake Fields\n\n"
+            "- signal_type: agent-operability-micro-friction\n"
+            "- expected_owner_command: memory-hygiene, check, roadmap, and writeback\n"
+            "- authority_boundary: no lifecycle movement, archive, staging, commit, push, or release approval.\n",
+            encoding="utf-8",
+        )
         (root / archive_reference_rel).write_text(
             "---\n"
             'topic: "covered old note"\n'
@@ -30202,7 +30222,7 @@ class CliTests(unittest.TestCase):
             'authority: "planning and cleanup control sheet only; does not approve lifecycle, archive, staging, commit, push, or roadmap mutation"\n'
             "---\n"
             "# Current Development Direction Priority Map\n\n"
-            "This verification note is evidence only and cannot approve lifecycle, archive, staging, commit, push, or release.\n",
+            "This verification note is evidence only and does not approve lifecycle, archive, staging, commit, push, or release.\n",
             encoding="utf-8",
         )
         (root / handoff_rel).write_text(
@@ -30252,6 +30272,7 @@ class CliTests(unittest.TestCase):
         )
         return (
             active_note_rel,
+            legacy_note_rel,
             deleted_note_rel,
             archive_reference_rel,
             archive_plan_rel,
