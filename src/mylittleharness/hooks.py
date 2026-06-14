@@ -211,7 +211,7 @@ SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|apply_patch)\b"
     r")"
 )
-READ_ONLY_GIT_INSPECTION_COMMANDS = {"diff", "show", "status", "log"}
+READ_ONLY_GIT_INSPECTION_COMMANDS = {"cat-file", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
 GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push", "reset", "checkout", "clean", "restore", "rm", "mv"}
 GIT_OPTIONS_WITH_VALUES = {
     "-C",
@@ -1462,6 +1462,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_read_only_product_source_smoke = _is_read_only_product_source_smoke_command(inventory, command)
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
+    allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(data))
     allow_read_only_source_paths = (
         _is_read_only_source_discovery_command(command)
         or _is_read_only_git_inspection_command(command)
@@ -1488,8 +1489,13 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     post_closeout_lifecycle_vcs_finalization_paths = _post_closeout_lifecycle_vcs_finalization_paths(inventory, command)
     allow_route_produced_lifecycle_commit = _is_route_produced_lifecycle_commit_command(inventory, command)
     allow_product_source_vcs_stage = _is_product_source_vcs_stage_command(inventory, data, command)
+    allow_product_source_vcs_commit = _is_product_source_vcs_commit_command(inventory, data, command)
     allow_product_source_vcs_push = _is_product_source_vcs_push_command(inventory, data, command)
-    allow_product_source_vcs_command = allow_product_source_vcs_stage or allow_product_source_vcs_push
+    allow_product_source_vcs_command = (
+        allow_product_source_vcs_stage
+        or allow_product_source_vcs_commit
+        or allow_product_source_vcs_push
+    )
     reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, data, command)
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
@@ -1698,6 +1704,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else None,
             )
         )
+    if allow_product_source_vcs_commit:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-product-source-vcs-commit",
+                (
+                    "allowed narrow product-source VCS commit from the configured product_source_root workdir after "
+                    "plan_status=none; this assumes prior exact staging and staged-diff review, while "
+                    "amend, commit-all, push, reset, clean, release, and future lifecycle decisions remain unapproved"
+                ),
+            )
+        )
     if allow_product_source_vcs_push:
         findings.append(
             Finding(
@@ -1903,6 +1921,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     if (
         _looks_like_git_stage_or_commit(lowered)
+        and not allow_apply_patch_intent
         and not allow_post_closeout_lifecycle_route_stage
         and not allow_route_produced_lifecycle_route_stage
         and not allow_post_closeout_local_vcs_stage
@@ -1942,7 +1961,11 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
-    product_root_direct_path = "" if allow_delegation_prompt_context else _product_root_direct_edit_path(inventory, paths, write_command)
+    product_root_direct_path = (
+        ""
+        if allow_delegation_prompt_context or allow_product_source_vcs_command
+        else _product_root_direct_edit_path(inventory, paths, write_command)
+    )
     if product_root_direct_path:
         next_safe = _hook_product_root_write_next_safe_command(inventory, product_root_direct_path)
         findings.append(
@@ -2218,10 +2241,10 @@ def _hook_input_paths(
             for item in value:
                 collect(item)
         elif isinstance(value, str):
-            paths.extend(_extract_paths(value))
+            paths.extend(_extract_paths(_command_without_shell_literal_payloads(value)))
 
     collect(data)
-    paths.extend(_extract_paths(text))
+    paths.extend(_extract_paths(_command_without_shell_literal_payloads(text)))
     return _dedupe_normalized_hook_paths(paths)
 
 
@@ -3258,6 +3281,15 @@ def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, o
     )
 
 
+def _is_product_source_vcs_commit_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if _has_active_plan(inventory):
+        return False
+    base_root, product_root = _product_source_vcs_roots(inventory, data, command)
+    if base_root is None or product_root is None:
+        return False
+    return _is_narrow_local_vcs_commit_command(command)
+
+
 def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
     if _has_active_plan(inventory) or _has_shell_command_separator(command):
         return False
@@ -4221,7 +4253,38 @@ def _git_mutation_next_safe_command(inventory: Inventory, command: str) -> str:
             return "gi" + "t add -- " + " ".join(shell_arg(path) for path in paths)
     if _has_active_plan(inventory):
         return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
+    product_source_next_safe = _product_source_vcs_next_safe_command(inventory, command)
+    if product_source_next_safe:
+        return product_source_next_safe
     return "gi" + "t add -- <exact-reviewed-files>; " + "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
+
+
+def _product_source_vcs_next_safe_command(inventory: Inventory, command: str) -> str:
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is None:
+        return ""
+    subcommand = _git_subcommand(command)
+    if subcommand not in {"add", "stage", "commit"}:
+        return ""
+    git_prefix = "gi" + "t -C " + shell_arg(str(product_root))
+    if subcommand in {"add", "stage"}:
+        pathspecs = [
+            pathspec
+            for pathspec in _git_stage_pathspecs(command)
+            if _is_exact_post_closeout_stage_file(
+                inventory,
+                pathspec,
+                base_root=product_root,
+                boundary_root=product_root,
+            )
+        ]
+        stage_target = " ".join(shell_arg(pathspec) for pathspec in pathspecs) or "<exact-reviewed-product-files>"
+        return (
+            f"{git_prefix} add -- {stage_target}; "
+            f"{git_prefix} diff --cached --check; "
+            f"{git_prefix} commit -F <message-file>"
+        )
+    return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
 
 
 def _route_produced_lifecycle_suggested_stage_paths(inventory: Inventory, candidates: list[str] | tuple[str, ...]) -> list[str]:

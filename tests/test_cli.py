@@ -28562,15 +28562,76 @@ class CliTests(unittest.TestCase):
                 "*** End Patch\n"
             )
             patch_input = json.dumps({"toolName": "apply_patch", "input": patch_text})
+            git_literal = "git " + "commit -F reviewed-message.txt"
+            git_text_patch = (
+                "*** Begin Patch\n"
+                "*** Update File: tests/test_cli.py\n"
+                "@@\n"
+                "+SAFE_TEXT = '" + git_literal + "'\n"
+                "*** End Patch\n"
+            )
+            git_text_patch_input = json.dumps({"toolName": "apply_patch", "input": git_text_patch})
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
+            git_text_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], git_text_patch_input)
             raw_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_text)
 
-            for checked_payload in (payload, raw_payload):
+            for checked_payload in (payload, git_text_payload, raw_payload):
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
                 self.assertFalse(checked_payload["block"])
                 self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
                 self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+                self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_strips_here_string_content_literals_for_write_targets(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            product_file = product_root / "src" / "mylittleharness" / "hooks.py"
+            product_file.parent.mkdir(parents=True)
+            product_file.write_text("# hooks\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            here_string_command = (
+                "$messagePath = Join-Path $env:TEMP 'mlh-commit-message.txt'\n"
+                "@'\n"
+                f"Summary mentions {product_file}\n"
+                "Tests mention tests/test_cli.py\n"
+                "'@ | Set-Content -LiteralPath $messagePath -Encoding UTF8\n"
+                "Write-Output $messagePath"
+            )
+            direct_product_write = f"Set-Content -LiteralPath '{product_file}' -Value 'x'"
+
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": here_string_command}),
+            )
+            direct_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": direct_product_write}),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+            direct_codes = {finding["code"] for finding in direct_payload["findings"]}
+            self.assertTrue(direct_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-direct-edit", direct_codes)
 
     def test_hooks_pre_tool_uses_shell_write_targets_not_content_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -29933,13 +29994,38 @@ class CliTests(unittest.TestCase):
                     "command": "git " + f'-C "{product_root}" add -- src/mylittleharness/hooks.py tests/test_cli.py',
                 }
             )
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "commit -F reviewed-message.txt",
+                }
+            )
+            commit_git_c_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + f'-C "{product_root}" commit -F reviewed-message.txt',
+                }
+            )
+            grep_git_c_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + f'-C "{product_root}" grep hooks -- src/mylittleharness/hooks.py',
+                }
+            )
 
             stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
             stage_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_git_c_input)
+            commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            commit_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_git_c_input)
+            grep_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], grep_git_c_input)
             push_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], push_input)
 
             stage_codes = {finding["code"] for finding in stage_payload["findings"]}
             stage_git_c_codes = {finding["code"] for finding in stage_git_c_payload["findings"]}
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            commit_git_c_codes = {finding["code"] for finding in commit_git_c_payload["findings"]}
+            grep_git_c_codes = {finding["code"] for finding in grep_git_c_payload["findings"]}
             push_codes = {finding["code"] for finding in push_payload["findings"]}
 
             self.assertFalse(stage_payload["block"])
@@ -29949,9 +30035,51 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-staging", stage_git_c_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", stage_git_c_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", stage_git_c_codes)
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-commit", commit_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
+            self.assertFalse(commit_git_c_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-commit", commit_git_c_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", commit_git_c_codes)
+            self.assertNotIn("hooks-policy-block-product-root-direct-edit", commit_git_c_codes)
+            self.assertFalse(grep_git_c_payload["block"])
+            self.assertNotIn("hooks-policy-block-product-root-path", grep_git_c_codes)
             self.assertFalse(push_payload["block"])
             self.assertIn("hooks-policy-allow-product-source-vcs-push", push_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", push_codes)
+
+    def test_hooks_pre_tool_product_source_git_diagnostic_names_git_c_when_workdir_missing(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src" / "mylittleharness").mkdir(parents=True)
+            (product_root / "src" / "mylittleharness" / "hooks.py").write_text("# hooks\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -- src/mylittleharness/hooks.py",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("git -C", messages)
+            self.assertIn(str(product_root), messages)
+            self.assertIn("src/mylittleharness/hooks.py", messages)
+            self.assertIn("commit -F <message-file>", messages)
 
     def test_hooks_pre_tool_keeps_product_source_workdir_unsafe_vcs_forms_blocked_after_closeout(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -29993,6 +30121,8 @@ class CliTests(unittest.TestCase):
                 "explicit_tag_ref_push": "git " + "push origin refs/tags/v1.0.0",
                 "tag_prefix_ref_push": "git " + "push origin tags/v1.0.0",
                 "bare_version_tag_push": "git " + "push origin v1.0.0",
+                "commit_all": "git " + "commit -a -F reviewed-message.txt",
+                "commit_amend": "git " + "commit --amend -F reviewed-message.txt",
                 **symlink_case,
             }
 
@@ -30010,6 +30140,7 @@ class CliTests(unittest.TestCase):
                     self.assertTrue(payload["block"])
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-product-source-vcs-commit", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
                     self.assertIn("only exact staging of reviewed existing files", messages)
 
