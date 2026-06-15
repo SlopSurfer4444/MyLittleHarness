@@ -378,6 +378,40 @@ POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES = (
     "dist/",
     "build/",
 )
+NEIGHBOR_EXACT_STAGE_DISALLOWED_PREFIXES = POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES + (
+    ".pytest_cache/",
+    ".symphony/",
+    ".venv/",
+    "__pycache__/",
+    "codex-py-",
+    "data/derived/",
+    "data/exports/",
+    "data/private/",
+    "data/raw/",
+    "project/cache/",
+    "project/generated/",
+    "project/private/",
+    "project/scratch/",
+    "project/temp/",
+    "project/tmp/",
+    "pytest-cache-files-",
+    "tmp-pytest-",
+)
+NEIGHBOR_BOOTSTRAP_EXACT_PATHS = {
+    ".codex/hooks.json",
+    ".codex/hooks/mylittleharness_session_start.py",
+    ".codex/project-workflow.toml",
+    ".gitignore",
+    ".mylittleharness/project-workflow.toml",
+    "agents.md",
+    "project/project-state.md",
+    "project/roadmap.md",
+    "readme.md",
+}
+NEIGHBOR_BOOTSTRAP_ALLOWED_PREFIXES = (
+    "project/research/",
+    "project/specs/workflow/",
+)
 
 
 @dataclass(frozen=True)
@@ -1777,6 +1811,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
                     "files in the actual command workdir/root, including deferred research/archive route packages, "
                     "memory-hygiene/archive-reference-package and post-closeout lifecycle route packages, "
+                    "delegated neighbor-root exact eligible file sets and initial scaffold packages, "
                     "meta-feedback/incubation blocker notes, "
                     "and reviewed decision-backed verification evidence packages; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
@@ -1992,6 +2027,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             git_message = (
                 "blocked reviewed local VCS checkpoint because "
                 f"{reviewed_local_vcs_checkpoint.blocked_reason}; only exact existing MLH route/evidence files "
+                "or exact eligible target files "
                 "in the actual command workdir/root are allowed, and hook output cannot approve push, release, "
                 "reset, clean, broad add, or authority decisions; "
                 "next_safe_command=git -C <actual-root> add -- <exact-route-files>; "
@@ -3541,6 +3577,8 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
             return ReviewedLocalVcsCheckpoint(root=target_inventory.root, blocked_reason="no exact pathspecs were supplied")
         paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, pathspecs)
         if not paths:
+            paths = _coherent_delegated_neighbor_exact_file_checkpoint_paths(target_inventory, pathspecs)
+        if not paths:
             return ReviewedLocalVcsCheckpoint(
                 root=target_inventory.root,
                 blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, pathspecs, "pathspecs"),
@@ -3553,6 +3591,8 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
         )
     staged = _git_staged_paths_for_root(target_inventory.root)
     paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, staged)
+    if not paths:
+        paths = _coherent_delegated_neighbor_exact_file_checkpoint_paths(target_inventory, staged)
     if not paths:
         return ReviewedLocalVcsCheckpoint(
             root=target_inventory.root,
@@ -3834,6 +3874,79 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     if meta_feedback_paths:
         return meta_feedback_paths
     return set()
+
+
+def _coherent_delegated_neighbor_exact_file_checkpoint_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    normalized = _normalized_delegated_neighbor_exact_file_paths(inventory, paths)
+    if not normalized:
+        return set()
+    bootstrap_paths = _coherent_delegated_neighbor_bootstrap_checkpoint_paths(inventory, normalized)
+    if bootstrap_paths:
+        return bootstrap_paths
+    if any(_is_lifecycle_route_path(path) or path.startswith("project/") for path in normalized):
+        return set()
+    return normalized
+
+
+def _coherent_delegated_neighbor_bootstrap_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
+    if not paths:
+        return set()
+    required = {"agents.md", "readme.md", "project/project-state.md"}
+    if not required <= paths:
+        return set()
+    if not any(path in paths for path in (".codex/project-workflow.toml", ".mylittleharness/project-workflow.toml")):
+        return set()
+    for path in paths:
+        if path in NEIGHBOR_BOOTSTRAP_EXACT_PATHS:
+            continue
+        if any(path.startswith(prefix) for prefix in NEIGHBOR_BOOTSTRAP_ALLOWED_PREFIXES):
+            continue
+        return set()
+    state_path = _hook_route_file_path(inventory, "project/project-state.md")
+    if state_path is None:
+        return set()
+    try:
+        frontmatter = parse_frontmatter(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return set()
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return set()
+    data = frontmatter.data
+    return paths if str(data.get("plan_status") or "").strip().casefold() == "none" else set()
+
+
+def _normalized_delegated_neighbor_exact_file_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    normalized: set[str] = set()
+    for path in paths:
+        rel = _hook_route_rel_path(inventory, path)
+        clean = _normalize_hook_path(rel).casefold() if rel else ""
+        if not clean or _delegated_neighbor_exact_path_blocked(clean):
+            return set()
+        route_path = _hook_route_file_path(inventory, clean)
+        if route_path is None:
+            return set()
+        try:
+            if not route_path.is_file() or route_path.is_symlink():
+                return set()
+        except (OSError, RuntimeError):
+            return set()
+        normalized.add(clean)
+    return normalized
+
+
+def _delegated_neighbor_exact_path_blocked(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    if rel in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+        return True
+    if any(char in rel for char in "*?[]"):
+        return True
+    if rel.startswith(":"):
+        return True
+    return any(rel.startswith(prefix) for prefix in NEIGHBOR_EXACT_STAGE_DISALLOWED_PREFIXES)
 
 
 def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
@@ -4463,7 +4576,8 @@ def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths:
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
         "post-closeout-route-package,worker-run-receipt-refs,verification/decision-evidence-package,"
         "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
-        "meta-feedback/incubation-blocker-notes"
+        "meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
+        "delegated-neighbor-bootstrap-scaffold"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
