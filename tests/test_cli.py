@@ -30521,6 +30521,80 @@ class CliTests(unittest.TestCase):
             self.assertFalse(commit_payload["block"])
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", commit_codes)
 
+    def test_hooks_pre_tool_allows_neighbor_forced_initial_scaffold_exact_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            (neighbor_root / ".gitignore").write_text(".mylittleharness/\n", encoding="utf-8")
+            (neighbor_root / ".mylittleharness").mkdir(parents=True, exist_ok=True)
+            (neighbor_root / ".mylittleharness/project-workflow.toml").write_text(
+                'workflow = "workflow-core"\nversion = 1\n',
+                encoding="utf-8",
+            )
+            (neighbor_root / ".codex/hooks").mkdir(parents=True, exist_ok=True)
+            (neighbor_root / ".codex/hooks.json").write_text("{}\n", encoding="utf-8")
+            (neighbor_root / ".codex/hooks/mylittleharness_session_start.py").write_text(
+                "# hook helper\n",
+                encoding="utf-8",
+            )
+            (neighbor_root / "project/roadmap.md").write_text("# Roadmap\n", encoding="utf-8")
+            (neighbor_root / "project/research").mkdir(parents=True, exist_ok=True)
+            (neighbor_root / "project/research/control-panel-context.md").write_text(
+                "# Control Panel Context\n",
+                encoding="utf-8",
+            )
+            checkpoint_paths = (
+                ".gitignore",
+                "AGENTS.md",
+                "README.md",
+                ".codex/hooks.json",
+                ".codex/hooks/mylittleharness_session_start.py",
+                ".mylittleharness/project-workflow.toml",
+                "project/project-state.md",
+                "project/roadmap.md",
+                "project/research/control-panel-context.md",
+                "project/specs/workflow/workflow-plan-synthesis-spec.md",
+            )
+            stage_paths = " ".join(checkpoint_paths)
+            cases = {
+                "workdir_short_force": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": "git add -f -- " + stage_paths,
+                },
+                "git_c_long_force": {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{neighbor_root}" add --force -- ' + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("initial scaffold packages", messages)
+
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{neighbor_root}" commit -m "Bootstrap control panel context"',
+                }
+            )
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=checkpoint_paths):
+                commit_payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", commit_codes)
+
     def test_hooks_pre_tool_blocks_neighbor_exact_target_unsafe_checkpoint_forms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -30530,6 +30604,7 @@ class CliTests(unittest.TestCase):
             for rel in (
                 "tools/angrycsv/operator_site.py",
                 ".mylittleharness/generated/context-memory/latest.json",
+                ".mylittleharness/project-workflow.toml",
                 "data/private/export.csv",
                 "project/archive/plans/reviewed-route-evidence.md",
             ):
@@ -30543,6 +30618,13 @@ class CliTests(unittest.TestCase):
                 "generated_cache": f'git -C "{neighbor_root}" add -- .mylittleharness/generated/context-memory/latest.json',
                 "private_data": f'git -C "{neighbor_root}" add -- data/private/export.csv',
                 "incoherent_lifecycle": f'git -C "{neighbor_root}" add -- project/project-state.md',
+                "force_broad_add": f'git -C "{neighbor_root}" add -f -- .',
+                "force_generated_cache": (
+                    f'git -C "{neighbor_root}" add -f -- .mylittleharness/generated/context-memory/latest.json'
+                ),
+                "force_bootstrap_manifest_alone": (
+                    f'git -C "{neighbor_root}" add -f -- .mylittleharness/project-workflow.toml'
+                ),
                 "mixed_source_and_project_evidence": (
                     f'git -C "{neighbor_root}" add -- '
                     "tools/angrycsv/operator_site.py project/archive/plans/reviewed-route-evidence.md"

@@ -370,6 +370,7 @@ POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS = {
     "-p",
 }
 POST_CLOSEOUT_STAGE_BROAD_PATHS = {".", "./", "*", ":/", ":/."}
+GIT_STAGE_EXACT_PATHSPEC_OPTIONS = {"-f", "--force"}
 POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES = (
     ".git/",
     ".mylittleharness/generated/",
@@ -4872,6 +4873,8 @@ def _git_stage_pathspecs(command: str) -> list[str]:
             option_mode = False
             continue
         if option_mode and clean.startswith("-"):
+            if clean in GIT_STAGE_EXACT_PATHSPEC_OPTIONS:
+                continue
             return []
         pathspecs.append(clean)
     return pathspecs
