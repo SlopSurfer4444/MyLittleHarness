@@ -30416,6 +30416,63 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", commit_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
 
+    def test_hooks_pre_tool_allows_neighbor_exact_project_evidence_staging_and_commit(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            checkpoint_paths = (
+                "project/archive/plans/2026-05-31-likeavto-youtube-automation-runner-and-transcript-backed-post-context-store.md",
+                "project/archive/reference/incubation/2026-05-31-likeavto-automatic-social-post-ingestion-and-audio-transcription-pipeline.md",
+                "project/plan-incubation/likeavto-youtube-automation-production-path-2026-05-28.md",
+                "project/research/angryspace-native-auto-rules-ui-inspection-2026-05-20.md",
+                "project/verification/handoffs/likeavto-youtube-automation.json",
+                "project/verification/work-claims/likeavto-youtube-automation.json",
+            )
+            for rel in checkpoint_paths:
+                path = neighbor_root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# reviewed project evidence\n", encoding="utf-8")
+            stage_paths = " ".join(checkpoint_paths)
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": "git add -- " + stage_paths,
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{neighbor_root}" add -- ' + stage_paths,
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("project evidence/reference routes", messages)
+
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{neighbor_root}" commit -F reviewed-message.txt',
+                }
+            )
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=checkpoint_paths):
+                commit_payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", commit_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
+
     def test_hooks_pre_tool_allows_neighbor_initial_scaffold_package_staging_and_commit(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -30474,6 +30531,7 @@ class CliTests(unittest.TestCase):
                 "tools/angrycsv/operator_site.py",
                 ".mylittleharness/generated/context-memory/latest.json",
                 "data/private/export.csv",
+                "project/archive/plans/reviewed-route-evidence.md",
             ):
                 path = neighbor_root / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -30481,9 +30539,14 @@ class CliTests(unittest.TestCase):
             cases = {
                 "wildcard": f'git -C "{neighbor_root}" add -- tools/angrycsv/*.py',
                 "directory": f'git -C "{neighbor_root}" add -- tools/angrycsv',
+                "project_archive_directory": f'git -C "{neighbor_root}" add -- project/archive/plans',
                 "generated_cache": f'git -C "{neighbor_root}" add -- .mylittleharness/generated/context-memory/latest.json',
                 "private_data": f'git -C "{neighbor_root}" add -- data/private/export.csv',
                 "incoherent_lifecycle": f'git -C "{neighbor_root}" add -- project/project-state.md',
+                "mixed_source_and_project_evidence": (
+                    f'git -C "{neighbor_root}" add -- '
+                    "tools/angrycsv/operator_site.py project/archive/plans/reviewed-route-evidence.md"
+                ),
             }
 
             for name, command in cases.items():

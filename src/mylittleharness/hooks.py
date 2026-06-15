@@ -397,6 +397,17 @@ NEIGHBOR_EXACT_STAGE_DISALLOWED_PREFIXES = POST_CLOSEOUT_STAGE_DISALLOWED_PREFIX
     "pytest-cache-files-",
     "tmp-pytest-",
 )
+NEIGHBOR_PROJECT_EVIDENCE_EXACT_ALLOWED_PREFIXES = (
+    "project/archive/",
+    "project/research/",
+    "project/verification/",
+)
+NEIGHBOR_PROJECT_EVIDENCE_EXACT_INCUBATION_PREFIX = "project/plan-incubation/"
+NEIGHBOR_PROJECT_EVIDENCE_EXACT_CORE_PATHS = {
+    "project/implementation-plan.md",
+    "project/project-state.md",
+    "project/roadmap.md",
+}
 NEIGHBOR_BOOTSTRAP_EXACT_PATHS = {
     ".codex/hooks.json",
     ".codex/hooks/mylittleharness_session_start.py",
@@ -1811,7 +1822,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
                     "files in the actual command workdir/root, including deferred research/archive route packages, "
                     "memory-hygiene/archive-reference-package and post-closeout lifecycle route packages, "
-                    "delegated neighbor-root exact eligible file sets and initial scaffold packages, "
+                    "delegated neighbor-root exact eligible file sets, project evidence/reference routes, "
+                    "and initial scaffold packages, "
                     "meta-feedback/incubation blocker notes, "
                     "and reviewed decision-backed verification evidence packages; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
@@ -3885,9 +3897,39 @@ def _coherent_delegated_neighbor_exact_file_checkpoint_paths(
     bootstrap_paths = _coherent_delegated_neighbor_bootstrap_checkpoint_paths(inventory, normalized)
     if bootstrap_paths:
         return bootstrap_paths
+    project_paths = _coherent_delegated_neighbor_project_evidence_checkpoint_paths(normalized)
+    if project_paths:
+        return project_paths
     if any(_is_lifecycle_route_path(path) or path.startswith("project/") for path in normalized):
         return set()
     return normalized
+
+
+def _coherent_delegated_neighbor_project_evidence_checkpoint_paths(paths: set[str]) -> set[str]:
+    project_paths = {path for path in paths if path.startswith("project/")}
+    if not project_paths:
+        return set()
+    if project_paths != paths:
+        return set()
+    if project_paths & NEIGHBOR_PROJECT_EVIDENCE_EXACT_CORE_PATHS:
+        return set()
+    if not all(_delegated_neighbor_project_evidence_path_allowed(path) for path in project_paths):
+        return set()
+    incubation_paths = {
+        path
+        for path in project_paths
+        if path.startswith(NEIGHBOR_PROJECT_EVIDENCE_EXACT_INCUBATION_PREFIX)
+    }
+    if incubation_paths and incubation_paths == project_paths:
+        return set()
+    return project_paths
+
+
+def _delegated_neighbor_project_evidence_path_allowed(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    if any(rel.startswith(prefix) for prefix in NEIGHBOR_PROJECT_EVIDENCE_EXACT_ALLOWED_PREFIXES):
+        return True
+    return rel.startswith(NEIGHBOR_PROJECT_EVIDENCE_EXACT_INCUBATION_PREFIX)
 
 
 def _coherent_delegated_neighbor_bootstrap_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
