@@ -2535,7 +2535,7 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "projection-cache-status",
             (
-                f"generated projection cache: artifacts={artifact_status}; sqlite_index={index_status}; "
+                f"disposable generated projection cache: artifacts={artifact_status}; sqlite_index={index_status}; "
                 f"detail={reason}; source files and the in-memory projection remain authoritative"
             ),
             ARTIFACT_DIR_REL,
@@ -2544,7 +2544,7 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "projection-cache-posture",
             (
-                f"structured cache posture: artifacts={artifact_status}; sqlite_index={index_status}; "
+                f"structured disposable cache posture: artifacts={artifact_status}; sqlite_index={index_status}; "
                 f"detail={reason}; refresh_by_adapter=false; next_safe={refresh_commands}"
             ),
             ARTIFACT_DIR_REL,
@@ -2553,7 +2553,7 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "projection-cache-read-only",
             (
-                "check inspects projection freshness without refreshing generated artifacts or SQLite indexes; "
+                "check inspects disposable projection freshness without refreshing generated artifacts or SQLite indexes; "
                 "intelligence path/full-text navigation may refresh the disposable cache when a query needs it"
             ),
             ARTIFACT_DIR_REL,

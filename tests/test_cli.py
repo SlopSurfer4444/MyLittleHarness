@@ -1795,7 +1795,7 @@ class CliTests(unittest.TestCase):
             stale_rendered = stale_output.getvalue()
             self.assertIn("artifacts=stale", stale_rendered)
             self.assertIn("sqlite_index=stale", stale_rendered)
-            self.assertIn("check inspects projection freshness without refreshing", stale_rendered)
+            self.assertIn("check inspects disposable projection freshness without refreshing", stale_rendered)
             self.assertNotIn("projection-artifact-stale,projection-artifact-stale", stale_rendered)
             self.assertNotIn("projection-index-hash,projection-index-hash", stale_rendered)
 
@@ -29687,6 +29687,58 @@ class CliTests(unittest.TestCase):
                 "hooks-policy-block-product-root-path",
                 {finding["code"] for finding in payload["findings"]},
             )
+
+    def test_hooks_pre_tool_allows_read_only_product_source_mlh_inspection(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            root_option_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": f"mylittleharness --root {product_root} check --quick --json",
+                }
+            )
+            workdir_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "mylittleharness check --quick --json",
+                }
+            )
+            repair_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": f"mylittleharness --root {product_root} repair --apply",
+                }
+            )
+            projection_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": f"mylittleharness --root {product_root} projection --warm-cache --target all",
+                }
+            )
+
+            root_option_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], root_option_input)
+            workdir_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], workdir_input)
+            repair_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], repair_input)
+            projection_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], projection_input)
+
+            for checked_payload in (root_option_payload, workdir_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-read-only-product-source-inspection", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+
+            for checked_payload in (repair_payload, projection_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertTrue(checked_payload["block"])
+                self.assertIn("hooks-policy-block-product-root-mlh-mutation", finding_codes)
+                self.assertNotIn("hooks-policy-allow-read-only-product-source-inspection", finding_codes)
 
     def test_hooks_pre_tool_allows_read_only_product_source_python_smoke(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

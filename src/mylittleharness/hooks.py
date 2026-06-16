@@ -118,6 +118,28 @@ READ_ONLY_SOURCE_DISCOVERY_PREFIX_TOKENS = {
     "while",
 }
 READ_ONLY_PRODUCT_SOURCE_SMOKE_COMMANDS = {"dashboard", "task-session"}
+READ_ONLY_PRODUCT_SOURCE_INSPECTION_COMMANDS = {
+    "audit-links",
+    "check",
+    "context-budget",
+    "dashboard",
+    "doctor",
+    "manifest",
+    "preflight",
+    "status",
+    "validate",
+}
+READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS = {
+    "--apply",
+    "--build",
+    "--delete",
+    "--install-client-config",
+    "--rebuild",
+    "--record",
+    "--serve",
+    "--warm-cache",
+}
+PRODUCT_SOURCE_ROOT_MUTATING_MLH_TOKENS = READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS
 READ_ONLY_PRODUCT_SOURCE_SMOKE_FORBIDDEN_MARKERS = (
     "--apply",
     "--build",
@@ -1543,6 +1565,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     ]
     allow_read_only_product_source_smoke = _is_read_only_product_source_smoke_command(inventory, command)
+    allow_read_only_product_source_inspection = _is_read_only_product_source_inspection_command(inventory, data, command)
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(data))
@@ -1551,6 +1574,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         or _is_read_only_git_inspection_command(command)
         or _is_bounded_mlh_read_tool_request(data)
         or allow_read_only_product_source_smoke
+        or allow_read_only_product_source_inspection
         or allow_read_only_subagent_delegation
         or allow_reviewed_local_vcs_delegation
     )
@@ -1617,6 +1641,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         reviewed_local_vcs_checkpoint_paths=set(reviewed_local_vcs_checkpoint.paths),
     ):
         findings.append(finding)
+    if _is_product_source_root_mlh_mutation_command(inventory, data, command):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-product-root-mlh-mutation",
+                (
+                    "blocked mutating MLH command targeting the configured product_source_root from an "
+                    "operating-root hook context; run read-only inspection here, and perform product-source "
+                    "mutation only through an explicit owning workflow"
+                ),
+                paths[0] if paths else None,
+            )
+        )
     if _looks_like_opaque_shell_payload(command):
         findings.append(
             Finding(
@@ -1885,6 +1922,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed read-only Python smoke importing configured product_source_root for MLH inspect JSON; "
                     "writes, apply/rebuild/cache/runtime launch, lifecycle mutation, and Git mutation remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_read_only_product_source_inspection and any(_is_under_configured_product_root(inventory, path) for path in paths):
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-product-source-inspection",
+                (
+                    "allowed read-only MLH inspection of configured product_source_root; report output is advisory "
+                    "and writes, apply/build/rebuild/cache/server actions, lifecycle mutation, and Git mutation remain blocked"
                 ),
                 paths[0] if paths else None,
             )
@@ -3299,6 +3348,63 @@ def _is_read_only_product_source_smoke_command(inventory: Inventory, command: st
     if _is_python_mlh_module_inspect_command(command):
         return True
     return any(_python_inline_payload_is_read_only_mlh_inspect(payload) for payload in _python_inline_payloads(command))
+
+
+def _is_read_only_product_source_inspection_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is None:
+        return False
+    if _looks_like_write_command(command):
+        return False
+    policy_command = _mlh_policy_command(command)
+    if _has_unresolved_mlh_splat_invocation(command):
+        return False
+    subcommand = _mlh_cli_subcommand(policy_command.casefold())
+    if subcommand not in READ_ONLY_PRODUCT_SOURCE_INSPECTION_COMMANDS:
+        return False
+    tokens = _mlh_command_token_set(policy_command)
+    if tokens.intersection(READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS):
+        return False
+    selected_root = _mlh_root_option_resolved_path(inventory, policy_command)
+    if selected_root is None:
+        selected_root = _hook_command_workdir_path(inventory, data)
+    return selected_root is not None and _same_resolved_path(selected_root, product_root)
+
+
+def _is_product_source_root_mlh_mutation_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is None:
+        return False
+    policy_command = _mlh_policy_command(command)
+    if _has_unresolved_mlh_splat_invocation(command):
+        return False
+    if not _mlh_cli_subcommand(policy_command.casefold()):
+        return False
+    selected_root = _mlh_root_option_resolved_path(inventory, policy_command)
+    if selected_root is None:
+        selected_root = _hook_command_workdir_path(inventory, data)
+    if selected_root is None or not _same_resolved_path(selected_root, product_root):
+        return False
+    return bool(_mlh_command_token_set(policy_command).intersection(PRODUCT_SOURCE_ROOT_MUTATING_MLH_TOKENS))
+
+
+def _mlh_root_option_resolved_path(inventory: Inventory, command: str) -> Path | None:
+    tokens = _shell_tokens(_mlh_policy_command(command))
+    for index, token in enumerate(tokens):
+        clean = _clean_token(token)
+        if clean == "--root" and index + 1 < len(tokens):
+            return _resolve_path_token_from_base(tokens[index + 1], inventory.root)
+        if clean.startswith("--root="):
+            raw = str(token).split("=", 1)[1]
+            return _resolve_path_token_from_base(raw, inventory.root)
+    return None
+
+
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _command_has_python_executable(command: str) -> bool:
