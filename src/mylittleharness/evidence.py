@@ -59,6 +59,8 @@ AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
+CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL = "project/verification/checkpoint-packages"
+CHECKPOINT_PACKAGE_RECEIPT_SCHEMA = "mylittleharness.checkpoint-package-receipt.v1"
 RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA = "mylittleharness.runtime-guard-preflight-receipt.v1"
 CHECKPOINT_RESUME_RECEIPT_SCHEMA = "mylittleharness.checkpoint-resume-receipt.v1"
 CHILD_AGENT_FANOUT_RECEIPT_SCHEMA = "mylittleharness.child-agent-fanout-receipt.v1"
@@ -72,6 +74,7 @@ COORDINATION_RECORD_DIRS = (
     "project/verification/handoffs",
     "project/verification/session-active-work",
     WORKER_RUN_RECEIPTS_DIR_REL,
+    CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL,
 )
 AGENT_RUN_REQUIRED_SCALARS = (
     "schema",
@@ -99,6 +102,60 @@ AGENT_RUN_STATUSES = {
     "needs-human-review",
 }
 AGENT_RUN_DOCS_DECISIONS = {"updated", "not-needed", "uncertain"}
+CHECKPOINT_PACKAGE_RECEIPT_REQUIRED_SCALARS = (
+    "schema",
+    "record_type",
+    "package_id",
+    "target_root",
+    "package_class",
+    "verdict",
+    "non_authority",
+    "docs_decision",
+    "residual_risk",
+)
+CHECKPOINT_PACKAGE_RECEIPT_REQUIRED_LISTS = (
+    "included_paths",
+    "verification_refs",
+    "source_hashes",
+)
+CHECKPOINT_PACKAGE_RECEIPT_PACKAGE_CLASSES = {
+    "post-closeout-route-package",
+    "deferred-research-archive-package",
+    "worker-run-receipt-refs",
+    "verification-decision-evidence-package",
+    "memory-hygiene-archive-reference-package",
+    "meta-feedback-package",
+    "agent-run-evidence",
+    "initial-scaffold-package",
+    "other-reviewed",
+    "unknown",
+}
+CHECKPOINT_PACKAGE_RECEIPT_VERDICTS = {"allowed", "blocked", "unknown"}
+CHECKPOINT_PACKAGE_RECEIPT_EXACT_REF_FIELDS = (
+    "included_paths",
+    "skipped_paths",
+)
+CHECKPOINT_PACKAGE_RECEIPT_REF_FIELDS = (
+    *CHECKPOINT_PACKAGE_RECEIPT_EXACT_REF_FIELDS,
+    "verification_refs",
+    "evidence_refs",
+    "decision_refs",
+    "route_anchor_refs",
+    "receipt_refs",
+    "missing_anchor_refs",
+)
+CHECKPOINT_PACKAGE_RECEIPT_PROHIBITED_INCLUDED_PREFIXES = (
+    ".git/",
+    ".mylittleharness/generated/",
+    ".mylittleharness/runtime/",
+    "project/cache/",
+    "project/generated/",
+    "project/private/",
+    "project/scratch/",
+    "project/secrets/",
+    "project/temp/",
+    "project/tmp/",
+)
 WORKER_RUN_RECEIPT_REQUIRED_SCALARS = (
     "schema",
     "record_type",
@@ -292,6 +349,28 @@ WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS = (
     "signature_approves_lifecycle",
     "hmac_authoritative",
     "hmac_approves_lifecycle",
+)
+CHECKPOINT_PACKAGE_RECEIPT_FALSE_AUTHORITY_FIELDS = WORKER_RUN_RECEIPT_FALSE_AUTHORITY_FIELDS + (
+    "approves_checkpoint",
+    "approves_local_checkpoint",
+    "approves_staging",
+    "approves_commit",
+    "staging_approved",
+    "staging_authorized",
+    "commit_approved",
+    "commit_authorized",
+    "checkpoint_package_authoritative",
+    "checkpoint_package_approves_lifecycle",
+    "checkpoint_package_approves_git",
+    "checkpoint_package_approves_commit",
+    "checkpoint_package_approves_staging",
+    "package_checkpoint_approves_lifecycle",
+    "package_approves_lifecycle",
+    "package_approves_archive",
+    "package_approves_commit",
+    "package_approves_staging",
+    "local_checkpoint_approved",
+    "local_checkpoint_authorized",
 )
 WORKER_RUN_RECEIPT_EVENT_HISTORY_REDACTION_STATUSES = {
     "none",
@@ -1217,6 +1296,65 @@ def worker_run_receipt_findings(inventory: Inventory, code_prefix: str = "worker
     return findings
 
 
+def checkpoint_package_receipt_findings(inventory: Inventory, code_prefix: str = "checkpoint-package-receipt") -> list[Finding]:
+    code = f"{code_prefix}-record"
+    if inventory.root_kind != "live_operating_root":
+        return [
+            Finding(
+                "info",
+                code,
+                "checkpoint package receipt scan is live-root only; product fixtures and archive roots remain non-authority context",
+                inventory.state.rel_path if inventory.state and inventory.state.exists else None,
+            )
+        ]
+
+    paths = _checkpoint_package_receipt_paths(inventory.root)
+    if not paths:
+        return [
+            Finding(
+                "info",
+                code,
+                "no checkpoint package receipts found at project/verification/checkpoint-packages/*.json; receipts are optional evidence until a checkpoint package report exists",
+            ),
+            *_checkpoint_package_receipt_boundary_findings(code_prefix),
+        ]
+
+    findings: list[Finding] = []
+    for path in paths:
+        rel_path = _to_rel_path(inventory.root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", f"{code}-malformed", "checkpoint package receipt path is not a regular file", rel_path))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            findings.append(Finding("warn", f"{code}-malformed", f"checkpoint package receipt could not be read as JSON: {exc}", rel_path))
+            continue
+        if not isinstance(data, dict):
+            findings.append(Finding("warn", f"{code}-malformed", "checkpoint package receipt JSON root must be an object", rel_path))
+            continue
+
+        package_id = str(data.get("package_id") or "").strip() or "<missing>"
+        package_class = str(data.get("package_class") or "").strip() or "<missing>"
+        verdict = str(data.get("verdict") or "").strip() or "<missing>"
+        findings.append(
+            Finding(
+                "info",
+                code,
+                (
+                    f"candidate: checkpoint package receipt: {rel_path}; package_id={package_id}; "
+                    f"package_class={package_class}; verdict={verdict}; repo-visible checkpoint evidence only"
+                ),
+                rel_path,
+            )
+        )
+        findings.extend(_checkpoint_package_receipt_metadata_findings(inventory.root, rel_path, path.stem, data, code_prefix))
+        findings.extend(_checkpoint_package_receipt_source_hash_findings(inventory.root, rel_path, data, code_prefix))
+
+    findings.extend(_checkpoint_package_receipt_boundary_findings(code_prefix))
+    return findings
+
+
 def lifecycle_mutation_provenance_findings(inventory: Inventory, code_prefix: str = "lifecycle-provenance") -> list[Finding]:
     state = inventory.state
     state_source = state.rel_path if state and state.exists else "project/project-state.md"
@@ -1322,6 +1460,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(durable_proof_record_findings(inventory, "evidence"))
     findings.extend(agent_run_record_findings(inventory, "evidence-agent-run"))
     findings.extend(worker_run_receipt_findings(inventory, "evidence-worker-run-receipt"))
+    findings.extend(checkpoint_package_receipt_findings(inventory, "evidence-checkpoint-package-receipt"))
     findings.extend(_source_set_findings(active_plan, inventory))
     findings.extend(_anchor_findings(active_plan, inventory))
     findings.extend(_identity_findings(active_plan))
@@ -1959,6 +2098,228 @@ def _agent_run_route_proposal_findings(rel_path: str, data: dict[str, object], c
             rel_path,
         )
     )
+    return findings
+
+
+def _checkpoint_package_receipt_metadata_findings(
+    root: Path,
+    rel_path: str,
+    filename_stem: str,
+    data: dict[str, object],
+    code_prefix: str,
+) -> list[Finding]:
+    code = f"{code_prefix}-record-malformed"
+    findings: list[Finding] = []
+    for field in CHECKPOINT_PACKAGE_RECEIPT_REQUIRED_SCALARS:
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            findings.append(Finding("warn", code, f"checkpoint package receipt missing required field: {field}", rel_path))
+    for field in CHECKPOINT_PACKAGE_RECEIPT_REQUIRED_LISTS:
+        if not _frontmatter_string_list(data.get(field)):
+            findings.append(Finding("warn", code, f"checkpoint package receipt missing required list field: {field}", rel_path))
+
+    if data.get("schema") != CHECKPOINT_PACKAGE_RECEIPT_SCHEMA:
+        findings.append(Finding("warn", code, f"checkpoint package receipt schema should be {CHECKPOINT_PACKAGE_RECEIPT_SCHEMA}", rel_path))
+    if data.get("record_type") != "checkpoint-package-receipt":
+        findings.append(Finding("warn", code, "checkpoint package receipt record_type should be checkpoint-package-receipt", rel_path))
+
+    package_id = str(data.get("package_id") or "").strip()
+    if package_id and not RECORD_ID_RE.match(package_id):
+        findings.append(Finding("warn", code, "checkpoint package receipt package_id may contain only letters, digits, dot, underscore, or dash", rel_path))
+    elif package_id and record_id_conflict(package_id):
+        findings.append(Finding("warn", code, f"checkpoint package receipt package_id {record_id_conflict(package_id)}", rel_path))
+    if package_id and package_id != filename_stem:
+        findings.append(Finding("warn", code, f"checkpoint package receipt filename stem {filename_stem} does not match package_id {package_id}", rel_path))
+
+    package_class = str(data.get("package_class") or "").strip()
+    if package_class and package_class not in CHECKPOINT_PACKAGE_RECEIPT_PACKAGE_CLASSES:
+        findings.append(Finding("warn", f"{code_prefix}-package-class", f"checkpoint package receipt package_class must use the checkpoint package namespace: {package_class}", rel_path))
+
+    verdict = str(data.get("verdict") or "").strip()
+    if verdict and verdict not in CHECKPOINT_PACKAGE_RECEIPT_VERDICTS:
+        findings.append(Finding("warn", f"{code_prefix}-verdict", f"checkpoint package receipt verdict must use the checkpoint package verdict namespace: {verdict}", rel_path))
+
+    docs_decision = str(data.get("docs_decision") or "").strip()
+    if docs_decision and docs_decision not in AGENT_RUN_DOCS_DECISIONS:
+        findings.append(Finding("warn", f"{code_prefix}-docs-decision", f"checkpoint package receipt docs_decision is unsupported: {docs_decision}", rel_path))
+
+    summary = data.get("summary")
+    if summary not in (None, "") and not isinstance(summary, str):
+        findings.append(Finding("warn", f"{code_prefix}-authority-boundary", "checkpoint package receipt summary must be a string when present", rel_path))
+    elif isinstance(summary, str) and _checkpoint_package_receipt_authority_claim(summary):
+        findings.append(Finding("warn", f"{code_prefix}-authority-boundary", "checkpoint package receipt summary must not claim checkpoint package approval, lifecycle, Git, staging, commit, provider, release, or external authority", rel_path))
+
+    findings.extend(_checkpoint_package_receipt_non_authority_findings(rel_path, data, code_prefix))
+    for field in CHECKPOINT_PACKAGE_RECEIPT_REF_FIELDS:
+        findings.extend(
+            _checkpoint_package_receipt_ref_list_findings(
+                root,
+                rel_path,
+                field,
+                data.get(field),
+                code,
+                exact_file=field in CHECKPOINT_PACKAGE_RECEIPT_EXACT_REF_FIELDS,
+                require_existing=field == "included_paths",
+            )
+        )
+
+    classifier = data.get("classifier")
+    findings.extend(_checkpoint_package_receipt_container_findings(rel_path, "classifier", classifier, code_prefix))
+    if verdict == "allowed":
+        hashed_paths = _checkpoint_package_receipt_source_hash_paths(data)
+        for included_path in _frontmatter_string_list(data.get("included_paths")):
+            if included_path not in hashed_paths:
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-record-malformed",
+                        f"checkpoint package receipt source_hashes must include included path: {included_path}",
+                        rel_path,
+                    )
+                )
+    elif verdict == "blocked":
+        missing_reasons = _frontmatter_string_list(data.get("missing_reasons"))
+        missing_refs = _frontmatter_string_list(data.get("missing_anchor_refs"))
+        if not missing_reasons and not missing_refs:
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-record-malformed",
+                    "blocked checkpoint package receipt should name missing_anchor_refs or missing_reasons",
+                    rel_path,
+                )
+            )
+    return findings
+
+
+def _checkpoint_package_receipt_non_authority_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    findings: list[Finding] = []
+    label = str(data.get("non_authority") or "").strip().casefold()
+    has_source_label = "checkpoint" in label or "package" in label
+    has_non_authority = "evidence" in label and any(
+        token in label for token in ("only", "non-authority", "non-authoritative", "cannot", "not authority")
+    )
+    if label and (not has_source_label or not has_non_authority):
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-authority-boundary",
+                "checkpoint package receipt non_authority must explicitly label checkpoint/package evidence as evidence-only and non-authoritative",
+                rel_path,
+            )
+        )
+    for field in CHECKPOINT_PACKAGE_RECEIPT_FALSE_AUTHORITY_FIELDS:
+        if _worker_run_receipt_truthy(data.get(field)):
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-authority-boundary",
+                    f"checkpoint package receipt {field} must remain false; checkpoint packages cannot approve lifecycle, Git, staging, commit, release, or provider authority",
+                    rel_path,
+                )
+            )
+    authority = data.get("authority")
+    if isinstance(authority, dict):
+        for field in CHECKPOINT_PACKAGE_RECEIPT_FALSE_AUTHORITY_FIELDS:
+            if _worker_run_receipt_truthy(authority.get(field)):
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-authority-boundary",
+                        f"checkpoint package receipt authority.{field} must remain false; checkpoint packages are evidence only",
+                        rel_path,
+                    )
+                )
+    elif authority not in (None, ""):
+        findings.append(Finding("warn", f"{code_prefix}-authority-boundary", "checkpoint package receipt authority must be an object when present", rel_path))
+    return findings
+
+
+def _checkpoint_package_receipt_container_findings(rel_path: str, label: str, value: object, code_prefix: str) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, dict):
+        return [Finding("warn", f"{code_prefix}-record-malformed", f"checkpoint package receipt {label} must be an object when present", rel_path)]
+    findings: list[Finding] = []
+    for authority_field in CHECKPOINT_PACKAGE_RECEIPT_FALSE_AUTHORITY_FIELDS:
+        if _worker_run_receipt_truthy(value.get(authority_field)):
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-authority-boundary",
+                    f"checkpoint package receipt {label}.{authority_field} must remain false; checkpoint package classifier data is evidence only",
+                    rel_path,
+                )
+            )
+    authority = value.get("authority")
+    if isinstance(authority, dict):
+        for authority_field in CHECKPOINT_PACKAGE_RECEIPT_FALSE_AUTHORITY_FIELDS:
+            if _worker_run_receipt_truthy(authority.get(authority_field)):
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-authority-boundary",
+                        f"checkpoint package receipt {label}.authority.{authority_field} must remain false; checkpoint package classifier data is evidence only",
+                        rel_path,
+                    )
+                )
+    elif authority not in (None, ""):
+        findings.append(Finding("warn", f"{code_prefix}-authority-boundary", f"checkpoint package receipt {label}.authority must be an object when present", rel_path))
+    summary = value.get("summary")
+    if isinstance(summary, str) and _checkpoint_package_receipt_authority_claim(summary):
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-authority-boundary",
+                f"checkpoint package receipt {label}.summary must not claim checkpoint package approval, lifecycle, Git, staging, commit, provider, release, or external authority",
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _checkpoint_package_receipt_ref_list_findings(
+    root: Path,
+    rel_path: str,
+    field: str,
+    value: object,
+    code: str,
+    *,
+    exact_file: bool = False,
+    require_existing: bool = False,
+) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    refs = _frontmatter_string_list(value)
+    if not refs:
+        return [Finding("warn", code, f"checkpoint package receipt {field} must be a string or list of strings when present", rel_path)]
+    findings: list[Finding] = []
+    for ref in refs:
+        normalized = ref.replace("\\", "/")
+        conflict = _root_relative_path_conflict(ref)
+        if conflict:
+            findings.append(Finding("warn", code, f"checkpoint package receipt {field} path {conflict}: {ref}", rel_path))
+            continue
+        target = root / ref
+        boundary_violation = source_path_boundary_violation(root, target, label=f"checkpoint package receipt {field}")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", code, boundary_violation.message, rel_path))
+            continue
+        if not exact_file:
+            continue
+        if any(char in ref for char in "*?[]"):
+            findings.append(Finding("warn", code, f"checkpoint package receipt {field} path must not contain wildcard: {ref}", rel_path))
+        if any(normalized.casefold().startswith(prefix) for prefix in CHECKPOINT_PACKAGE_RECEIPT_PROHIBITED_INCLUDED_PREFIXES):
+            findings.append(Finding("warn", code, f"checkpoint package receipt {field} path must not target generated, cache, private, secret, temp, runtime, or VCS files: {ref}", rel_path))
+        if target.exists():
+            if target.is_symlink():
+                findings.append(Finding("warn", code, f"checkpoint package receipt {field} path must not be a symlink: {ref}", rel_path))
+            elif target.is_dir():
+                findings.append(Finding("warn", code, f"checkpoint package receipt {field} path must name exact file, not directory: {ref}", rel_path))
+            elif not target.is_file():
+                findings.append(Finding("warn", code, f"checkpoint package receipt {field} path must name exact regular file: {ref}", rel_path))
+        elif require_existing:
+            findings.append(Finding("warn", code, f"checkpoint package receipt {field} target is missing: {ref}", rel_path))
     return findings
 
 
@@ -3290,6 +3651,84 @@ def _worker_run_receipt_private_trace_authority_claim(value: str) -> bool:
     return has_trace_source and has_authority
 
 
+def _checkpoint_package_receipt_authority_claim(value: str) -> bool:
+    text = " ".join(value.casefold().split())
+    if any(token in text for token in WORKER_RUN_RECEIPT_EVENT_HISTORY_NEGATION_TOKENS):
+        return False
+    targets = (
+        *WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_TARGETS,
+        "checkpoint",
+        "checkpoint package",
+        "package",
+        "local checkpoint",
+        "evidence package",
+    )
+    return any(verb in text for verb in WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_VERBS) and any(target in text for target in targets)
+
+
+def _checkpoint_package_receipt_source_hash_paths(data: dict[str, object]) -> set[str]:
+    paths: set[str] = set()
+    for entry in _frontmatter_string_list(data.get("source_hashes")):
+        match = SOURCE_HASH_RE.match(entry.strip())
+        if match:
+            paths.add(match.group(1).strip())
+    return paths
+
+
+def _checkpoint_package_receipt_source_hash_findings(root: Path, rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    code = f"{code_prefix}-record"
+    findings: list[Finding] = []
+    for entry in _frontmatter_string_list(data.get("source_hashes")):
+        match = SOURCE_HASH_RE.match(entry.strip())
+        if not match:
+            findings.append(Finding("warn", f"{code}-malformed", f"malformed source_hashes entry: {entry}", rel_path))
+            continue
+        source_rel = match.group(1).strip()
+        expected_hash = match.group(2)
+        expected_missing = bool(match.group(3))
+        expected_unreadable = bool(match.group(4))
+        expected_invalid = bool(match.group(5))
+        conflict = _root_relative_path_conflict(source_rel)
+        if conflict:
+            findings.append(Finding("warn", f"{code}-malformed", f"source hash path {conflict}: {source_rel}", rel_path))
+            continue
+        source_path = root / source_rel
+        boundary_violation = source_path_boundary_violation(root, source_path, label="checkpoint package receipt source hash target")
+        if boundary_violation is not None:
+            findings.append(Finding("warn", f"{code}-stale", boundary_violation.message, rel_path))
+            continue
+        if expected_missing:
+            if source_path.exists():
+                findings.append(Finding("warn", f"{code}-stale", f"source hash recorded missing path now exists: {source_rel}", rel_path))
+            continue
+        if expected_unreadable or expected_invalid:
+            findings.append(Finding("info", f"{code}-hash", f"source hash entry records {source_rel} as degraded evidence", rel_path))
+            continue
+        if not source_path.exists():
+            findings.append(Finding("warn", f"{code}-stale", f"source hash target is now missing: {source_rel}", rel_path))
+            continue
+        if not source_path.is_file():
+            findings.append(Finding("warn", f"{code}-stale", f"source hash target is no longer a regular file: {source_rel}", rel_path))
+            continue
+        try:
+            current_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            findings.append(Finding("warn", f"{code}-stale", f"source hash target is now unreadable: {source_rel}: {exc}", rel_path))
+            continue
+        if expected_hash and current_hash.lower() != expected_hash.lower():
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code}-stale",
+                    f"source hash mismatch for {source_rel}: expected={expected_hash[:12]} current={current_hash[:12]}",
+                    rel_path,
+                )
+            )
+        else:
+            findings.append(Finding("info", f"{code}-hash", f"source hash current for {source_rel}: {current_hash[:12]}", rel_path))
+    return findings
+
+
 def _worker_run_receipt_source_hash_findings(root: Path, rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
     code = f"{code_prefix}-record"
     findings: list[Finding] = []
@@ -3352,6 +3791,29 @@ def _worker_run_receipt_truthy(value: object) -> bool:
     if isinstance(value, list):
         return any(_worker_run_receipt_truthy(item) for item in value)
     return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "required", "enabled", "on", "approved"}
+
+
+def _checkpoint_package_receipt_boundary_findings(code_prefix: str = "checkpoint-package-receipt") -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-boundary",
+            "checkpoint package receipts are evidence only; allowed, blocked, or unknown verdicts cannot approve lifecycle, archive, roadmap status, staging, commit, push, release, provider routing, cleanup, or target-repo acceptance",
+            CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-route",
+            "checkpoint package receipts live under project/verification/checkpoint-packages/*.json and describe exact repo-visible files, skipped paths, verification refs, docs decision, and source hashes without creating Git or lifecycle authority",
+            CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-verdict",
+            "checkpoint package receipt verdicts are limited to allowed, blocked, or unknown and remain advisory evidence for operator review",
+            CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL,
+        ),
+    ]
 
 
 def _worker_run_receipt_boundary_findings(code_prefix: str = "worker-run-receipt") -> list[Finding]:
@@ -3497,6 +3959,13 @@ def _agent_run_record_paths(root: Path) -> list[Path]:
 
 def _worker_run_receipt_paths(root: Path) -> list[Path]:
     directory = root / WORKER_RUN_RECEIPTS_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return []
+    return sorted(directory.glob("*.json"))
+
+
+def _checkpoint_package_receipt_paths(root: Path) -> list[Path]:
+    directory = root / CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL
     if not directory.exists() or not directory.is_dir():
         return []
     return sorted(directory.glob("*.json"))

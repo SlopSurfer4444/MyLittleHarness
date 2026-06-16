@@ -7612,6 +7612,158 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("worker run receipt worker_worktree_session summary must not claim", rendered)
             self.assertNotIn("worker run receipt worker_worktree_session.authority.worktree_session_approves_lifecycle must remain false", rendered)
 
+    def test_evidence_reports_checkpoint_package_receipt_without_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/checkpoint-packages"
+            receipt_dir.mkdir(parents=True)
+            (root / "project/archive/plans").mkdir(parents=True, exist_ok=True)
+
+            (root / "project/research").mkdir(parents=True, exist_ok=True)
+
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+
+            archive_rel = "project/archive/plans/2026-06-16-finished-slice.md"
+            research_rel = "project/research/checkpoint-package-notes.md"
+            verification_rel = "project/verification/checkpoint-package-smoke.md"
+            (root / archive_rel).write_text("# Finished Slice\n\nArchived route package.\n", encoding="utf-8")
+            (root / research_rel).write_text("# Notes\n\nReviewed dependency-ready checkpoint package.\n", encoding="utf-8")
+            (root / verification_rel).write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            archive_hash = hashlib.sha256((root / archive_rel).read_bytes()).hexdigest()
+            research_hash = hashlib.sha256((root / research_rel).read_bytes()).hexdigest()
+            verification_hash = hashlib.sha256((root / verification_rel).read_bytes()).hexdigest()
+            (receipt_dir / "checkpoint-package-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.checkpoint-package-receipt.v1",
+                        "record_type": "checkpoint-package-receipt",
+                        "package_id": "checkpoint-package-1",
+                        "target_root": str(root),
+                        "package_class": "deferred-research-archive-package",
+                        "verdict": "allowed",
+                        "non_authority": "checkpoint package repo-visible evidence-only; cannot approve lifecycle, archive, roadmap, Git, staging, commit, release, provider routing, cleanup, or target-repo acceptance",
+                        "docs_decision": "not-needed",
+                        "residual_risk": "operator must still review before any manual Git checkpoint",
+                        "summary": "Checkpoint package records exact local files for operator review; no lifecycle authority.",
+                        "included_paths": [archive_rel, research_rel, verification_rel],
+                        "skipped_paths": ["project/plan-incubation/unrelated-future-note.md"],
+                        "verification_refs": [verification_rel],
+                        "source_hashes": [
+                            f"{archive_rel} sha256={archive_hash}",
+                            f"{research_rel} sha256={research_hash}",
+                            f"{verification_rel} sha256={verification_hash}",
+                        ],
+                        "classifier": {
+                            "summary": "Classifier evidence only; no Git or lifecycle authority.",
+                            "missing_reasons": [],
+                            "authority": {"package_approves_commit": False},
+                        },
+                        "authority": {
+                            "package_approves_lifecycle": False,
+                            "package_approves_commit": False,
+                            "checkpoint_package_approves_staging": False,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "evidence"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("candidate: checkpoint package receipt: project/verification/checkpoint-packages/checkpoint-package-1.json", rendered)
+            self.assertIn("package_id=checkpoint-package-1; package_class=deferred-research-archive-package; verdict=allowed", rendered)
+            self.assertIn(f"source hash current for {archive_rel}", rendered)
+            self.assertIn("checkpoint package receipts are evidence only", rendered)
+            self.assertIn("checkpoint package receipt verdicts are limited to allowed, blocked, or unknown", rendered)
+            self.assertNotIn("checkpoint package receipt missing required field", rendered)
+            self.assertNotIn("checkpoint package receipt missing required list field", rendered)
+            self.assertNotIn("checkpoint package receipt non_authority must explicitly label", rendered)
+            self.assertNotIn("checkpoint package receipt summary must not claim", rendered)
+            self.assertNotIn("checkpoint package receipt source_hashes must include included path", rendered)
+            self.assertNotIn("checkpoint package receipt authority.package_approves_lifecycle must remain false", rendered)
+
+    def test_evidence_warns_on_malformed_checkpoint_package_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/checkpoint-packages"
+            receipt_dir.mkdir(parents=True)
+            before = snapshot_tree_bytes(root)
+            (receipt_dir / "bad-package.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "wrong.schema",
+                        "record_type": "worker-run-receipt",
+                        "package_id": "bad-package",
+                        "target_root": str(root),
+                        "package_class": "auto-commit",
+                        "verdict": "committed",
+                        "non_authority": "approved",
+                        "docs_decision": "done",
+                        "residual_risk": "none",
+                        "summary": "checkpoint package approves lifecycle and commit",
+                        "included_paths": [
+                            "project",
+                            "../escape.md",
+                            "project/*.md",
+                            ".mylittleharness/generated/projection.json",
+                            "project/private/secret.md",
+                        ],
+                        "verification_refs": ["../escape.md"],
+                        "source_hashes": ["project/research/missing.md not-a-hash", "../escape.md missing"],
+                        "approves_commit": True,
+                        "authority": {"package_approves_lifecycle": True},
+                        "classifier": {
+                            "summary": "classifier approves staging and commit",
+                            "staging_authorized": True,
+                            "authority": {"checkpoint_package_approves_git": True},
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            after_write = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "evidence"]), 0)
+
+            self.assertNotEqual(before, after_write)
+            self.assertEqual(after_write, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("checkpoint package receipt schema should be mylittleharness.checkpoint-package-receipt.v1", rendered)
+            self.assertIn("checkpoint package receipt record_type should be checkpoint-package-receipt", rendered)
+            self.assertIn("checkpoint package receipt package_class must use the checkpoint package namespace: auto-commit", rendered)
+            self.assertIn("checkpoint package receipt verdict must use the checkpoint package verdict namespace: committed", rendered)
+            self.assertIn("checkpoint package receipt docs_decision is unsupported: done", rendered)
+            self.assertIn("checkpoint package receipt non_authority must explicitly label checkpoint/package evidence as evidence-only and non-authoritative", rendered)
+            self.assertIn("checkpoint package receipt summary must not claim checkpoint package approval", rendered)
+            self.assertIn("checkpoint package receipt approves_commit must remain false", rendered)
+            self.assertIn("checkpoint package receipt authority.package_approves_lifecycle must remain false", rendered)
+            self.assertIn("checkpoint package receipt classifier.staging_authorized must remain false", rendered)
+            self.assertIn("checkpoint package receipt classifier.authority.checkpoint_package_approves_git must remain false", rendered)
+            self.assertIn("checkpoint package receipt classifier.summary must not claim checkpoint package approval", rendered)
+            self.assertIn("checkpoint package receipt included_paths path must name exact file, not directory: project", rendered)
+            self.assertIn("checkpoint package receipt included_paths path must not contain parent traversal", rendered)
+
+            self.assertIn("checkpoint package receipt included_paths path must not contain wildcard: project/*.md", rendered)
+            self.assertIn("checkpoint package receipt included_paths path must not target generated, cache, private, secret, temp, runtime, or VCS files: .mylittleharness/generated/projection.json", rendered)
+            self.assertIn("checkpoint package receipt included_paths path must not target generated, cache, private, secret, temp, runtime, or VCS files: project/private/secret.md", rendered)
+            self.assertIn("checkpoint package receipt verification_refs path must not contain parent traversal", rendered)
+
+            self.assertIn("malformed source_hashes entry: project/research/missing.md not-a-hash", rendered)
+            self.assertIn("source hash path must not contain parent traversal", rendered)
+
     def test_check_focus_agents_warns_on_malformed_worker_run_receipt_checkpoint_resume_backpressure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
