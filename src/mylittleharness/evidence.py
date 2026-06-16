@@ -57,6 +57,8 @@ DURABLE_PROOF_RECORD_LIMIT = 5
 AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
 AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
+AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD = 8
+AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
 CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL = "project/verification/checkpoint-packages"
@@ -1213,6 +1215,7 @@ def agent_run_record_findings(inventory: Inventory, code_prefix: str = "agent-ru
         findings.extend(_agent_run_source_hash_findings(inventory.root, rel_path, data, code_prefix))
         findings.extend(_agent_run_route_proposal_findings(rel_path, data, code_prefix))
 
+    findings = _summarize_agent_run_source_hash_findings(findings, code_prefix)
     findings.extend(_agent_run_record_boundary_findings(code_prefix))
     return findings
 
@@ -2059,6 +2062,51 @@ def _agent_run_source_hash_findings(root: Path, rel_path: str, data: dict[str, o
         else:
             findings.append(Finding("info", f"{code}-hash", f"source hash current for {source_rel}: {current_hash[:12]}", rel_path))
     return findings
+
+
+def _summarize_agent_run_source_hash_findings(findings: list[Finding], code_prefix: str) -> list[Finding]:
+    code = f"{code_prefix}-record"
+    stale_code = f"{code}-stale"
+    current_code = f"{code}-hash"
+    stale_findings: list[Finding] = []
+    current_findings: list[Finding] = []
+    summarized: list[Finding] = []
+    for finding in findings:
+        if finding.code == stale_code:
+            stale_findings.append(finding)
+        elif finding.code == current_code:
+            current_findings.append(finding)
+        else:
+            summarized.append(finding)
+
+    if len(stale_findings) > AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD:
+        summarized.append(_agent_run_source_hash_summary_finding(stale_findings, f"{stale_code}-summary", "warn", "stale"))
+    else:
+        summarized.extend(stale_findings)
+
+    if len(current_findings) > AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD:
+        summarized.append(_agent_run_source_hash_summary_finding(current_findings, f"{current_code}-summary", "info", "current"))
+    else:
+        summarized.extend(current_findings)
+
+    return summarized
+
+
+def _agent_run_source_hash_summary_finding(findings: list[Finding], code: str, severity: str, posture: str) -> Finding:
+    sample_sources = tuple(dict.fromkeys(finding.source for finding in findings if finding.source))[
+        :AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT
+    ]
+    sample = ", ".join(sample_sources) if sample_sources else "none"
+    return Finding(
+        severity,
+        code,
+        (
+            f"historical/high-volume agent-run source-hash posture grouped {len(findings)} {posture} "
+            f"finding(s); sample_records={sample}; exact writeback/fan-in freshness gates and small "
+            "evidence sets still report individual source-hash findings"
+        ),
+        AGENT_RUNS_DIR_REL,
+    )
 
 
 def _agent_run_route_proposal_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:

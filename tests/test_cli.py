@@ -6429,6 +6429,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("Agent Run Evidence", clean_rendered)
             self.assertIn("candidate: agent run record: project/verification/agent-runs/run-1.md", clean_rendered)
             self.assertIn("check-lifecycle-provenance-agent-run-visibility", clean_rendered)
+            self.assertIn("source hash current for src/changed.py", clean_rendered)
             self.assertNotIn("check-agent-run-record-stale", clean_rendered)
 
             (root / "src/changed.py").write_text("print('after')\n", encoding="utf-8")
@@ -6458,6 +6459,96 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(refreshed_check):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             self.assertNotIn("check-agent-run-record-stale", refreshed_check.getvalue())
+
+    def test_check_and_dashboard_group_high_volume_agent_run_source_hash_posture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            (root / "src/work.py").write_text("def work():\n    return 'before'\n", encoding="utf-8")
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/smoke.md").write_text(
+                "---\n"
+                'status: "passed"\n'
+                "---\n"
+                "# Smoke\n\npassed\n",
+                encoding="utf-8",
+            )
+            record_dir = root / "project/verification/agent-runs"
+            record_dir.mkdir(parents=True)
+            work_hash = hashlib.sha256((root / "src/work.py").read_bytes()).hexdigest()
+            for index in range(9):
+                record_id = f"run-{index + 1}"
+                (record_dir / f"{record_id}.md").write_text(
+                    "---\n"
+                    'schema: "mylittleharness.agent-run.v1"\n'
+                    'record_type: "agent-run"\n'
+                    f'record_id: "{record_id}"\n'
+                    'role: "coder"\n'
+                    'actor: "codex"\n'
+                    'task: "classify historical source-hash posture"\n'
+                    'assigned_scope: "agent-run-evidence-current-historical-grouping"\n'
+                    'runtime: "local-shell"\n'
+                    'worktree_id: "main"\n'
+                    'status: "succeeded"\n'
+                    'stop_reason: "verification-passed"\n'
+                    'attempt_budget: "1/1"\n'
+                    'docs_decision: "not-needed"\n'
+                    'residual_risk: "none"\n'
+                    "input_refs:\n"
+                    '  - "project/implementation-plan.md"\n'
+                    "output_refs:\n"
+                    '  - "src/work.py"\n'
+                    "claimed_paths:\n"
+                    '  - "src/work.py"\n'
+                    "changed_files:\n"
+                    '  - "src/work.py"\n'
+                    "commands:\n"
+                    '  - "pytest -q tests/test_cli.py"\n'
+                    "verification_refs:\n"
+                    '  - "project/verification/smoke.md"\n'
+                    "source_hashes:\n"
+                    f'  - "src/work.py sha256={work_hash}"\n'
+                    "---\n"
+                    f"# Agent Run {index + 1}\n",
+                    encoding="utf-8",
+                )
+
+            current_before = snapshot_tree_bytes(root)
+            current_check = io.StringIO()
+            with redirect_stdout(current_check):
+                current_code = main(["--root", str(root), "check"])
+            current_rendered = current_check.getvalue()
+            self.assertEqual(current_code, 0, current_rendered)
+            self.assertEqual(current_before, snapshot_tree_bytes(root))
+            self.assertIn("check-agent-run-record-hash-summary", current_rendered)
+            self.assertIn("historical/high-volume agent-run source-hash posture", current_rendered)
+            self.assertEqual(current_rendered.count("check-agent-run-record-hash"), 1)
+            self.assertNotIn("source hash current for src/work.py", current_rendered)
+
+            (root / "src/work.py").write_text("def work():\n    return 'after'\n", encoding="utf-8")
+            stale_before = snapshot_tree_bytes(root)
+            stale_check = io.StringIO()
+            with redirect_stdout(stale_check):
+                stale_code = main(["--root", str(root), "check"])
+            stale_rendered = stale_check.getvalue()
+            self.assertEqual(stale_code, 0, stale_rendered)
+            self.assertEqual(stale_before, snapshot_tree_bytes(root))
+            self.assertIn("check-agent-run-record-stale-summary", stale_rendered)
+            self.assertEqual(stale_rendered.count("check-agent-run-record-stale"), 1)
+            self.assertNotIn("source hash mismatch for src/work.py", stale_rendered)
+
+            dashboard_json = io.StringIO()
+            with redirect_stdout(dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+            self.assertEqual(stale_before, snapshot_tree_bytes(root))
+            payload = json.loads(dashboard_json.getvalue())
+            codes = [
+                finding["code"]
+                for section in payload["sections"]
+                for finding in section["findings"]
+            ]
+            self.assertEqual(codes.count("dashboard-agent-run-record-stale-summary"), 1)
+            self.assertNotIn("dashboard-agent-run-record-stale", codes)
 
     def test_evidence_record_refresh_ignores_existing_self_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
