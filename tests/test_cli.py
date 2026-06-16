@@ -36342,6 +36342,16 @@ class CliTests(unittest.TestCase):
             self.assertIn("check output", cards["lifecycle"]["nonAuthority"])
             self.assertIn("writeback --dry-run --phase-status complete", cards["lifecycle"]["nextSafeCommand"])
             self.assertIn("commit", cards["verification"]["cannotApprove"])
+            for card_id, card in cards.items():
+                next_safe_action = card["nextSafeAction"]
+                self.assertEqual(card["nextSafeCommand"], next_safe_action["command"])
+                self.assertEqual("dashboard-authority-card-next-safe", next_safe_action["source_code"])
+                self.assertEqual(f"authorityCards.{card_id}.nextSafeCommand", next_safe_action["source_field"])
+                self.assertEqual("authority-card-next-safe", next_safe_action["action_role"])
+                self.assertTrue(next_safe_action["displayed_only"])
+                self.assertFalse(next_safe_action["invoked_by_read_only_surfaces"])
+                self.assertFalse(next_safe_action["approves_lifecycle"])
+                self.assertFalse(next_safe_action["approves_git"])
             self.assertIn("lifecycle=", payload["agentPacket"]["authoritySummary"])
             self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
             self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])

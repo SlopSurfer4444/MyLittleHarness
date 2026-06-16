@@ -944,7 +944,7 @@ def _authority_cards_payload(inventory: Inventory, next_legal: dict[str, object]
         "push",
         "release",
     ]
-    return [
+    cards = [
         {
             "id": "lifecycle",
             "label": "Lifecycle",
@@ -991,6 +991,26 @@ def _authority_cards_payload(inventory: Inventory, next_legal: dict[str, object]
             "boundary": "navigation hits must be reconciled against exact source before edits or closeout claims",
         },
     ]
+    for card in cards:
+        card_id = str(card.get("id") or "unknown")
+        card["nextSafeAction"] = command_action_report_dict(
+            str(card.get("nextSafeCommand") or ""),
+            source_code="dashboard-authority-card-next-safe",
+            source=_authority_card_action_source(card_id),
+            source_field=f"authorityCards.{card_id}.nextSafeCommand",
+            action_role="authority-card-next-safe",
+        )
+    return cards
+
+
+def _authority_card_action_source(card_id: str) -> str | None:
+    return {
+        "lifecycle": STATE_ROUTE_REL,
+        "roadmap": ROADMAP_ROUTE_REL,
+        "projection": ARTIFACT_DIR_REL,
+        "docs": DOCMAP_ROUTE_REL,
+        "verification": "source files",
+    }.get(card_id)
 
 
 def _roadmap_authority_next_safe_command(inventory: Inventory, plan_status: str) -> str:
