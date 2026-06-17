@@ -345,7 +345,7 @@ def _classification(
     if any(hit.current for hit in inbound_refs) and request.action == "retire" and not _is_agent_run_record(rel_path):
         return "refuse-active-current"
     if _is_agent_run_record(rel_path) and request.action in {"scan", "retire"}:
-        return "retire-from-freshness"
+        return "retire-from-active-agent-run-checks"
     if request.action == "tombstone":
         return "tombstone-preserve-reference"
     if request.action == "purge" and not inbound_refs:
@@ -372,8 +372,8 @@ def _recommended_action(action: str, classification: str) -> str:
 def _warning_delta(action: str, rel_path: str, classification: str, inbound_refs: tuple[ReferenceHit, ...]) -> str:
     if action == "retire" and _is_agent_run_record(rel_path):
         return (
-            "retire removes this agent-run record from active source-hash freshness/currentness checks through "
-            f"{AGENT_RUN_RETIREMENT_SUMMARY_REL}; metadata and malformed source_hash entries remain checked"
+            "retire removes this agent-run record from active agent-run validation checks through "
+            f"{AGENT_RUN_RETIREMENT_SUMMARY_REL}; malformed retirement entries remain checked"
         )
     if action == "purge" and inbound_refs:
         return "purge would break inbound references, so the route refuses and recommends tombstone-preserve-reference"
@@ -405,7 +405,7 @@ def _candidate_risks(
     if action == "purge" and classification != "purge-safe":
         risks.append("purge is not safe for this candidate; use tombstone or retire")
     if action == "retire" and not _is_agent_run_record(rel_path):
-        risks.append("retire currently integrates with agent-run freshness policy only")
+        risks.append("retire currently integrates with agent-run active validation policy only")
     if not risks:
         risks.append("no active reference risk detected by exact path scan")
     return tuple(risks)
@@ -537,7 +537,7 @@ def _retirement_summary_text(
             "---",
             "# Agent Run Retirement Summary",
             "",
-            "Agent-run records listed here are retired from active source-hash freshness checks.",
+            "Agent-run records listed here are retired from active agent-run validation checks.",
             "The records remain repo-visible historical evidence unless a separate tombstone or purge route is applied.",
             "",
             "## Latest Retention Action",

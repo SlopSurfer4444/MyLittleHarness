@@ -37,6 +37,7 @@ from .evidence import (
     AGENT_RUN_REQUIRED_SCALARS,
     AGENT_RUN_SCHEMA,
     AGENT_RUN_STATUSES,
+    agent_run_retired_records,
     agent_run_record_template_finding,
     lifecycle_mutation_provenance_findings,
     worker_run_receipt_findings,
@@ -799,11 +800,14 @@ def _coordination_agent_run_identity_findings(root: Path, code_prefix: str) -> l
     directory = root / AGENT_RUNS_DIR_REL
     if not directory.exists() or not directory.is_dir():
         return []
-    findings: list[Finding] = []
+    retired_records, retirement_findings = agent_run_retired_records(root, code_prefix)
+    findings: list[Finding] = [*retirement_findings]
     for path in sorted(directory.glob("*.md")):
         rel_path = _coordination_to_rel_path(root, path)
         if path.is_symlink() or not path.is_file():
             findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", "agent run record path is not a regular file", rel_path))
+            continue
+        if rel_path in retired_records:
             continue
         try:
             frontmatter = parse_frontmatter(path.read_text(encoding="utf-8"))

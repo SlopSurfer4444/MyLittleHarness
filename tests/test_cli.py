@@ -6550,7 +6550,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(codes.count("dashboard-agent-run-record-stale-summary"), 1)
             self.assertNotIn("dashboard-agent-run-record-stale", codes)
 
-    def test_agent_run_retirement_summary_skips_only_freshness_checks(self) -> None:
+    def test_agent_run_retirement_summary_skips_active_agent_run_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
             (root / "src").mkdir()
@@ -6577,7 +6577,7 @@ class CliTests(unittest.TestCase):
                 "```\n\n"
                 "## Intake Payload\n\n"
                 "# Agent Run Retirement Summary\n\n"
-                "Retired pre-alpha traces from active source-hash freshness checks.\n",
+                "Retired pre-alpha traces from active agent-run validation checks.\n",
                 encoding="utf-8",
             )
 
@@ -6629,13 +6629,96 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(before, snapshot_tree_bytes(root))
             self.assertIn("check-agent-run-record-retirement-summary", rendered)
-            self.assertIn("1 exact agent run record(s) retired from active source-hash freshness checks", rendered)
-            self.assertIn("future unlisted records remain in active freshness scope", rendered)
+            self.assertIn("1 exact agent run record(s) retired from active agent-run validation checks", rendered)
+            self.assertIn("future unlisted records remain in active validation scope", rendered)
             self.assertEqual(rendered.count("check-agent-run-record-stale"), 1)
             self.assertIn("(project/verification/agent-runs/active-run.md)", rendered)
-            self.assertIn("malformed source_hashes entry: not a valid source hash", rendered)
+            self.assertNotIn("malformed source_hashes entry: not a valid source hash", rendered)
 
-    def test_retention_retire_writes_receipt_and_suppresses_agent_run_freshness(self) -> None:
+    def test_retired_agent_runs_skip_coordination_and_root_pair_active_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            (root / "src/work.py").write_text("print('work')\n", encoding="utf-8")
+            record_dir = root / "project/verification/agent-runs"
+            record_dir.mkdir(parents=True)
+            (root / "project/verification/agent-run-retirement-summary.md").write_text(
+                "---\n"
+                'title: "Agent Run Retirement Summary"\n'
+                'schema: "mylittleharness.agent-run-retirement-summary.v1"\n'
+                "retired_agent_run_records:\n"
+                '  - "project/verification/agent-runs/retired-run.md"\n'
+                "---\n"
+                "# Agent Run Retirement Summary\n\n"
+                "Retired pre-alpha traces from active agent-run validation checks.\n",
+                encoding="utf-8",
+            )
+
+            def write_bad_run(record_id: str) -> None:
+                (record_dir / f"{record_id}.md").write_text(
+                    "---\n"
+                    'schema: "wrong.schema"\n'
+                    'record_type: "agent-run"\n'
+                    f'record_id: "{record_id}"\n'
+                    'role: "coder"\n'
+                    'coordination_root: "C:/AIDev/Workspaces/repos/symphony"\n'
+                    "changed_files:\n"
+                    '  - "src/work.py"\n'
+                    "source_hashes:\n"
+                    '  - "not a source hash"\n'
+                    "---\n"
+                    f"# Agent Run {record_id}\n",
+                    encoding="utf-8",
+                )
+
+            write_bad_run("retired-run")
+            write_bad_run("active-run")
+            before = snapshot_tree_bytes(root)
+
+            full_output = io.StringIO()
+            with redirect_stdout(full_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            full_rendered = full_output.getvalue()
+
+            agents_output = io.StringIO()
+            with redirect_stdout(agents_output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+            agents_rendered = agents_output.getvalue()
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("check-agent-run-record-malformed", full_rendered)
+            self.assertIn("check-worktree-coordination-record-root-pair-missing", full_rendered)
+            self.assertIn("check-agents-coordination-evidence-agent-run-malformed", agents_rendered)
+            self.assertIn("project/verification/agent-runs/active-run.md", full_rendered)
+            self.assertIn("project/verification/agent-runs/active-run.md", agents_rendered)
+            self.assertNotIn("(project/verification/agent-runs/retired-run.md)", full_rendered)
+            self.assertNotIn("(project/verification/agent-runs/retired-run.md)", agents_rendered)
+
+    def test_malformed_agent_run_retirement_summary_does_not_suppress_record_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            record_dir = root / "project/verification/agent-runs"
+            record_dir.mkdir(parents=True)
+            (root / "project/verification/agent-run-retirement-summary.md").write_text(
+                "# Agent Run Retirement Summary\n\n"
+                "retired_agent_run_records:\n"
+                '- "project/verification/agent-runs/retired-run.md"\n',
+                encoding="utf-8",
+            )
+            (record_dir / "retired-run.md").write_text("# Bad Record\n\nMissing frontmatter.\n", encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check"]), 1)
+
+            rendered = output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("check-agent-run-record-retirement-malformed", rendered)
+            self.assertIn("check-agent-run-record-malformed", rendered)
+            self.assertIn("(project/verification/agent-runs/retired-run.md)", rendered)
+
+    def test_retention_retire_writes_receipt_and_suppresses_agent_run_active_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
             (root / "src").mkdir()
@@ -6707,7 +6790,7 @@ class CliTests(unittest.TestCase):
             scan_codes = [finding["code"] for section in scan_payload["sections"] for finding in section["findings"]]
             scan_messages = "\n".join(finding["message"] for section in scan_payload["sections"] for finding in section["findings"])
             self.assertIn("retention-candidate", scan_codes)
-            self.assertIn("classification=retire-from-freshness", scan_messages)
+            self.assertIn("classification=retire-from-active-agent-run-checks", scan_messages)
             self.assertIn("retention-reference-graph", scan_codes)
 
             before = snapshot_tree_bytes(root)

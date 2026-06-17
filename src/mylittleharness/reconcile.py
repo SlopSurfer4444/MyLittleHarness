@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .claims import WorkClaimRecord, work_claim_active_overlap_findings, work_claim_record_metadata_findings
+from .evidence import agent_run_retired_records
 from .handoff import handoff_packet_status_findings
 from .inventory import Inventory
 from .models import Finding
@@ -386,9 +387,12 @@ def _load_agent_run_records(root: Path, code_prefix: str) -> tuple[list[dict[str
             )
         ]
     records: list[dict[str, object]] = []
-    findings: list[Finding] = []
+    retired_records, retirement_findings = agent_run_retired_records(root, code_prefix)
+    findings: list[Finding] = [*retirement_findings]
     for path in sorted(directory.glob("*.md")):
         rel_path = _to_rel_path(root, path)
+        if rel_path in retired_records:
+            continue
         if path.is_symlink() or not path.is_file():
             findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", "agent run record is not a regular file", rel_path))
             continue

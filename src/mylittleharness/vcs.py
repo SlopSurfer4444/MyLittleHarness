@@ -832,12 +832,17 @@ def _worktree_coordination_claim_record_findings(inventory: Inventory, code_pref
 
 
 def _worktree_coordination_agent_run_record_findings(inventory: Inventory, code_prefix: str) -> list[Finding]:
+    from .evidence import agent_run_retired_records
+
     directory = inventory.root / "project/verification/agent-runs"
     if not directory.exists() or not directory.is_dir():
         return []
-    findings: list[Finding] = []
+    retired_records, retirement_findings = agent_run_retired_records(inventory.root, code_prefix)
+    findings: list[Finding] = [*retirement_findings]
     for path in sorted(directory.glob("*.md")):
         rel_path = _rel_path(inventory.root, path)
+        if rel_path in retired_records:
+            continue
         try:
             frontmatter = parse_frontmatter(path.read_text(encoding="utf-8"))
         except OSError:

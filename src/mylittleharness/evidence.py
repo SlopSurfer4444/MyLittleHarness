@@ -1185,12 +1185,14 @@ def agent_run_record_findings(inventory: Inventory, code_prefix: str = "agent-ru
             *_agent_run_record_boundary_findings(code_prefix),
         ]
 
-    retired_records, retirement_findings = _agent_run_retired_records(inventory.root, code_prefix)
+    retired_records, retirement_findings = agent_run_retired_records(inventory.root, code_prefix)
     findings: list[Finding] = [*retirement_findings]
     for path in paths:
         rel_path = _to_rel_path(inventory.root, path)
         if path.is_symlink() or not path.is_file():
             findings.append(Finding("warn", f"{code}-malformed", "agent run record path is not a regular file", rel_path))
+            continue
+        if rel_path in retired_records:
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -4024,7 +4026,7 @@ def _agent_run_record_paths(root: Path) -> list[Path]:
     return sorted(directory.glob("*.md"))
 
 
-def _agent_run_retired_records(root: Path, code_prefix: str) -> tuple[set[str], list[Finding]]:
+def agent_run_retired_records(root: Path, code_prefix: str) -> tuple[set[str], list[Finding]]:
     path = root / AGENT_RUN_RETIREMENT_SUMMARY_REL
     code = f"{code_prefix}-record-retirement"
     if not path.exists():
@@ -4077,9 +4079,9 @@ def _agent_run_retired_records(root: Path, code_prefix: str) -> tuple[set[str], 
                 "info",
                 f"{code}-summary",
                 (
-                    f"{len(retired)} exact agent run record(s) retired from active source-hash freshness checks by "
-                    f"{AGENT_RUN_RETIREMENT_SUMMARY_REL}; metadata and malformed source_hashes remain checked, "
-                    "future unlisted records remain in active freshness scope, and no source hashes were refreshed"
+                    f"{len(retired)} exact agent run record(s) retired from active agent-run validation checks by "
+                    f"{AGENT_RUN_RETIREMENT_SUMMARY_REL}; malformed retirement entries remain warning-level, "
+                    "future unlisted records remain in active validation scope, and no source hashes were refreshed"
                 ),
                 AGENT_RUN_RETIREMENT_SUMMARY_REL,
             )
