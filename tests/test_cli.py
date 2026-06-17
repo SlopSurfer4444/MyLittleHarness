@@ -6635,6 +6635,183 @@ class CliTests(unittest.TestCase):
             self.assertIn("(project/verification/agent-runs/active-run.md)", rendered)
             self.assertIn("malformed source_hashes entry: not a valid source hash", rendered)
 
+    def test_retention_retire_writes_receipt_and_suppresses_agent_run_freshness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            work_path = root / "src/work.py"
+            work_path.write_text("def work():\n    return 'before'\n", encoding="utf-8")
+            old_hash = hashlib.sha256(work_path.read_bytes()).hexdigest()
+            record_rel = "project/verification/agent-runs/retired-run.md"
+            record_path = root / record_rel
+            record_path.parent.mkdir(parents=True)
+            record_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "retired-run"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "verify retention retire route"\n'
+                'assigned_scope: "evidence-retention-delete-retire-route"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "verification-passed"\n'
+                'attempt_budget: "1/1"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none"\n'
+                "input_refs:\n"
+                '  - "project/implementation-plan.md"\n'
+                "output_refs:\n"
+                '  - "src/work.py"\n'
+                "claimed_paths:\n"
+                '  - "src/work.py"\n'
+                "changed_files:\n"
+                '  - "src/work.py"\n'
+                "commands:\n"
+                '  - "pytest -q tests/test_cli.py"\n'
+                "verification_refs:\n"
+                '  - "project/verification/smoke.md"\n'
+                "source_hashes:\n"
+                f'  - "src/work.py sha256={old_hash}"\n'
+                "---\n"
+                "# Retired Run\n",
+                encoding="utf-8",
+            )
+            (root / "project/verification/reference.md").write_text(
+                "---\n"
+                'status: "archived"\n'
+                "---\n"
+                f"# Reference\n\nHistorical reference to `{record_rel}`.\n",
+                encoding="utf-8",
+            )
+            (root / "project/verification/smoke.md").write_text(
+                "---\n"
+                'status: "passed"\n'
+                "---\n"
+                "# Smoke\n",
+                encoding="utf-8",
+            )
+            work_path.write_text("def work():\n    return 'after'\n", encoding="utf-8")
+
+            stale_output = io.StringIO()
+            with redirect_stdout(stale_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertIn("check-agent-run-record-stale", stale_output.getvalue())
+
+            scan_output = io.StringIO()
+            with redirect_stdout(scan_output):
+                self.assertEqual(main(["--root", str(root), "retention", "scan", "--path", record_rel, "--json"]), 0)
+            scan_payload = json.loads(scan_output.getvalue())
+            scan_codes = [finding["code"] for section in scan_payload["sections"] for finding in section["findings"]]
+            scan_messages = "\n".join(finding["message"] for section in scan_payload["sections"] for finding in section["findings"])
+            self.assertIn("retention-candidate", scan_codes)
+            self.assertIn("classification=retire-from-freshness", scan_messages)
+            self.assertIn("retention-reference-graph", scan_codes)
+
+            before = snapshot_tree_bytes(root)
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "retire",
+                            "--dry-run",
+                            "--path",
+                            record_rel,
+                            "--reason",
+                            "historical stale source-hash evidence",
+                            "--receipt-id",
+                            "retired-run",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_rendered = dry_output.getvalue()
+            self.assertIn("retention-dry-run", dry_rendered)
+            self.assertIn("would create route project/verification/retention-receipts/retired-run.json", dry_rendered)
+            self.assertIn("would create route project/verification/agent-run-retirement-summary.md", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "retire",
+                            "--apply",
+                            "--path",
+                            record_rel,
+                            "--reason",
+                            "historical stale source-hash evidence",
+                            "--receipt-id",
+                            "retired-run",
+                        ]
+                    ),
+                    0,
+                )
+            apply_rendered = apply_output.getvalue()
+            receipt_path = root / "project/verification/retention-receipts/retired-run.json"
+            summary_path = root / "project/verification/agent-run-retirement-summary.md"
+            self.assertIn("retention-applied", apply_rendered)
+            self.assertTrue(receipt_path.is_file())
+            self.assertIn(record_rel, summary_path.read_text(encoding="utf-8"))
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual("mylittleharness.retention-receipt.v1", receipt["schema"])
+            self.assertEqual([record_rel], receipt["target_paths"])
+
+            retired_check = io.StringIO()
+            with redirect_stdout(retired_check):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            retired_rendered = retired_check.getvalue()
+            self.assertIn("check-agent-run-record-retirement-summary", retired_rendered)
+            self.assertIn("check-retention-receipt-summary", retired_rendered)
+            self.assertNotIn("check-agent-run-record-stale", retired_rendered)
+
+    def test_retention_purge_refuses_referenced_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            target_rel = "project/verification/obsolete.md"
+            target_path = root / target_rel
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("---\nstatus: \"archived\"\n---\n# Obsolete\n", encoding="utf-8")
+            (root / "project/verification/reference.md").write_text(
+                f"# Reference\n\nKeep `{target_rel}` reachable.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "purge",
+                            "--dry-run",
+                            "--path",
+                            target_rel,
+                            "--reason",
+                            "obsolete but referenced",
+                        ]
+                    ),
+                    1,
+                )
+            rendered = output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("retention-purge-refused", rendered)
+            self.assertIn("classification=tombstone-preserve-reference", rendered)
+            self.assertIn("run retention tombstone --dry-run", rendered)
+
     def test_evidence_record_refresh_ignores_existing_self_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -32189,6 +32366,99 @@ class CliTests(unittest.TestCase):
             self.assertTrue(direct_write_payload["block"])
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", direct_write_codes)
             self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_write_codes)
+
+    def test_hooks_pre_tool_allows_retention_route_and_receipt_backed_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            root = make_live_root(Path(tmp) / "neighbor")
+            record_rel = "project/" + "verification/agent-runs/run-1.md"
+            summary_rel = "project/" + "verification/agent-run-retirement-summary.md"
+            receipt_rel = "project/" + "verification/retention-receipts/retired-run.json"
+            (root / record_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / receipt_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / record_rel).write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-1"\n'
+                'status: "succeeded"\n'
+                "---\n"
+                "# Run\n",
+                encoding="utf-8",
+            )
+            (root / summary_rel).write_text(
+                "---\n"
+                'title: "Agent Run Retirement Summary"\n'
+                'status: "archived"\n'
+                "retired_agent_run_records:\n"
+                f'  - "{record_rel}"\n'
+                "---\n"
+                "# Summary\n",
+                encoding="utf-8",
+            )
+            (root / receipt_rel).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.retention-receipt.v1",
+                        "record_type": "retention-receipt",
+                        "receipt_id": "retired-run",
+                        "action": "retire",
+                        "policy": "agent-runs-obsolete",
+                        "reason": "historical stale source-hash evidence",
+                        "target_paths": [record_rel],
+                        "retirement_summary": summary_rel,
+                        "non_authority": "repo-visible retention evidence only; cannot approve lifecycle, Git, archive, release, or target-repo acceptance",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            route_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . retention retire --dry-run "
+                        f"--path {record_rel} --reason obsolete --receipt-id retired-run"
+                    ),
+                }
+            )
+            scan_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"mylittleharness --root . retention scan --path {record_rel}",
+                }
+            )
+            staged_with_receipt_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{root}" add -- {receipt_rel} {record_rel} {summary_rel}',
+                }
+            )
+            direct_delete_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Remove-Item -LiteralPath {record_rel}",
+                }
+            )
+
+            for checked_input in (route_input, scan_input):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], checked_input)
+                codes = {finding["code"] for finding in payload["findings"]}
+                self.assertFalse(payload["block"])
+                self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", codes)
+
+            staged_with_receipt = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], staged_with_receipt_input)
+            staged_with_receipt_codes = {finding["code"] for finding in staged_with_receipt["findings"]}
+            self.assertFalse(staged_with_receipt["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", staged_with_receipt_codes)
+
+            direct_delete = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_delete_input)
+            direct_delete_codes = {finding["code"] for finding in direct_delete["findings"]}
+            self.assertTrue(direct_delete["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_delete_codes)
 
     def test_hooks_pre_tool_allows_literal_powershell_splatted_mlh_owner_route(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

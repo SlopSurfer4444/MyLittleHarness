@@ -90,6 +90,13 @@ from .evidence import (
     evidence_findings,
     make_agent_run_record_request,
 )
+from .retention import (
+    make_retention_request,
+    retention_apply_findings,
+    retention_dry_run_findings,
+    retention_receipt_findings,
+    retention_scan_sections,
+)
 from .incubate import (
     incubate_apply_findings,
     incubate_dry_run_findings,
@@ -268,6 +275,7 @@ COMMANDS = (
 )
 CACHE_DIRTY_APPLY_COMMANDS = {
     "evidence",
+    "retention",
     "task-session",
     "claim",
     "handoff",
@@ -767,6 +775,30 @@ def main(argv: list[str] | None = None) -> int:
         result = _result_for(findings)
         emit_text(render_report("evidence", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
+    if command == "retention":
+        request = make_retention_request(args)
+        action = str(getattr(args, "retention_action", "") or "")
+        if action == "scan":
+            sections = retention_scan_sections(inventory, request)
+            findings = flatten_sections(sections)
+            result = _result_for(findings)
+            suggestions = _suggestions(command, findings)
+            if args.json:
+                emit_text(render_json_report("retention scan", inventory.root, result, inventory.sources_for_report(), findings, suggestions, sections, route_manifest()))
+            else:
+                emit_text(render_sectioned_report("retention scan", inventory.root, result, inventory.sources_for_report(), sections, suggestions))
+            return 1 if any(finding.severity == "error" for finding in findings) else 0
+        report_name = f"retention {action} --apply" if args.apply else f"retention {action} --dry-run"
+        findings = retention_apply_findings(inventory, request) if args.apply else retention_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        suggestions = _suggestions(command, findings)
+        sections = [("Retention", findings)]
+        if args.json:
+            emit_text(render_json_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions, sections, route_manifest()))
+        else:
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions))
+        return 2 if args.apply and result == "error" else 1 if result == "error" else 0
     if command == "claim":
         if args.status:
             findings = [
@@ -2387,6 +2419,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
             "grain": ("Grain", lambda: grain_findings(inventory)),
             "archive-context": ("Archive Context", lambda: archive_context_findings(inventory)),
             "route-references": ("Route References", lambda: route_reference_inventory_findings(inventory)),
+            "retention": ("Retention", lambda: retention_receipt_findings(inventory, "check-retention")),
             "agents": (
                 "Agents",
                 lambda: [
@@ -2406,6 +2439,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         ("Worktree Coordination", worktree_coordination_findings(inventory, code_prefix="check-worktree-coordination")),
         ("Validation", validation_findings(inventory)),
         ("Agent Run Evidence", agent_run_record_findings(inventory, "check-agent-run")),
+        ("Retention", retention_receipt_findings(inventory, "check-retention")),
         ("Work Claims", work_claim_status_findings(inventory, "check-work-claim")),
         ("Handoff Packets", handoff_packet_status_findings(inventory, "check-handoff-packet")),
         ("Coordination Evidence", coordination_evidence_identity_findings(inventory, "check-coordination-evidence")),
@@ -2442,6 +2476,7 @@ def _focused_report_scope(focus: str, sections: list[tuple[str, list[Finding]]])
         "Grain",
         "Archive Context",
         "Route References",
+        "Retention",
         "Agents",
     }
     return {
@@ -2855,6 +2890,18 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.severity == "warn" for finding in findings):
             return ["Use evidence findings as closeout assembly prompts; source files and observed verification remain authority."]
         return ["evidence completed as a terminal-only read-only report; it did not approve lifecycle, archive, commit, or repair actions."]
+    if command == "retention":
+        if any(finding.code == "retention-purge-refused" for finding in findings):
+            return ["retention purge was refused because inbound references remain; preview a tombstone or retire route instead."]
+        if any(finding.code == "retention-refused" for finding in findings):
+            return ["retention route was refused before cleanup evidence was written."]
+        if any(finding.code == "retention-scan-read-only" for finding in findings):
+            return ["retention scan classified candidates, reference graph, and Git posture without writing files."]
+        if any(finding.code == "retention-dry-run" for finding in findings):
+            return ["retention dry-run reported candidate classification and receipt writes without mutating evidence."]
+        if any(finding.code == "retention-applied" for finding in findings):
+            return ["retention apply wrote reviewed cleanup evidence; run check before closeout, archive, staging, or commit."]
+        return ["retention completed as evidence-only cleanup review; lifecycle, archive, Git, release, and target-repo acceptance remain explicit decisions."]
     if command == "task-session":
         if any(finding.code.startswith("task-session-provider-launcher") for finding in findings):
             return ["task-session provider-launcher inspect reported secret-safe runtime config readiness only; provider calls, worker launch, lifecycle movement, and Git remain separate explicit decisions."]

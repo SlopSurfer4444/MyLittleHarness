@@ -257,6 +257,7 @@ MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
     "projection",
     "repair",
     "research-import",
+    "retention",
     "roadmap",
     "suggest",
     "transition",
@@ -3231,6 +3232,8 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
         )
     if subcommand == "evidence":
         return not _looks_like_write_command(command) and _is_mlh_evidence_record_route_command(policy_command)
+    if subcommand == "retention" and "scan" in tokens:
+        return not _looks_like_write_command(command)
     return (
         subcommand in MLH_OWNER_ROUTE_REVIEW_COMMANDS
         and not _looks_like_write_command(command)
@@ -3983,6 +3986,15 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
                 return set()
             allowed.update(receipt_allowed)
         return normalized if normalized <= allowed else set()
+    retention_receipt_paths = {path for path in normalized if _is_retention_receipt_route_path(path)}
+    if retention_receipt_paths:
+        allowed = set(retention_receipt_paths)
+        for path in retention_receipt_paths:
+            receipt_allowed = _reviewed_retention_receipt_checkpoint_refs(inventory, path)
+            if not receipt_allowed:
+                return set()
+            allowed.update(receipt_allowed)
+        return normalized if normalized <= allowed else set()
     verification_package_paths = _coherent_verification_decision_checkpoint_paths(inventory, normalized)
     if verification_package_paths:
         return verification_package_paths
@@ -4723,7 +4735,7 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
-        "post-closeout-route-package,worker-run-receipt-refs,verification/decision-evidence-package,"
+        "post-closeout-route-package,worker-run-receipt-refs,retention-receipt-refs,verification/decision-evidence-package,"
         "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
         "meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
         "delegated-neighbor-bootstrap-scaffold"
@@ -4755,6 +4767,8 @@ def _reviewed_local_vcs_checkpoint_path_classes(paths: set[str]) -> str:
         classes.append("agent-run-evidence")
     if any(_is_worker_run_receipt_route_path(path) for path in paths):
         classes.append("worker-run-receipts")
+    if any(_is_retention_receipt_route_path(path) for path in paths):
+        classes.append("retention-receipts")
     if any(_is_checkpoint_decision_route_path(path) for path in paths):
         classes.append("decisions")
     verification_classes = sorted(
@@ -4912,6 +4926,49 @@ def _reviewed_worker_run_receipt_checkpoint_refs(inventory: Inventory, path: str
             rel = _hook_route_rel_path(inventory, str(item or "")).casefold()
             if rel.startswith("project/verification/") and _is_existing_lifecycle_route_file(inventory, rel):
                 allowed.add(rel)
+    return allowed
+
+
+def _is_retention_receipt_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/verification/retention-receipts/") and rel.endswith(".json")
+
+
+def _reviewed_retention_receipt_checkpoint_refs(inventory: Inventory, path: str) -> set[str]:
+    if not _is_retention_receipt_route_path(path):
+        return set()
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return set()
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return set()
+        data = json.loads(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    if str(data.get("schema") or "").strip() != "mylittleharness.retention-receipt.v1":
+        return set()
+    if str(data.get("record_type") or "").strip() != "retention-receipt":
+        return set()
+    if str(data.get("action") or "").strip() not in {"retire", "tombstone", "purge"}:
+        return set()
+    non_authority = str(data.get("non_authority") or "").casefold()
+    if "cannot approve" not in non_authority or "lifecycle" not in non_authority or "git" not in non_authority:
+        return set()
+    allowed = {_hook_route_rel_path(inventory, path).casefold()}
+    for field in ("target_paths", "tombstone_paths", "purge_paths"):
+        value = data.get(field)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            rel = _hook_route_rel_path(inventory, str(item or "")).casefold()
+            if rel.startswith("project/verification/") and _is_existing_lifecycle_route_file(inventory, rel):
+                allowed.add(rel)
+    summary = _hook_route_rel_path(inventory, str(data.get("retirement_summary") or "")).casefold()
+    if summary == "project/verification/agent-run-retirement-summary.md" and _is_existing_lifecycle_route_file(inventory, summary):
+        allowed.add(summary)
     return allowed
 
 

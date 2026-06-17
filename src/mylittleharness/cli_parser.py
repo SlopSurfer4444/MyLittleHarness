@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     check_mode.add_argument("--deep", action="store_true", help="Include links, context, and hygiene diagnostics in the read-only check report.")
     check_mode.add_argument(
         "--focus",
-        choices=("validation", "links", "context", "hygiene", "grain", "archive-context", "route-references", "agents"),
+        choices=("validation", "links", "context", "hygiene", "grain", "archive-context", "route-references", "agents", "retention"),
         help="Run one focused read-only diagnostic through check.",
     )
     check.add_argument("--json", action="store_true", help="Emit a structured JSON report.")
@@ -167,6 +167,26 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--provider", help="Optional model/provider provenance.")
     evidence.add_argument("--model-id", dest="model_id", help="Optional model identifier provenance.")
     evidence.add_argument("--tool", dest="tools", action="append", default=[], help="Optional tool metadata. May be repeated.")
+    retention = subparsers.add_parser(
+        "retention",
+        help=argparse.SUPPRESS,
+        description="Advanced evidence lifecycle helper: scan, retire, tombstone, or purge obsolete evidence with reviewed receipts.",
+    )
+    retention_actions = retention.add_subparsers(dest="retention_action", required=True, metavar="{scan,retire,tombstone,purge}")
+    retention_scan = retention_actions.add_parser("scan", help="Classify evidence retention candidates without writing files.")
+    retention_scan.add_argument("--path", dest="paths", action="append", required=True, help="Root-relative evidence path or directory to classify. May be repeated.")
+    retention_scan.add_argument("--policy", choices=("exact-paths", "agent-runs-obsolete"), default="exact-paths", help="Retention policy lens for classification.")
+    retention_scan.add_argument("--json", action="store_true", help="Emit a structured retention scan report.")
+    for retention_action in ("retire", "tombstone", "purge"):
+        retention_command = retention_actions.add_parser(retention_action, help=f"Preview or apply reviewed evidence {retention_action}.")
+        retention_mode = retention_command.add_mutually_exclusive_group(required=True)
+        retention_mode.add_argument("--dry-run", action="store_true", help=f"Preview evidence {retention_action} without writing files.")
+        retention_mode.add_argument("--apply", action="store_true", help=f"Apply reviewed evidence {retention_action} and write a receipt.")
+        retention_command.add_argument("--path", dest="paths", action="append", required=True, help="Exact root-relative evidence file path. May be repeated.")
+        retention_command.add_argument("--policy", choices=("exact-paths", "agent-runs-obsolete"), default="exact-paths", help="Retention policy lens for classification.")
+        retention_command.add_argument("--reason", required=True, help="Reason this evidence is obsolete, retired, or safe to clean.")
+        retention_command.add_argument("--receipt-id", dest="receipt_id", help="Stable receipt id used as the JSON filename under project/verification/retention-receipts/.")
+        retention_command.add_argument("--json", action="store_true", help="Emit a structured retention route report.")
     claim = subparsers.add_parser(
         "claim",
         help=argparse.SUPPRESS,
