@@ -31481,6 +31481,10 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertIn("meta-feedback/incubation blocker notes", messages)
+                    self.assertIn("next_safe_review=", messages)
+                    self.assertIn(str(neighbor_root), messages)
+                    self.assertIn("diff --cached --check", messages)
+                    self.assertIn("commit -F <message-file>", messages)
 
     def test_hooks_pre_tool_allows_neighbor_memory_hygiene_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -31858,6 +31862,54 @@ class CliTests(unittest.TestCase):
             self.assertIn("git -C", messages)
             self.assertIn(str(product_root), messages)
             self.assertIn("src/mylittleharness/hooks.py", messages)
+            self.assertIn("commit -F <message-file>", messages)
+
+    def test_hooks_pre_tool_neighbor_combined_checkpoint_guidance_uses_actual_root(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src").mkdir(parents=True)
+            (product_root / "src" / "hooks.py").write_text("# hooks\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            neighbor_root = make_live_root(base / "neighbor")
+            checkpoint_paths = self._write_meta_feedback_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            hook_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "gi"
+                        + f't -C "{neighbor_root}" add -- '
+                        + stage_paths
+                        + "; Set-Content -Path reviewed-message.txt -Value checkpoint; "
+                        + "gi"
+                        + f't -C "{neighbor_root}" commit -F reviewed-message.txt'
+                    ),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertIn("split any message-file creation from the final narrow local VCS command", messages)
+            self.assertIn(str(neighbor_root), messages)
+            self.assertNotIn(str(product_root), messages)
+            self.assertIn("add -- <exact-route-files>", messages)
+            self.assertIn("diff --cached --check", messages)
             self.assertIn("commit -F <message-file>", messages)
 
     def test_hooks_pre_tool_keeps_product_source_workdir_unsafe_vcs_forms_blocked_after_closeout(self) -> None:

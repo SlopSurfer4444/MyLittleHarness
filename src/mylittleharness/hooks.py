@@ -1853,6 +1853,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             )
         )
     if allow_reviewed_local_vcs_checkpoint:
+        checkpoint_next_safe = _reviewed_local_vcs_checkpoint_next_safe_command(reviewed_local_vcs_checkpoint)
         findings.append(
             Finding(
                 "info",
@@ -1866,7 +1867,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "meta-feedback/incubation blocker notes, "
                     "and reviewed decision-backed verification evidence packages; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
-                    "decisions remain blocked"
+                    "decisions remain blocked; "
+                    f"next_safe_review={checkpoint_next_safe}"
                 ),
                 paths[0] if paths else None,
             )
@@ -2085,7 +2087,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_reviewed_local_vcs_checkpoint
         and not allow_reviewed_local_vcs_delegation
     ):
-        next_safe = _git_mutation_next_safe_command(inventory, command)
+        next_safe = _git_mutation_next_safe_command(inventory, data, command)
         if reviewed_local_vcs_checkpoint.blocked_reason:
             git_message = (
                 "blocked reviewed local VCS checkpoint because "
@@ -2097,14 +2099,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "git -C <actual-root> diff --cached --check; git -C <actual-root> commit -F <message-file>"
             )
         else:
+            split_step_hint = (
+                " split any message-file creation from the final narrow local VCS command;"
+                if _has_shell_command_separator(command)
+                else ""
+            )
             git_message = (
                 "blocked Git mutation while an active plan is open; complete explicit lifecycle closeout "
-                f"or stage the coherent route-produced lifecycle set; next_safe_command={next_safe}"
+                f"or stage the coherent route-produced lifecycle set;{split_step_hint} next_safe_command={next_safe}"
                 if _has_active_plan(inventory)
                 else (
                     "blocked broad Git mutation after closeout; only exact staging of reviewed existing files or "
                     "narrow local commit commands are allowed, and hook output cannot approve push, reset, clean, "
-                    f"amend, wildcard, directory, or broad add; next_safe_command={next_safe}"
+                    f"amend, wildcard, directory, or broad add;{split_step_hint} next_safe_command={next_safe}"
                 )
             )
         findings.append(
@@ -5288,17 +5295,61 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     return mlh_command("suggest", "--intent", safe_double_quoted(f"route owner for {safe_intent_text(rel or path, placeholder='<path>')}"))
 
 
-def _git_mutation_next_safe_command(inventory: Inventory, command: str) -> str:
+def _git_mutation_next_safe_command(inventory: Inventory, data: dict[str, object], command: str) -> str:
     if _active_plan_ready_for_route_produced_lifecycle_git(inventory):
         paths = _route_produced_lifecycle_suggested_stage_paths(inventory, _git_stage_pathspecs(command))
         if paths:
             return "gi" + "t add -- " + " ".join(shell_arg(path) for path in paths)
     if _has_active_plan(inventory):
         return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
+    actual_root_next_safe = _actual_root_vcs_next_safe_command(inventory, data, command)
+    if actual_root_next_safe:
+        return actual_root_next_safe
     product_source_next_safe = _product_source_vcs_next_safe_command(inventory, command)
     if product_source_next_safe:
         return product_source_next_safe
     return "gi" + "t add -- <exact-reviewed-files>; " + "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
+
+
+def _actual_root_vcs_next_safe_command(inventory: Inventory, data: dict[str, object], command: str) -> str:
+    actual_root = _git_effective_workdir_path(inventory, data, command)
+    if actual_root is None:
+        return ""
+    try:
+        current_root = inventory.root.resolve()
+        actual_root = actual_root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if actual_root == current_root:
+        return ""
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is not None:
+        try:
+            actual_root.relative_to(product_root.resolve())
+            return ""
+        except ValueError:
+            pass
+        except (OSError, RuntimeError):
+            return ""
+    return _local_vcs_checkpoint_next_safe_for_root(actual_root)
+
+
+def _local_vcs_checkpoint_next_safe_for_root(root: Path) -> str:
+    git_prefix = "gi" + "t -C " + shell_arg(str(root))
+    return (
+        f"{git_prefix} add -- <exact-route-files>; "
+        f"{git_prefix} diff --cached --check; "
+        f"{git_prefix} commit -F <message-file>"
+    )
+
+
+def _reviewed_local_vcs_checkpoint_next_safe_command(checkpoint: ReviewedLocalVcsCheckpoint) -> str:
+    if checkpoint.root is None:
+        return "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
+    git_prefix = "gi" + "t -C " + shell_arg(str(checkpoint.root))
+    if checkpoint.mode == "commit":
+        return f"{git_prefix} commit -F <message-file>"
+    return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
 
 
 def _product_source_vcs_next_safe_command(inventory: Inventory, command: str) -> str:
