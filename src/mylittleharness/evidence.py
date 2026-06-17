@@ -56,6 +56,7 @@ DURABLE_PROOF_RECORD_PREFIX = "project/verification/"
 DURABLE_PROOF_RECORD_LIMIT = 5
 AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
 AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
+AGENT_RUN_RETIREMENT_SUMMARY_REL = "project/verification/agent-run-retirement-summary.md"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
 AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD = 8
 AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
@@ -1184,7 +1185,8 @@ def agent_run_record_findings(inventory: Inventory, code_prefix: str = "agent-ru
             *_agent_run_record_boundary_findings(code_prefix),
         ]
 
-    findings: list[Finding] = []
+    retired_records, retirement_findings = _agent_run_retired_records(inventory.root, code_prefix)
+    findings: list[Finding] = [*retirement_findings]
     for path in paths:
         rel_path = _to_rel_path(inventory.root, path)
         if path.is_symlink() or not path.is_file():
@@ -1212,7 +1214,15 @@ def agent_run_record_findings(inventory: Inventory, code_prefix: str = "agent-ru
         findings.extend(metadata_findings)
         if any(finding.severity == "warn" for finding in metadata_findings):
             findings.append(agent_run_record_template_finding(rel_path, code_prefix))
-        findings.extend(_agent_run_source_hash_findings(inventory.root, rel_path, data, code_prefix))
+        findings.extend(
+            _agent_run_source_hash_findings(
+                inventory.root,
+                rel_path,
+                data,
+                code_prefix,
+                check_freshness=rel_path not in retired_records,
+            )
+        )
         findings.extend(_agent_run_route_proposal_findings(rel_path, data, code_prefix))
 
     findings = _summarize_agent_run_source_hash_findings(findings, code_prefix)
@@ -2010,7 +2020,14 @@ def _agent_run_record_metadata_findings(
     return findings
 
 
-def _agent_run_source_hash_findings(root: Path, rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+def _agent_run_source_hash_findings(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    code_prefix: str,
+    *,
+    check_freshness: bool = True,
+) -> list[Finding]:
     code = f"{code_prefix}-record"
     findings: list[Finding] = []
     for entry in _frontmatter_string_list(data.get("source_hashes")):
@@ -2026,6 +2043,8 @@ def _agent_run_source_hash_findings(root: Path, rel_path: str, data: dict[str, o
         conflict = _root_relative_path_conflict(source_rel)
         if conflict:
             findings.append(Finding("warn", f"{code}-malformed", f"source hash path {conflict}: {source_rel}", rel_path))
+            continue
+        if not check_freshness:
             continue
         source_path = root / source_rel
         boundary_violation = source_path_boundary_violation(root, source_path, label="agent run source hash target")
@@ -4003,6 +4022,90 @@ def _agent_run_record_paths(root: Path) -> list[Path]:
     if not directory.exists() or not directory.is_dir():
         return []
     return sorted(directory.glob("*.md"))
+
+
+def _agent_run_retired_records(root: Path, code_prefix: str) -> tuple[set[str], list[Finding]]:
+    path = root / AGENT_RUN_RETIREMENT_SUMMARY_REL
+    code = f"{code_prefix}-record-retirement"
+    if not path.exists():
+        return set(), []
+    if path.is_symlink() or not path.is_file():
+        return set(), [Finding("warn", f"{code}-malformed", "agent run retirement summary is not a regular file", AGENT_RUN_RETIREMENT_SUMMARY_REL)]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return set(), [Finding("warn", f"{code}-malformed", f"agent run retirement summary could not be read: {exc}", AGENT_RUN_RETIREMENT_SUMMARY_REL)]
+    frontmatter = parse_frontmatter(text)
+
+    findings: list[Finding] = []
+    if not frontmatter.has_frontmatter:
+        return set(), [Finding("warn", f"{code}-malformed", "agent run retirement summary is missing frontmatter", AGENT_RUN_RETIREMENT_SUMMARY_REL)]
+    for error in frontmatter.errors:
+        findings.append(Finding("warn", f"{code}-malformed", error, AGENT_RUN_RETIREMENT_SUMMARY_REL))
+    if findings:
+        return set(), findings
+
+    entries = _frontmatter_string_list(frontmatter.data.get("retired_agent_run_records"))
+    if not entries:
+        payload_data, payload_findings = _agent_run_intake_payload_frontmatter_data(text, code)
+        findings.extend(payload_findings)
+        entries = _frontmatter_string_list(payload_data.get("retired_agent_run_records"))
+
+    retired: set[str] = set()
+    for entry in entries:
+        rel_path = entry.replace("\\", "/").strip()
+        if rel_path.startswith("./"):
+            rel_path = rel_path[2:]
+        conflict = _root_relative_path_conflict(rel_path)
+        if conflict:
+            findings.append(Finding("warn", f"{code}-malformed", f"retired agent-run record path {conflict}: {entry}", AGENT_RUN_RETIREMENT_SUMMARY_REL))
+            continue
+        if not rel_path.startswith(AGENT_RUN_RECORD_PREFIX) or not rel_path.endswith(".md"):
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code}-malformed",
+                    f"retired agent-run record must be under {AGENT_RUN_RECORD_PREFIX}*.md: {entry}",
+                    AGENT_RUN_RETIREMENT_SUMMARY_REL,
+                )
+            )
+            continue
+        retired.add(rel_path)
+    if retired:
+        findings.append(
+            Finding(
+                "info",
+                f"{code}-summary",
+                (
+                    f"{len(retired)} exact agent run record(s) retired from active source-hash freshness checks by "
+                    f"{AGENT_RUN_RETIREMENT_SUMMARY_REL}; metadata and malformed source_hashes remain checked, "
+                    "future unlisted records remain in active freshness scope, and no source hashes were refreshed"
+                ),
+                AGENT_RUN_RETIREMENT_SUMMARY_REL,
+            )
+        )
+    return retired, findings
+
+
+def _agent_run_intake_payload_frontmatter_data(text: str, code: str) -> tuple[dict[str, object], list[Finding]]:
+    marker_index = text.find("## Intake Payload Frontmatter")
+    if marker_index < 0:
+        return {}, []
+    fence_index = text.find("```yaml", marker_index)
+    if fence_index < 0:
+        return {}, [Finding("warn", f"{code}-malformed", "intake payload frontmatter block is missing a yaml fence", AGENT_RUN_RETIREMENT_SUMMARY_REL)]
+    yaml_start = text.find("\n", fence_index)
+    if yaml_start < 0:
+        return {}, [Finding("warn", f"{code}-malformed", "intake payload frontmatter block is malformed", AGENT_RUN_RETIREMENT_SUMMARY_REL)]
+    yaml_end = text.find("```", yaml_start + 1)
+    if yaml_end < 0:
+        return {}, [Finding("warn", f"{code}-malformed", "intake payload frontmatter block is missing a closing fence", AGENT_RUN_RETIREMENT_SUMMARY_REL)]
+
+    payload = parse_frontmatter(f"---\n{text[yaml_start + 1:yaml_end].strip()}\n---\n")
+    findings = [Finding("warn", f"{code}-malformed", error, AGENT_RUN_RETIREMENT_SUMMARY_REL) for error in payload.errors]
+    if findings:
+        return {}, findings
+    return payload.data, []
 
 
 def _worker_run_receipt_paths(root: Path) -> list[Path]:

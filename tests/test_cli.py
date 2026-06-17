@@ -6550,6 +6550,91 @@ class CliTests(unittest.TestCase):
             self.assertEqual(codes.count("dashboard-agent-run-record-stale-summary"), 1)
             self.assertNotIn("dashboard-agent-run-record-stale", codes)
 
+    def test_agent_run_retirement_summary_skips_only_freshness_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            work_path = root / "src/work.py"
+            work_path.write_text("def work():\n    return 'before'\n", encoding="utf-8")
+            old_hash = hashlib.sha256(work_path.read_bytes()).hexdigest()
+            record_dir = root / "project/verification/agent-runs"
+            record_dir.mkdir(parents=True)
+            retirement_rel = "project/verification/agent-run-retirement-summary.md"
+            (root / retirement_rel).write_text(
+                "---\n"
+                'title: "Agent Run Retirement Summary"\n'
+                'status: "archived"\n'
+                'route: "verification"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Agent Run Retirement Summary\n\n"
+                "## Intake Payload Frontmatter\n\n"
+                "```yaml\n"
+                'title: "Agent Run Retirement Summary"\n'
+                'status: "archived"\n'
+                "retired_agent_run_records:\n"
+                '  - "project/verification/agent-runs/retired-run.md"\n'
+                "```\n\n"
+                "## Intake Payload\n\n"
+                "# Agent Run Retirement Summary\n\n"
+                "Retired pre-alpha traces from active source-hash freshness checks.\n",
+                encoding="utf-8",
+            )
+
+            def write_run(record_id: str, *source_hashes: str) -> None:
+                (record_dir / f"{record_id}.md").write_text(
+                    "---\n"
+                    'schema: "mylittleharness.agent-run.v1"\n'
+                    'record_type: "agent-run"\n'
+                    f'record_id: "{record_id}"\n'
+                    'role: "coder"\n'
+                    'actor: "codex"\n'
+                    'task: "verify retirement posture"\n'
+                    'assigned_scope: "agent-run-retirement"\n'
+                    'runtime: "local-shell"\n'
+                    'worktree_id: "main"\n'
+                    'status: "succeeded"\n'
+                    'stop_reason: "verification-passed"\n'
+                    'attempt_budget: "1/1"\n'
+                    'docs_decision: "not-needed"\n'
+                    'residual_risk: "none"\n'
+                    "input_refs:\n"
+                    '  - "project/implementation-plan.md"\n'
+                    "output_refs:\n"
+                    '  - "src/work.py"\n'
+                    "claimed_paths:\n"
+                    '  - "src/work.py"\n'
+                    "changed_files:\n"
+                    '  - "src/work.py"\n'
+                    "commands:\n"
+                    '  - "pytest -q tests/test_cli.py"\n'
+                    "verification_refs:\n"
+                    '  - "project/verification/smoke.md"\n'
+                    "source_hashes:\n"
+                    + "".join(f'  - "{entry}"\n' for entry in source_hashes)
+                    + "---\n"
+                    f"# Agent Run {record_id}\n",
+                    encoding="utf-8",
+                )
+
+            write_run("retired-run", f"src/work.py sha256={old_hash}", "not a valid source hash")
+            write_run("active-run", f"src/work.py sha256={old_hash}")
+            work_path.write_text("def work():\n    return 'after'\n", encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+
+            rendered = output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("check-agent-run-record-retirement-summary", rendered)
+            self.assertIn("1 exact agent run record(s) retired from active source-hash freshness checks", rendered)
+            self.assertIn("future unlisted records remain in active freshness scope", rendered)
+            self.assertEqual(rendered.count("check-agent-run-record-stale"), 1)
+            self.assertIn("(project/verification/agent-runs/active-run.md)", rendered)
+            self.assertIn("malformed source_hashes entry: not a valid source hash", rendered)
+
     def test_evidence_record_refresh_ignores_existing_self_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -11475,6 +11560,78 @@ class CliTests(unittest.TestCase):
             reconcile_rendered = reconcile_output.getvalue()
             self.assertIn("reconcile-coordination-evidence-approval-packet-malformed", reconcile_rendered)
             self.assertIn("reconcile-coordination-evidence-agent-run-id-mismatch", reconcile_rendered)
+
+    def test_coordination_handoff_accepted_legacy_route_aliases_are_read_only_infos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            handoff_dir = root / "project/verification/handoffs"
+            handoff_dir.mkdir(parents=True, exist_ok=True)
+            (handoff_dir / "accepted-legacy-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "accepted-legacy-alias",
+                        "status": "accepted",
+                        "accepted_by": "operator",
+                        "accepted_at_utc": "2026-06-17T00:00:00Z",
+                        "worker_id": "worker-a",
+                        "role_id": "reviewer",
+                        "execution_slice": "slice-a",
+                        "allowed_routes": ["check", "evidence"],
+                        "write_scope": ["project/verification"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["review"],
+                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "approval_packet_refs": [],
+                        "claim_refs": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (handoff_dir / "created-legacy-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "created-legacy-alias",
+                        "status": "created",
+                        "worker_id": "worker-b",
+                        "role_id": "reviewer",
+                        "execution_slice": "slice-b",
+                        "allowed_routes": ["check"],
+                        "write_scope": ["project/verification"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["review"],
+                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "approval_packet_refs": [],
+                        "claim_refs": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("check-coordination-evidence-handoff-route-legacy-alias", rendered)
+            self.assertIn("legacy command alias check", rendered)
+            self.assertIn("historical alias for route id verification", rendered)
+            self.assertIn("legacy command alias evidence", rendered)
+            self.assertIn("historical alias for route id agent-runs", rendered)
+            self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: check"))
+            self.assertNotIn("handoff allowed_routes contains unknown route id: evidence", rendered)
 
     def test_coordination_dry_run_refusals_do_not_claim_apply_was_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

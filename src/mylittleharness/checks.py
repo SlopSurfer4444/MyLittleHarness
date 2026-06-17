@@ -173,6 +173,10 @@ BUG_HUNT_LEDGER_REL = "project/verification/continuous-bug-hunt-ledger.md"
 BUG_HUNT_COVERAGE_REL = "project/verification/bug-hunt-roadmap-coverage.md"
 BUG_HUNT_DISPOSITION_STATUSES = {"fixed", "delegated", "rejected-with-reason", "still-open"}
 BUG_HUNT_ROADMAP_OWNER_STATUSES = {"accepted", "active", "done"}
+ACCEPTED_HANDOFF_LEGACY_ROUTE_ALIASES = {
+    "check": "verification",
+    "evidence": "agent-runs",
+}
 COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
 COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
 RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
@@ -687,7 +691,21 @@ def _coordination_handoff_identity_findings(root: Path, code_prefix: str) -> lis
             findings.append(Finding("warn", f"{code_prefix}-handoff-status-unknown", f"handoff status is unsupported: {status}", rel_path))
         for route_id in _coordination_string_list(data.get("allowed_routes")):
             if not route_id_is_known(route_id):
-                findings.append(Finding("warn", f"{code_prefix}-handoff-route-unknown", f"handoff allowed_routes contains unknown route id: {route_id}", rel_path))
+                legacy_target = _accepted_handoff_legacy_route_alias(route_id, data)
+                if legacy_target:
+                    findings.append(
+                        Finding(
+                            "info",
+                            f"{code_prefix}-handoff-route-legacy-alias",
+                            (
+                                f"accepted handoff allowed_routes contains legacy command alias {route_id}; "
+                                f"treated as historical alias for route id {legacy_target} in read-only diagnostics only"
+                            ),
+                            rel_path,
+                        )
+                    )
+                else:
+                    findings.append(Finding("warn", f"{code_prefix}-handoff-route-unknown", f"handoff allowed_routes contains unknown route id: {route_id}", rel_path))
             if route_id in HANDOFF_WORKER_FORBIDDEN_ROUTES:
                 findings.append(Finding("warn", f"{code_prefix}-handoff-route-forbidden", f"existing handoff packet allows lifecycle-authority route: {route_id}", rel_path))
         if status == "accepted":
@@ -702,6 +720,25 @@ def _coordination_handoff_identity_findings(root: Path, code_prefix: str) -> lis
         findings.extend(_coordination_ref_list_findings(root, data.get("approval_packet_refs"), rel_path, code_prefix, "handoff-approval-packet-ref", require_existing=True))
         findings.extend(_coordination_ref_list_findings(root, data.get("claim_refs"), rel_path, code_prefix, "handoff-work-claim-ref", require_existing=True))
     return findings
+
+
+def _accepted_handoff_legacy_route_alias(route_id: str, data: dict[str, object]) -> str | None:
+    if str(data.get("status") or "").strip() != "accepted":
+        return None
+    normalized = str(route_id or "").strip()
+    target = ACCEPTED_HANDOFF_LEGACY_ROUTE_ALIASES.get(normalized)
+    if target is None:
+        return None
+    evidence_refs = _coordination_string_list(data.get("evidence_refs"))
+    if normalized == "check":
+        if not any(ref == "project/verification" or ref.startswith("project/verification/") for ref in evidence_refs):
+            return None
+    elif normalized == "evidence":
+        if not any(ref.startswith("project/verification/agent-runs/") for ref in evidence_refs):
+            return None
+    else:
+        return None
+    return target
 
 
 def _coordination_handoff_note_findings(root: Path, code_prefix: str) -> list[Finding]:
