@@ -285,7 +285,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
     ),
     CommandIntent(
         "memory-hygiene-cleanup-review",
-        "Review memory-hygiene scan output, cleanup candidate ids, archive targets, link repairs, and per-source archive commands before any apply.",
+        "Review memory-hygiene scan output, cleanup candidate ids, reviewed archive lists, archive targets, link repairs, and per-source archive commands before any apply.",
         (
             "memory hygiene",
             "memory-hygiene",
@@ -293,6 +293,11 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
             "memory hygiene batch",
             "memory hygiene batch preview",
             "bulk archive token",
+            "archive reviewed incubation list",
+            "reviewed archive list",
+            "protected artifact archive",
+            "project plan-incubation archive list",
+            "obsolete info cleanup",
             "cleanup advisor",
             "archive candidate",
             "entry coverage",
@@ -301,11 +306,13 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         "mylittleharness --root <root> memory-hygiene --dry-run --scan",
         (
             "mylittleharness --root <root> memory-hygiene --apply --scan --proposal-token <mhb-token-from-dry-run-scan>",
+            "mylittleharness --root <root> memory-hygiene --dry-run --archive-list-file <project/verification/reviewed-archive-list.txt> --archive-folder project/archive/reference/<reviewed-folder> --reason \"<reason>\" --repair-links",
+            "mylittleharness --root <root> memory-hygiene --apply --archive-list-file <project/verification/reviewed-archive-list.txt> --archive-folder project/archive/reference/<reviewed-folder> --reason \"<reason>\" --repair-links --proposal-token <mha-token-from-dry-run>",
             "mylittleharness --root <root> memory-hygiene --dry-run --source <project/plan-incubation/file.md> --status <implemented|archived|rejected|superseded> --archive-to <project/archive/reference/incubation/file.md> --repair-links",
             "mylittleharness --root <root> memory-hygiene --apply --source <project/plan-incubation/file.md> --status <implemented|archived|rejected|superseded> --archive-to <project/archive/reference/incubation/file.md> --repair-links",
         ),
-        "live operating root after memory-hygiene scan reports cleanup candidates, blockers, or ambiguous incubation notes",
-        "scan is read-only and may emit proposal ids/tokens; token-bound batch apply and per-source apply remain explicit, with no implicit bulk archive, roadmap mutation, closeout, staging, commit, or next-plan opening",
+        "live operating root after memory-hygiene scan reports cleanup candidates, blockers, ambiguous incubation notes, or an operator has a reviewed protected-path archive list",
+        "scan and archive-list dry-runs are read-only and may emit proposal ids/tokens; token-bound batch apply, archive-list apply, and per-source apply remain explicit, with no implicit bulk archive, roadmap mutation, closeout, staging, commit, or next-plan opening",
     ),
     CommandIntent(
         "verification-ledger-rotation",

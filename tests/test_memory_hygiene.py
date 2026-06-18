@@ -508,6 +508,217 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertFalse((root / f"project/archive/reference/incubation/{date.today().isoformat()}-idea.md").exists())
             self.assertIn("proposal token mismatch or stale scan", output.getvalue())
 
+    def test_archive_list_dry_run_reports_manifest_token_and_no_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_one = make_incubation_note(root, "old-one", "Old One")
+            source_two = make_incubation_note(root, "old-two", "Old Two")
+            list_rel = "project/verification/archive-list.txt"
+            list_file = root / list_rel
+            list_file.parent.mkdir(parents=True, exist_ok=True)
+            list_file.write_text(
+                f"`{source_one.relative_to(root).as_posix()}`\n"
+                f"- `{source_two.relative_to(root).as_posix()}`\n",
+                encoding="utf-8",
+            )
+            link_file = root / "project/verification/archive-links.md"
+            link_file.write_text(
+                f"Reviewed sources: `{source_one.relative_to(root).as_posix()}` and `{source_two.relative_to(root).as_posix()}`.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--archive-list-file",
+                        list_rel,
+                        "--archive-folder",
+                        "project/archive/reference/obsolete-info-cleanup-2026-06-18",
+                        "--reason",
+                        "obsolete cleanup",
+                        "--repair-links",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("incubation-archive-list-dry-run", rendered)
+            self.assertRegex(rendered, r"mha-[a-f0-9]{16}")
+            self.assertIn("incubation-archive-list-token-command", rendered)
+            self.assertIn("would create route project/archive/reference/obsolete-info-cleanup-2026-06-18/index.md", rendered)
+            self.assertIn("would delete route project/plan-incubation/old-one.md", rendered)
+            self.assertIn("would repair exact links in 1 file(s)", rendered)
+
+    def test_archive_list_apply_moves_sources_writes_index_and_repairs_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_note(root, "old-one", "Old One")
+            source_rel = source.relative_to(root).as_posix()
+            list_rel = "project/verification/archive-list.txt"
+            (root / list_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / list_rel).write_text(f"{source_rel}\n", encoding="utf-8")
+            link_file = root / "project/verification/archive-links.md"
+            link_file.write_text(f"Reviewed source: `{source_rel}`.\n", encoding="utf-8")
+            archive_folder = "project/archive/reference/obsolete-info-cleanup-2026-06-18"
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--archive-list-file",
+                        list_rel,
+                        "--archive-folder",
+                        archive_folder,
+                        "--reason",
+                        "obsolete cleanup",
+                        "--repair-links",
+                    ]
+                )
+            self.assertEqual(dry_code, 0)
+            token_match = re.search(r"(mha-[a-f0-9]{16})", dry_output.getvalue())
+            self.assertIsNotNone(token_match)
+            token = token_match.group(1)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--archive-list-file",
+                        list_rel,
+                        "--archive-folder",
+                        archive_folder,
+                        "--reason",
+                        "obsolete cleanup",
+                        "--repair-links",
+                        "--proposal-token",
+                        token,
+                    ]
+                )
+
+            archive_rel = f"{archive_folder}/old-one.md"
+            index_rel = f"{archive_folder}/index.md"
+            self.assertEqual(apply_code, 0)
+            self.assertFalse(source.exists())
+            archived_text = (root / archive_rel).read_text(encoding="utf-8")
+            self.assertIn('status: "archived"', archived_text)
+            self.assertIn(f'archived_to: "{archive_rel}"', archived_text)
+            self.assertIn(f'archive_manifest: "{index_rel}"', archived_text)
+            index_text = (root / index_rel).read_text(encoding="utf-8")
+            self.assertIn("obsolete cleanup", index_text)
+            self.assertIn(source_rel, index_text)
+            self.assertIn(archive_rel, index_text)
+            self.assertIn(token, index_text)
+            self.assertIn(f"`{archive_rel}`", link_file.read_text(encoding="utf-8"))
+            rendered = apply_output.getvalue()
+            self.assertIn("incubation-archive-list-token-accepted", rendered)
+            self.assertIn("incubation-archive-list-index-written", rendered)
+            self.assertIn("incubation-archive-list-link-repaired", rendered)
+
+    def test_archive_list_refuses_current_or_nonconforming_sources_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            canonical = make_incubation_note(root, "current", "Current", frontmatter_extra='canonical: true\n')
+            prompt = root / "project/plan-incubation/launch-prompt.md"
+            prompt.write_text("# Launch Prompt\n\nUse this prompt somewhere else.\n", encoding="utf-8")
+            list_rel = "project/verification/archive-list.txt"
+            (root / list_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / list_rel).write_text(
+                f"{canonical.relative_to(root).as_posix()}\n{prompt.relative_to(root).as_posix()}\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--archive-list-file",
+                        list_rel,
+                        "--archive-folder",
+                        "project/archive/reference/obsolete-info-cleanup-2026-06-18",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("current/canonical", rendered)
+            self.assertIn("source frontmatter is required", rendered)
+            self.assertIn("prompt/reference normalization route", rendered)
+
+    def test_archive_list_apply_refuses_stale_token_when_source_becomes_live(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_note(root, "old-one", "Old One")
+            source_rel = source.relative_to(root).as_posix()
+            list_rel = "project/verification/archive-list.txt"
+            (root / list_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / list_rel).write_text(f"{source_rel}\n", encoding="utf-8")
+            archive_folder = "project/archive/reference/obsolete-info-cleanup-2026-06-18"
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--archive-list-file",
+                        list_rel,
+                        "--archive-folder",
+                        archive_folder,
+                    ]
+                )
+            self.assertEqual(dry_code, 0)
+            token_match = re.search(r"(mha-[a-f0-9]{16})", dry_output.getvalue())
+            self.assertIsNotNone(token_match)
+            token = token_match.group(1)
+            write_relationship_roadmap(root, source_rel, status="active")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--archive-list-file",
+                        list_rel,
+                        "--archive-folder",
+                        archive_folder,
+                        "--proposal-token",
+                        token,
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertTrue(source.exists())
+            self.assertFalse((root / f"{archive_folder}/index.md").exists())
+            self.assertIn("live roadmap source_incubation consumer", output.getvalue())
+
     def test_scan_treats_reconstructed_archive_uncertain_docs_as_historical_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -1409,6 +1620,25 @@ def make_research_source(root: Path) -> Path:
         "---\n"
         "# Raw Import\n\n"
         "Raw imported notes.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def make_incubation_note(root: Path, slug: str, title: str, frontmatter_extra: str = "") -> Path:
+    path = root / f"project/plan-incubation/{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        f'topic: "{title}"\n'
+        'status: "incubating"\n'
+        'created: "2026-05-01"\n'
+        f"{frontmatter_extra}"
+        "---\n"
+        f"# {title}\n\n"
+        "## Entries\n\n"
+        "### 2026-05-01\n\n"
+        "Reviewed stale incubation material.\n",
         encoding="utf-8",
     )
     return path

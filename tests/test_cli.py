@@ -1576,6 +1576,9 @@ class CliTests(unittest.TestCase):
                     self.assertIn(intent_id, rendered)
                     self.assertIn(command, rendered)
                     self.assertIn(boundary, rendered)
+                    if intent_id == "memory-hygiene-cleanup-review":
+                        self.assertIn("--archive-list-file", rendered)
+                        self.assertIn("<mha-token-from-dry-run>", rendered)
                     if intent_id == "work-claim-review":
                         self.assertIn("evidence --record --dry-run", rendered)
                         self.assertNotIn("recover-roadmap-source-incubation", rendered)

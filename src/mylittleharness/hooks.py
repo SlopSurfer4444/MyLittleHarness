@@ -1689,7 +1689,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-block-lifecycle-markdown-shortcut",
                 (
                     "blocked direct lifecycle Markdown write without MLH route/frontmatter evidence; "
-                    f"next_safe_command={_hook_route_next_safe_command(inventory, route_path)}"
+                    f"next_safe_command={_hook_lifecycle_markdown_shortcut_next_safe_command(inventory, route_path, write_command)}"
                 ),
                 route_path,
             )
@@ -5235,6 +5235,30 @@ def _hook_scope_diagnostic_message(allowed_scope: list[str], blocked_scope: list
     allowed = ", ".join(_dedupe_nonempty(allowed_scope)) or "none"
     blocked = ", ".join(_dedupe_nonempty(blocked_scope)) or "none"
     return f"allowed_paths={allowed}; blocked_paths={blocked}"
+
+
+def _hook_lifecycle_markdown_shortcut_next_safe_command(inventory: Inventory, path: str, command: str) -> str:
+    rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
+    if _looks_like_incubation_archive_maintenance_shortcut(rel, command):
+        return mlh_command(
+            "memory-hygiene",
+            "--dry-run",
+            "--archive-list-file",
+            "<project/verification/reviewed-archive-list.txt>",
+            "--archive-folder",
+            "project/archive/reference/<reviewed-folder>",
+            "--reason",
+            '"<reason>"',
+            "--repair-links",
+        )
+    return _hook_route_next_safe_command(inventory, path)
+
+
+def _looks_like_incubation_archive_maintenance_shortcut(rel: str, command: str) -> bool:
+    if not rel.startswith("project/plan-incubation/"):
+        return False
+    normalized = command.casefold()
+    return any(marker in normalized for marker in ("remove-item", "move-item", "rm ", "mv ", "del ", "archive"))
 
 
 def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:

@@ -13,6 +13,7 @@ from .command_discovery import rails_not_cognition_boundary_finding
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
+from .reporting import RouteWriteEvidence, route_write_findings
 from .research_recovery import deep_research_rubric_recovery_findings
 from .roadmap_semantics import roadmap_item_is_terminal_history_stub
 from .safe_commands import mlh_command
@@ -24,9 +25,13 @@ VERIFICATION_DIR_REL = "project/verification"
 ARCHIVE_RESEARCH_DIR_REL = "project/archive/reference/research"
 ARCHIVE_INCUBATION_DIR_REL = "project/archive/reference/incubation"
 ARCHIVE_VERIFICATION_DIR_REL = "project/archive/reference/verification"
+ARCHIVE_REFERENCE_DIR_REL = "project/archive/reference"
 ROADMAP_REL = "project/roadmap.md"
 DEFAULT_VERIFICATION_LEDGER_REL = f"{VERIFICATION_DIR_REL}/autonomous-mlh-swim-ledger.md"
 VERIFICATION_LEDGER_CONTINUITY_MARKER = "<!-- mylittleharness-verification-ledger-continuity v1 -->"
+ARCHIVE_LIST_SCHEMA = "mylittleharness.incubation-archive-list.v1"
+ARCHIVE_LIST_TOKEN_SCHEMA = "mylittleharness.incubation-archive-list-token.v1"
+ARCHIVE_LIST_INDEX_FILENAME = "index.md"
 ALLOWED_STATUS_VALUES = {"archived", "distilled", "implemented", "rejected"}
 TERMINAL_ROADMAP_STATUSES = {"done", "rejected", "superseded"}
 RELATIONSHIP_STATUS_FIELDS = {
@@ -117,6 +122,8 @@ class MemoryHygieneRequest:
     source_hash: str = ""
     reason: str = ""
     proposal_token: str = ""
+    archive_list_file: str = ""
+    archive_folder: str = ""
 
 
 @dataclass(frozen=True)
@@ -183,6 +190,35 @@ class MemoryHygieneBatchCandidate:
     apply_command: str
 
 
+@dataclass(frozen=True)
+class IncubationArchiveListEntry:
+    source_rel: str
+    source_path: Path
+    archive_rel: str
+    archive_path: Path
+    source_text: str
+    archived_text: str
+    source_hash: str
+
+
+@dataclass(frozen=True)
+class IncubationArchiveListPlan:
+    list_rel: str
+    list_path: Path
+    list_hash: str
+    archive_folder_rel: str
+    archive_folder_path: Path
+    index_rel: str
+    index_path: Path
+    created: str
+    reason: str
+    repair_links: bool
+    entries: tuple[IncubationArchiveListEntry, ...]
+    link_repairs: tuple[tuple[str, Path, str], ...]
+    proposal_token: str
+    index_text: str
+
+
 def sync_roadmap_current_posture_section(text: str) -> str:
     lines = text.splitlines(keepends=True)
     bounds = _roadmap_h2_section_bounds(lines, ROADMAP_CURRENT_POSTURE_TITLE)
@@ -209,6 +245,8 @@ def make_memory_hygiene_request(
     source_hash: str | None = None,
     reason: str | None = None,
     proposal_token: str | None = None,
+    archive_list_file: str | None = None,
+    archive_folder: str | None = None,
 ) -> MemoryHygieneRequest:
     source_rel = _normalize_rel(source)
     if rotate_ledger and not source_rel:
@@ -231,10 +269,15 @@ def make_memory_hygiene_request(
         source_hash=str(source_hash or "").strip().casefold(),
         reason=str(reason or "").strip(),
         proposal_token=str(proposal_token or "").strip().casefold(),
+        archive_list_file=_normalize_rel(archive_list_file),
+        archive_folder=_normalize_rel(archive_folder),
     )
 
 
 def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if _archive_list_mode(request):
+        return incubation_archive_list_dry_run_findings(inventory, request)
+
     if request.rotate_ledger:
         return verification_ledger_rotate_dry_run_findings(inventory, request)
 
@@ -286,6 +329,9 @@ def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygiene
 
 
 def memory_hygiene_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if _archive_list_mode(request):
+        return incubation_archive_list_apply_findings(inventory, request)
+
     if request.rotate_ledger:
         return verification_ledger_rotate_apply_findings(inventory, request)
 
@@ -474,6 +520,146 @@ def _memory_hygiene_batch_apply_findings(inventory: Inventory, request: MemoryHy
             "info",
             "memory-hygiene-validation-posture",
             "run check after token-bound batch apply; hygiene output is not lifecycle approval",
+        )
+    )
+    return findings
+
+
+def incubation_archive_list_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    findings = [
+        Finding("info", "incubation-archive-list-dry-run", "reviewed incubation archive-list proposal only; no files were written"),
+        _root_posture_finding(inventory),
+    ]
+    plan, errors = _incubation_archive_list_plan(inventory, request)
+    if request.proposal_token:
+        errors.append(
+            Finding(
+                "error",
+                "incubation-archive-list-refused",
+                "--proposal-token is accepted only with --apply for archive-list maintenance",
+                request.archive_list_file or None,
+            )
+        )
+    if plan:
+        findings.extend(_incubation_archive_list_plan_findings(plan, apply=False))
+        findings.extend(route_write_findings("incubation-archive-list-route-write", _incubation_archive_list_route_writes(plan), apply=False))
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "incubation-archive-list-validation-posture",
+                "dry-run refused before apply; fix archive-list refusal reasons, then rerun dry-run before moving protected incubation notes",
+            )
+        )
+        return findings
+    findings.extend(_incubation_archive_list_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "incubation-archive-list-validation-posture",
+            "apply would move only the reviewed eligible incubation notes, write the archive index, and repair exact links if requested; dry-run writes no files",
+            plan.index_rel if plan else None,
+        )
+    )
+    return findings
+
+
+def incubation_archive_list_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if not request.proposal_token:
+        return [
+            Finding(
+                "error",
+                "incubation-archive-list-refused",
+                "--apply archive-list requires the mha-* --proposal-token reported by the reviewed dry-run",
+                request.archive_list_file or None,
+            )
+        ]
+    if not re.fullmatch(r"mha-[0-9a-f]{16}", request.proposal_token):
+        return [
+            Finding(
+                "error",
+                "incubation-archive-list-refused",
+                "--proposal-token must be the mha-* token reported by memory-hygiene --dry-run --archive-list-file",
+                request.archive_list_file or None,
+            )
+        ]
+
+    plan, errors = _incubation_archive_list_plan(inventory, request)
+    if errors:
+        return errors
+    assert plan is not None
+    if request.proposal_token != plan.proposal_token:
+        return [
+            Finding(
+                "error",
+                "incubation-archive-list-refused",
+                (
+                    "proposal token mismatch or stale archive-list review; "
+                    f"expected current token {plan.proposal_token}, received {request.proposal_token}; rerun memory-hygiene --dry-run --archive-list-file"
+                ),
+                plan.list_rel,
+            )
+        ]
+
+    route_writes = _incubation_archive_list_route_writes(plan)
+    operations: list[AtomicFileWrite | AtomicFileDelete] = []
+    for entry in plan.entries:
+        archive_tmp = entry.archive_path.with_name(f".{entry.archive_path.name}.incubation-archive-list.tmp")
+        archive_backup = entry.archive_path.with_name(f".{entry.archive_path.name}.incubation-archive-list.backup")
+        source_backup = entry.source_path.with_name(f".{entry.source_path.name}.incubation-archive-list.backup")
+        operations.append(AtomicFileWrite(entry.archive_path, archive_tmp, entry.archived_text, archive_backup))
+        operations.append(AtomicFileDelete(entry.source_path, source_backup))
+
+    index_tmp = plan.index_path.with_name(f".{plan.index_path.name}.incubation-archive-list.tmp")
+    index_backup = plan.index_path.with_name(f".{plan.index_path.name}.incubation-archive-list.backup")
+    operations.append(AtomicFileWrite(plan.index_path, index_tmp, plan.index_text, index_backup))
+
+    for _, path, text in plan.link_repairs:
+        link_tmp = path.with_name(f".{path.name}.incubation-archive-list.tmp")
+        link_backup = path.with_name(f".{path.name}.incubation-archive-list.backup")
+        operations.append(AtomicFileWrite(path, link_tmp, text, link_backup))
+
+    try:
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "incubation-archive-list-refused",
+                f"archive-list apply failed before all target writes completed: {exc}",
+                plan.list_rel,
+            )
+        ]
+
+    findings = [
+        Finding("info", "incubation-archive-list-apply", "reviewed incubation archive-list apply started"),
+        _root_posture_finding(inventory),
+        Finding(
+            "info",
+            "incubation-archive-list-token-accepted",
+            (
+                f"accepted reviewed proposal token {request.proposal_token} for {len(plan.entries)} source(s); "
+                "token binds the reviewed list, source hashes, archive targets, manifest identity, and exact link-repair file hashes"
+            ),
+            plan.list_rel,
+        ),
+    ]
+    findings.extend(route_write_findings("incubation-archive-list-route-write", route_writes, apply=True))
+    for entry in plan.entries:
+        findings.append(Finding("info", "incubation-archive-list-archived", f"archived {entry.source_rel} to {entry.archive_rel}", entry.archive_rel))
+    findings.append(Finding("info", "incubation-archive-list-index-written", f"wrote archive index {plan.index_rel}", plan.index_rel))
+    for rel_path, _, _ in plan.link_repairs:
+        findings.append(Finding("info", "incubation-archive-list-link-repaired", f"repaired exact source-path references in {rel_path}", rel_path))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "incubation-archive-list-backup-cleanup", warning, plan.index_rel))
+    findings.extend(_incubation_archive_list_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "incubation-archive-list-validation-posture",
+            "run check after apply to verify archive references and live operating-root posture; archive-list output is not lifecycle closeout approval",
+            plan.index_rel,
         )
     )
     return findings
@@ -747,6 +933,554 @@ def _fresh_verification_ledger_text(source_rel: str, archive_rel: str, source_ha
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _archive_list_mode(request: MemoryHygieneRequest) -> bool:
+    return bool(request.archive_list_file or request.archive_folder)
+
+
+def _incubation_archive_list_plan(
+    inventory: Inventory, request: MemoryHygieneRequest
+) -> tuple[IncubationArchiveListPlan | None, list[Finding]]:
+    errors = _incubation_archive_list_request_errors(inventory, request)
+    list_path = inventory.root / request.archive_list_file if request.archive_list_file else inventory.root
+    archive_folder_path = inventory.root / request.archive_folder if request.archive_folder else inventory.root
+    errors.extend(_archive_list_file_errors(inventory, request.archive_list_file, list_path))
+    errors.extend(_archive_list_folder_errors(inventory, request.archive_folder, archive_folder_path))
+    if errors:
+        return None, errors
+
+    try:
+        list_text = list_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding("error", "incubation-archive-list-refused", f"reviewed path list could not be read: {exc}", request.archive_list_file)]
+
+    source_rels, list_errors = _archive_list_source_rels(list_text)
+    if list_errors:
+        return None, [Finding("error", "incubation-archive-list-refused", error, request.archive_list_file) for error in list_errors]
+
+    entries: list[IncubationArchiveListEntry] = []
+    target_rels: set[str] = set()
+    roadmap_items = _roadmap_items(inventory)
+    live_consumers_by_source = _live_source_incubation_consumers_by_source(roadmap_items)
+    for source_rel in source_rels:
+        source_path = inventory.root / source_rel
+        archive_rel = _archive_list_archive_rel(request.archive_folder, source_rel)
+        archive_path = inventory.root / archive_rel
+        source_errors = _archive_list_source_errors(inventory, source_rel, source_path, archive_rel, archive_path)
+        if archive_rel in target_rels:
+            source_errors.append(
+                Finding(
+                    "error",
+                    "incubation-archive-list-refused",
+                    f"multiple reviewed sources would archive to the same target: {archive_rel}",
+                    source_rel,
+                )
+            )
+        target_rels.add(archive_rel)
+        if source_errors:
+            errors.extend(source_errors)
+            continue
+
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(Finding("error", "incubation-archive-list-refused", f"source could not be read: {exc}", source_rel))
+            continue
+
+        frontmatter = parse_frontmatter(source_text)
+        blockers: list[str] = []
+        if not frontmatter.has_frontmatter:
+            blockers.append(
+                "source frontmatter is required; nonconforming launch prompts or prompt packets need a prompt/reference normalization route before archive-list movement"
+            )
+        if frontmatter.errors:
+            blockers.append(f"source frontmatter has parse errors: {', '.join(frontmatter.errors)}")
+        if frontmatter.has_frontmatter and not frontmatter.errors:
+            blockers.extend(_archive_list_current_blockers(frontmatter.data))
+            blockers.extend(_archive_list_roadmap_blockers(source_rel, frontmatter.data, roadmap_items, live_consumers_by_source))
+            blockers.extend(_archive_list_active_plan_blockers(inventory, source_rel))
+            blockers.extend(incubation_archive_blockers(source_text, ignore_stale_implementation_tail=True))
+        if blockers:
+            errors.append(
+                Finding(
+                    "error",
+                    "incubation-archive-list-refused",
+                    f"reviewed source is not eligible for archive-list movement: {', '.join(dict.fromkeys(blockers))}",
+                    source_rel,
+                )
+            )
+            continue
+
+        archived_text, frontmatter_error = _text_with_frontmatter_scalars(
+            source_text,
+            {
+                "status": "archived",
+                "archived_to": archive_rel,
+                "archive_manifest": _archive_list_index_rel(request.archive_folder),
+                "archive_reason": _archive_list_reason(request),
+            },
+        )
+        if frontmatter_error:
+            errors.append(Finding("error", "incubation-archive-list-refused", frontmatter_error, source_rel))
+            continue
+
+        entries.append(
+            IncubationArchiveListEntry(
+                source_rel=source_rel,
+                source_path=source_path,
+                archive_rel=archive_rel,
+                archive_path=archive_path,
+                source_text=source_text,
+                archived_text=archived_text,
+                source_hash=_sha256_text(source_text),
+            )
+        )
+
+    if errors:
+        return None, errors
+    link_repairs = _incubation_archive_list_link_repairs(inventory, tuple(entries), request.archive_list_file, request.repair_links)
+    created = date.today().isoformat()
+    list_hash = _sha256_text(list_text)
+    proposal_token = _incubation_archive_list_token(
+        list_rel=request.archive_list_file,
+        list_hash=list_hash,
+        archive_folder_rel=request.archive_folder,
+        index_rel=_archive_list_index_rel(request.archive_folder),
+        created=created,
+        reason=_archive_list_reason(request),
+        repair_links=request.repair_links,
+        entries=tuple(entries),
+        link_repairs=link_repairs,
+    )
+    index_text = _incubation_archive_list_index_text(
+        list_rel=request.archive_list_file,
+        archive_folder_rel=request.archive_folder,
+        index_rel=_archive_list_index_rel(request.archive_folder),
+        created=created,
+        reason=_archive_list_reason(request),
+        repair_links=request.repair_links,
+        entries=tuple(entries),
+        link_repairs=link_repairs,
+        proposal_token=proposal_token,
+    )
+    return (
+        IncubationArchiveListPlan(
+            list_rel=request.archive_list_file,
+            list_path=list_path,
+            list_hash=list_hash,
+            archive_folder_rel=request.archive_folder,
+            archive_folder_path=archive_folder_path,
+            index_rel=_archive_list_index_rel(request.archive_folder),
+            index_path=inventory.root / _archive_list_index_rel(request.archive_folder),
+            created=created,
+            reason=_archive_list_reason(request),
+            repair_links=request.repair_links,
+            entries=tuple(entries),
+            link_repairs=link_repairs,
+            proposal_token=proposal_token,
+            index_text=index_text,
+        ),
+        [],
+    )
+
+
+def _incubation_archive_list_request_errors(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    errors: list[Finding] = []
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(Finding("error", "incubation-archive-list-refused", "target is a product-source compatibility fixture; archive-list apply is refused"))
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(Finding("error", "incubation-archive-list-refused", "target is fallback/archive or generated-output evidence; archive-list apply is refused"))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding("error", "incubation-archive-list-refused", f"target root kind is {inventory.root_kind}; archive-list requires a live operating root"))
+    if not request.archive_list_file:
+        errors.append(Finding("error", "incubation-archive-list-refused", "--archive-list-file is required for archive-list maintenance"))
+    if not request.archive_folder:
+        errors.append(Finding("error", "incubation-archive-list-refused", "--archive-folder is required for archive-list maintenance"))
+    if request.source or request.promoted_to or request.archive_to or request.status or request.scan or request.archive_covered or request.entry_coverage or request.rotate_ledger or request.source_hash:
+        errors.append(
+            Finding(
+                "error",
+                "incubation-archive-list-refused",
+                "--archive-list-file/--archive-folder cannot be combined with source, promotion, archive-to, status, scan, rotate-ledger, source-hash, archive-covered, or entry-coverage fields",
+            )
+        )
+    if "\n" in request.reason or "\r" in request.reason:
+        errors.append(Finding("error", "incubation-archive-list-refused", "--reason must be a single line for archive-list manifests", request.archive_list_file or None))
+    return errors
+
+
+def _archive_list_file_errors(inventory: Inventory, list_rel: str, list_path: Path) -> list[Finding]:
+    if not list_rel:
+        return []
+    errors: list[Finding] = []
+    if _rel_has_absolute_or_parent_parts(list_rel):
+        errors.append(Finding("error", "incubation-archive-list-refused", "--archive-list-file must be a root-relative path without parent segments", list_rel))
+        return errors
+    if _path_escapes_root(inventory.root, list_path):
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed path-list file escapes the target root", list_rel))
+    elif not list_path.exists():
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed path-list file does not exist", list_rel))
+    elif list_path.is_symlink():
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed path-list file is a symlink", list_rel))
+    elif not list_path.is_file():
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed path-list file is not a regular file", list_rel))
+    return errors
+
+
+def _archive_list_folder_errors(inventory: Inventory, folder_rel: str, folder_path: Path) -> list[Finding]:
+    if not folder_rel:
+        return []
+    errors: list[Finding] = []
+    if _rel_has_absolute_or_parent_parts(folder_rel):
+        errors.append(Finding("error", "incubation-archive-list-refused", "--archive-folder must be a root-relative path without parent segments", folder_rel))
+        return errors
+    if folder_rel == ARCHIVE_REFERENCE_DIR_REL or not folder_rel.startswith(f"{ARCHIVE_REFERENCE_DIR_REL}/"):
+        errors.append(Finding("error", "incubation-archive-list-refused", "--archive-folder must be a reviewed subfolder under project/archive/reference/", folder_rel))
+    if folder_rel.endswith(".md"):
+        errors.append(Finding("error", "incubation-archive-list-refused", "--archive-folder must be a folder path, not a Markdown file", folder_rel))
+    if _path_escapes_root(inventory.root, folder_path):
+        errors.append(Finding("error", "incubation-archive-list-refused", "archive folder path escapes the target root", folder_rel))
+        return errors
+    for parent in _parents_between(inventory.root, folder_path):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding("error", "incubation-archive-list-refused", f"archive folder contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding("error", "incubation-archive-list-refused", f"archive folder contains a non-directory segment: {rel}", rel))
+    if folder_path.exists() and not folder_path.is_dir():
+        errors.append(Finding("error", "incubation-archive-list-refused", "archive folder target exists but is not a directory", folder_rel))
+    index_path = inventory.root / _archive_list_index_rel(folder_rel)
+    if index_path.exists():
+        errors.append(Finding("error", "incubation-archive-list-refused", "archive-list index target already exists", _archive_list_index_rel(folder_rel)))
+    return errors
+
+
+def _archive_list_source_rels(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    source_rels: list[str] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if line.startswith("`") and line.endswith("`"):
+            line = line[1:-1].strip()
+        source_rel = _normalize_rel(line)
+        if not source_rel:
+            continue
+        if source_rel in seen:
+            errors.append(f"line {line_number}: duplicate reviewed path {source_rel}")
+            continue
+        seen.add(source_rel)
+        source_rels.append(source_rel)
+    if not source_rels:
+        errors.append("reviewed path list contains no source paths")
+    return tuple(source_rels), tuple(errors)
+
+
+def _archive_list_source_errors(
+    inventory: Inventory,
+    source_rel: str,
+    source_path: Path,
+    archive_rel: str,
+    archive_path: Path,
+) -> list[Finding]:
+    errors: list[Finding] = []
+    if _rel_has_absolute_or_parent_parts(source_rel):
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source must be root-relative without parent segments", source_rel))
+        return errors
+    if not source_rel.startswith(f"{INCUBATION_DIR_REL}/"):
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source must be under project/plan-incubation/", source_rel))
+    if not source_rel.endswith(".md"):
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source must be a Markdown file", source_rel))
+    if Path(source_rel).name == ARCHIVE_LIST_INDEX_FILENAME:
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source basename index.md would collide with the archive manifest", source_rel))
+    if _path_escapes_root(inventory.root, source_path):
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source path escapes the target root", source_rel))
+    elif not source_path.exists():
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source does not exist", source_rel))
+    elif source_path.is_symlink():
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source is a symlink", source_rel))
+    elif not source_path.is_file():
+        errors.append(Finding("error", "incubation-archive-list-refused", "reviewed source is not a regular file", source_rel))
+    if _path_escapes_root(inventory.root, archive_path):
+        errors.append(Finding("error", "incubation-archive-list-refused", "archive target path escapes the target root", archive_rel))
+    elif archive_path.exists():
+        errors.append(Finding("error", "incubation-archive-list-refused", "archive target already exists", archive_rel))
+    for parent in _parents_between(inventory.root, archive_path.parent):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding("error", "incubation-archive-list-refused", f"archive target directory contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding("error", "incubation-archive-list-refused", f"archive target directory contains a non-directory segment: {rel}", rel))
+    return errors
+
+
+def _archive_list_current_blockers(data: dict[str, object]) -> tuple[str, ...]:
+    blockers: list[str] = []
+    for key in ("canonical", "current", "current_authority", "source_of_truth"):
+        if _frontmatter_truthy(data.get(key)):
+            blockers.append(f"frontmatter {key} marks this note as current/canonical")
+    authority = str(data.get("authority") or "").strip().casefold().replace("_", "-")
+    if authority in {"canonical", "current", "source-of-truth", "source of truth"}:
+        blockers.append(f"frontmatter authority={authority!r} marks this note as current/canonical")
+    return tuple(blockers)
+
+
+def _archive_list_roadmap_blockers(
+    source_rel: str,
+    data: dict[str, object],
+    roadmap_items: dict[str, dict[str, object]],
+    live_consumers_by_source: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    live_consumers = live_consumers_by_source.get(source_rel, ())
+    if live_consumers:
+        blockers.append(f"live roadmap source_incubation consumer(s): {', '.join(live_consumers)}")
+    related_item = str(data.get("related_roadmap_item") or "").strip()
+    if related_item:
+        fields = roadmap_items.get(related_item)
+        status = str((fields or {}).get("status") or "").strip().casefold()
+        if status and status not in TERMINAL_ROADMAP_STATUSES:
+            blockers.append(f"related roadmap item {related_item!r} is still {status!r}")
+    return tuple(blockers)
+
+
+def _archive_list_active_plan_blockers(inventory: Inventory, source_rel: str) -> tuple[str, ...]:
+    state = inventory.surface_by_rel.get("project/project-state.md")
+    if not state or str(state.frontmatter.data.get("plan_status") or "").strip().casefold() != "active":
+        return ()
+    plan = inventory.surface_by_rel.get("project/implementation-plan.md")
+    if plan and source_rel in plan.content:
+        return ("active implementation plan still references this source",)
+    return ()
+
+
+def _frontmatter_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().casefold()
+    return normalized in {"1", "true", "yes", "y", "current", "canonical", "source-of-truth", "source of truth"}
+
+
+def _incubation_archive_list_link_repairs(
+    inventory: Inventory,
+    entries: tuple[IncubationArchiveListEntry, ...],
+    list_rel: str,
+    repair_links: bool,
+) -> tuple[tuple[str, Path, str], ...]:
+    if not repair_links:
+        return ()
+    source_rels = {entry.source_rel for entry in entries}
+    replacements = tuple((entry.source_rel, entry.archive_rel) for entry in entries)
+    repairs: list[tuple[str, Path, str]] = []
+    for path in _iter_lifecycle_markdown_files(inventory.root):
+        rel_path = path.relative_to(inventory.root).as_posix()
+        if rel_path in source_rels or rel_path == list_rel or rel_path.startswith("project/archive/"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        updated = text
+        for source_rel, archive_rel in replacements:
+            updated = _replace_exact_route_ref(updated, source_rel, archive_rel)
+        if updated != text:
+            repairs.append((rel_path, path, updated))
+    return tuple(repairs)
+
+
+def _incubation_archive_list_token(
+    *,
+    list_rel: str,
+    list_hash: str,
+    archive_folder_rel: str,
+    index_rel: str,
+    created: str,
+    reason: str,
+    repair_links: bool,
+    entries: tuple[IncubationArchiveListEntry, ...],
+    link_repairs: tuple[tuple[str, Path, str], ...],
+) -> str:
+    payload = {
+        "schema": ARCHIVE_LIST_TOKEN_SCHEMA,
+        "route_class": "incubation-archive-list",
+        "reviewed_list": list_rel,
+        "reviewed_list_hash": list_hash,
+        "archive_folder": archive_folder_rel,
+        "index": index_rel,
+        "created": created,
+        "reason": reason,
+        "repair_links": repair_links,
+        "entries": [
+            {
+                "source": entry.source_rel,
+                "source_hash": entry.source_hash,
+                "archive": entry.archive_rel,
+                "archive_hash": _sha256_text(entry.archived_text),
+            }
+            for entry in entries
+        ],
+        "link_repairs": [
+            {
+                "path": rel_path,
+                "source_hash": _archive_list_file_hash(path),
+                "updated_hash": _sha256_text(updated_text),
+            }
+            for rel_path, path, updated_text in link_repairs
+        ],
+        "boundary": "token authorizes only exact current reviewed archive-list movement and optional exact link repairs",
+    }
+    return "mha-" + _stable_digest(payload)[:16]
+
+
+def _incubation_archive_list_index_text(
+    *,
+    list_rel: str,
+    archive_folder_rel: str,
+    index_rel: str,
+    created: str,
+    reason: str,
+    repair_links: bool,
+    entries: tuple[IncubationArchiveListEntry, ...],
+    link_repairs: tuple[tuple[str, Path, str], ...],
+    proposal_token: str,
+) -> str:
+    lines = [
+        "---",
+        f'schema: "{ARCHIVE_LIST_SCHEMA}"',
+        'status: "archived"',
+        f'created: "{_yaml_double_quoted_value(created)}"',
+        f'reviewed_list: "{_yaml_double_quoted_value(list_rel)}"',
+        f'archive_folder: "{_yaml_double_quoted_value(archive_folder_rel)}"',
+        f'index_path: "{_yaml_double_quoted_value(index_rel)}"',
+        f'source_count: "{len(entries)}"',
+        f'repair_links: "{str(repair_links).lower()}"',
+        f'reason: "{_yaml_double_quoted_value(reason)}"',
+        f'proposal_token: "{_yaml_double_quoted_value(proposal_token)}"',
+        "---",
+        "# Incubation Archive List",
+        "",
+        "This manifest records a reviewed movement of eligible incubation notes into reference archive storage.",
+        "",
+        "## Boundary",
+        "",
+        "- The archive is historical reference material, not current operating authority.",
+        "- The reviewed list, proposal token, source hashes, archive targets, and optional exact link repairs were bound by the dry-run.",
+        "- This manifest does not approve closeout, roadmap status, commit, rollback, deletion, or future lifecycle movement.",
+        "",
+        "## Reviewed Sources",
+        "",
+        "| Source | Archive | Source SHA-256 |",
+        "| --- | --- | --- |",
+    ]
+    for entry in entries:
+        lines.append(f"| `{entry.source_rel}` | `{entry.archive_rel}` | `{entry.source_hash}` |")
+    lines.extend(["", "## Link Repairs", ""])
+    if link_repairs:
+        for rel_path, path, updated_text in link_repairs:
+            lines.append(f"- `{rel_path}` before `{_archive_list_file_hash(path)}` after `{_sha256_text(updated_text)}`")
+    else:
+        lines.append("- None")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _incubation_archive_list_plan_findings(plan: IncubationArchiveListPlan, apply: bool) -> list[Finding]:
+    prefix = "" if apply else "would "
+    findings = [
+        Finding(
+            "info",
+            "incubation-archive-list-plan",
+            f"{prefix}archive {len(plan.entries)} reviewed incubation source(s) into {plan.archive_folder_rel}",
+            plan.archive_folder_rel,
+        ),
+        Finding("info", "incubation-archive-list-index-plan", f"{prefix}write archive index {plan.index_rel}", plan.index_rel),
+        Finding("info", "incubation-archive-list-reason", f"archive-list reason: {plan.reason}", plan.list_rel),
+        Finding(
+            "info",
+            "incubation-archive-list-token",
+            f"reviewed archive-list proposal token: {plan.proposal_token}",
+            plan.list_rel,
+        ),
+        Finding(
+            "info",
+            "incubation-archive-list-token-command",
+            f"copy-ready apply command: {_incubation_archive_list_apply_command(plan)}",
+            plan.list_rel,
+        ),
+    ]
+    for entry in plan.entries:
+        findings.append(Finding("info", "incubation-archive-list-source", f"{prefix}move {entry.source_rel} to {entry.archive_rel}", entry.source_rel))
+    findings.append(Finding("info", "incubation-archive-list-link-plan", f"{prefix}repair exact links in {len(plan.link_repairs)} file(s)", plan.index_rel))
+    return findings
+
+
+def _incubation_archive_list_route_writes(plan: IncubationArchiveListPlan) -> tuple[RouteWriteEvidence, ...]:
+    writes: list[RouteWriteEvidence] = []
+    for entry in plan.entries:
+        writes.append(RouteWriteEvidence(entry.archive_rel, None, entry.archived_text))
+        writes.append(RouteWriteEvidence(entry.source_rel, entry.source_text, None))
+    writes.append(RouteWriteEvidence(plan.index_rel, None, plan.index_text))
+    for rel_path, path, updated_text in plan.link_repairs:
+        before_text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
+        writes.append(RouteWriteEvidence(rel_path, before_text, updated_text))
+    return tuple(writes)
+
+
+def _incubation_archive_list_boundary_findings() -> list[Finding]:
+    return [
+        rails_not_cognition_boundary_finding(INCUBATION_DIR_REL),
+        Finding(
+            "info",
+            "incubation-archive-list-boundary",
+            "archive-list writes only reviewed eligible project/plan-incubation sources, one project/archive/reference index, deterministic archive copies, and optional exact source-path link repairs",
+        ),
+        Finding(
+            "info",
+            "incubation-archive-list-authority",
+            "archive-list output is protected-artifact maintenance evidence only; it cannot approve closeout, roadmap status, commit, rollback, destructive cleanup, or future lifecycle decisions",
+        ),
+    ]
+
+
+def _incubation_archive_list_apply_command(plan: IncubationArchiveListPlan) -> str:
+    parts = [
+        "memory-hygiene",
+        "--apply",
+        "--archive-list-file",
+        plan.list_rel,
+        "--archive-folder",
+        plan.archive_folder_rel,
+        "--reason",
+        plan.reason,
+    ]
+    if plan.repair_links:
+        parts.append("--repair-links")
+    parts.extend(["--proposal-token", plan.proposal_token])
+    return mlh_command(*parts)
+
+
+def _archive_list_file_hash(path: Path) -> str:
+    try:
+        return _sha256_text(path.read_text(encoding="utf-8"))
+    except OSError:
+        return "unreadable"
+
+
+def _archive_list_reason(request: MemoryHygieneRequest) -> str:
+    return request.reason or "reviewed incubation archive-list maintenance"
+
+
+def _archive_list_index_rel(archive_folder_rel: str) -> str:
+    return f"{archive_folder_rel}/{ARCHIVE_LIST_INDEX_FILENAME}"
+
+
+def _archive_list_archive_rel(archive_folder_rel: str, source_rel: str) -> str:
+    return f"{archive_folder_rel}/{Path(source_rel).name}"
 
 
 def _memory_hygiene_plan(inventory: Inventory, request: MemoryHygieneRequest) -> tuple[MemoryHygienePlan | None, list[Finding]]:

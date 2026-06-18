@@ -44,6 +44,15 @@ and root escapes. Use `--dry-run` before every mutating default command.
 
 These commands are advanced by design. Their output can guide an operator, but
 only an explicit apply route writes repo-visible authority.
+For protected incubation cleanup, `memory-hygiene --dry-run --archive-list-file
+<project/verification/reviewed-list.txt> --archive-folder
+project/archive/reference/<reviewed-folder>` validates an explicit reviewed
+`project/plan-incubation/*.md` path list, reports an `mha-*` proposal token,
+and previews the archive copies, source removals, `index.md` manifest, and
+optional exact link repairs. The matching `--apply` requires that token and
+refuses current/canonical sources, live consumers, path escapes, target
+collisions, and nonconforming prompt-like files that need a separate
+normalization route.
 `attachment-import` is the route for incoming PDFs, DOCX, XLSX, images, and
 ZIPs. It writes the original binary beside `artifact.md`; the binary remains
 source evidence, and the Markdown card is the metadata authority for hash,

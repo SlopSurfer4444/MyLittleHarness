@@ -1060,12 +1060,16 @@ def main(argv: list[str] | None = None) -> int:
             args.source_hash,
             args.reason,
             args.proposal_token,
+            args.archive_list_file,
+            args.archive_folder,
         )
         report_name = "memory-hygiene --apply" if args.apply else "memory-hygiene --dry-run"
         if args.scan:
             report_name += " --scan"
         if args.rotate_ledger:
             report_name += " --rotate-ledger"
+        if args.archive_list_file or args.archive_folder:
+            report_name += " --archive-list"
         findings = memory_hygiene_apply_findings(inventory, request) if args.apply else memory_hygiene_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
@@ -3100,7 +3104,13 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.severity == "error" for finding in findings):
             if any(finding.code == "verification-ledger-rotate-refused" for finding in findings):
                 return ["verification ledger rotation was refused before active ledger or archive targets were changed."]
+            if any(finding.code == "incubation-archive-list-refused" for finding in findings):
+                return ["incubation archive-list maintenance was refused before protected incubation sources, archive index, or link targets were changed."]
             return ["memory-hygiene apply was refused before lifecycle source, archive, or link targets were changed."]
+        if any(finding.code == "incubation-archive-list-dry-run" for finding in findings):
+            return ["incubation archive-list dry-run reported reviewed source moves, manifest evidence, proposal token, and optional exact link repairs without writing files."]
+        if any(finding.code == "incubation-archive-list-apply" for finding in findings):
+            return ["incubation archive-list apply moved the reviewed eligible notes, wrote the archive index, and repaired exact links when requested; lifecycle decisions remain explicit."]
         if any(finding.code == "verification-ledger-rotate-dry-run" for finding in findings):
             return ["verification ledger rotation dry-run reported source hash, archive target, and fresh continuity seed without writing files."]
         if any(finding.code == "verification-ledger-rotate-apply" for finding in findings):
