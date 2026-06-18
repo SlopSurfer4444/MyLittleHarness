@@ -774,6 +774,25 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         "agent run evidence is proof input only; it cannot approve lifecycle transitions, archive, roadmap status, staging, commit, rollback, or next-plan opening",
     ),
     CommandIntent(
+        "refresh-worker-run-receipt-source-hashes",
+        "Refresh source_hashes on an existing protected worker-run receipt JSON file.",
+        (
+            "worker run receipt source hash refresh",
+            "worker-run receipt source_hashes",
+            "protected json receipt refresh",
+            "protected worker receipt json",
+            "stale worker run receipt hashes",
+            "refresh receipt source hashes",
+        ),
+        "mylittleharness --root <root> evidence --receipt-refresh --dry-run --target project/verification/worker-run-receipts/<receipt-id>.json",
+        (
+            "mylittleharness --root <root> evidence --receipt-refresh --apply --target project/verification/worker-run-receipts/<receipt-id>.json --proposal-token <token-from-dry-run>",
+            "mylittleharness --root <root> check --focus agents",
+        ),
+        "live operating root with an existing worker-run receipt JSON file and reviewed dry-run proposal token",
+        "receipt refresh is evidence maintenance only; it cannot create arbitrary JSON receipts, approve lifecycle, fan-in, provider routing, credentials, archive, staging, commit, or target acceptance",
+    ),
+    CommandIntent(
         "create-work-claim",
         "Create one repo-visible scoped work claim before starting potentially overlapping work.",
         (

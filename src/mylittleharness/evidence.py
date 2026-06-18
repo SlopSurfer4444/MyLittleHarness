@@ -62,6 +62,7 @@ AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD = 8
 AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
+WORKER_RUN_RECEIPT_REFRESH_TOKEN_PREFIX = "wrr-"
 CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL = "project/verification/checkpoint-packages"
 CHECKPOINT_PACKAGE_RECEIPT_SCHEMA = "mylittleharness.checkpoint-package-receipt.v1"
 RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA = "mylittleharness.runtime-guard-preflight-receipt.v1"
@@ -1018,6 +1019,22 @@ class AgentRunRecordRefreshPlan:
     source_hashes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WorkerRunReceiptRefreshRequest:
+    target: str
+    proposal_token: str
+
+
+@dataclass(frozen=True)
+class WorkerRunReceiptRefreshPlan:
+    rel_path: str
+    current_text: str
+    updated_text: str
+    source_hashes: tuple[str, ...]
+    current_receipt_hash: str
+    proposal_token: str
+
+
 def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
     return AgentRunRecordRequest(
         record_id=str(getattr(args, "record_id", "") or "").strip(),
@@ -1044,6 +1061,13 @@ def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
         provider=str(getattr(args, "provider", "") or "").strip(),
         model_id=str(getattr(args, "model_id", "") or "").strip(),
         tools=_tuple_values(getattr(args, "tools", ())),
+    )
+
+
+def make_worker_run_receipt_refresh_request(args: object) -> WorkerRunReceiptRefreshRequest:
+    return WorkerRunReceiptRefreshRequest(
+        target=str(getattr(args, "receipt_target", "") or "").replace("\\", "/").strip(),
+        proposal_token=str(getattr(args, "proposal_token", "") or "").strip(),
     )
 
 
@@ -1159,6 +1183,94 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "agent-run-record-backup-cleanup", warning, target_rel))
     findings.extend(_agent_run_record_boundary_findings())
+    return findings
+
+
+def worker_run_receipt_refresh_dry_run_findings(inventory: Inventory, request: WorkerRunReceiptRefreshRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "worker-run-receipt-refresh-dry-run", "worker run receipt source-hash refresh proposal only; no files were written"),
+        Finding("info", "worker-run-receipt-refresh-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _worker_run_receipt_refresh_request_findings(inventory, request, severity="warn")
+    findings.extend(request_findings)
+    if any(finding.severity in {"warn", "error"} for finding in request_findings):
+        findings.append(Finding("info", "worker-run-receipt-refresh-validation-posture", "dry-run refused before apply; fix the receipt target before refreshing source_hashes"))
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+
+    plan, plan_findings = _worker_run_receipt_refresh_plan(inventory.root, request.target, severity="warn")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "worker-run-receipt-refresh-validation-posture", "dry-run refused before apply; fix the existing worker run receipt before refreshing source_hashes"))
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+
+    findings.extend(_worker_run_receipt_refresh_route_findings(plan, apply=False))
+    findings.extend(_worker_run_receipt_refresh_boundary_findings())
+    return findings
+
+
+def worker_run_receipt_refresh_apply_findings(inventory: Inventory, request: WorkerRunReceiptRefreshRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "worker-run-receipt-refresh-apply", "worker run receipt source-hash refresh apply started"),
+        Finding("info", "worker-run-receipt-refresh-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _worker_run_receipt_refresh_request_findings(inventory, request, severity="error")
+    findings.extend(request_findings)
+    if any(finding.severity == "error" for finding in request_findings):
+        findings.append(Finding("info", "worker-run-receipt-refresh-validation-posture", "apply refused before refreshing receipt source_hashes"))
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+
+    plan, plan_findings = _worker_run_receipt_refresh_plan(inventory.root, request.target, severity="error")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "worker-run-receipt-refresh-validation-posture", "apply refused before refreshing receipt source_hashes"))
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+    if not request.proposal_token:
+        findings.append(
+            Finding(
+                "error",
+                "worker-run-receipt-refresh-refused",
+                f"apply requires --proposal-token {plan.proposal_token} from a matching dry-run",
+                plan.rel_path,
+            )
+        )
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+    if request.proposal_token != plan.proposal_token:
+        findings.append(
+            Finding(
+                "error",
+                "worker-run-receipt-refresh-refused",
+                "proposal token mismatch; rerun evidence --receipt-refresh --dry-run because the receipt or its source refs changed",
+                plan.rel_path,
+            )
+        )
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+    if plan.current_text == plan.updated_text:
+        findings.extend(_worker_run_receipt_refresh_route_findings(plan, apply=True))
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+
+    target = inventory.root / plan.rel_path
+    tmp_path = target.with_name(f".{target.name}.tmp")
+    backup_path = target.with_name(f".{target.name}.bak")
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target, tmp_path, plan.updated_text, backup_path),),
+            root=inventory.root,
+        )
+    except FileTransactionError as exc:
+        findings.append(Finding("error", "worker-run-receipt-refresh-refused", f"failed to refresh worker run receipt before apply completed: {exc}", plan.rel_path))
+        findings.extend(_worker_run_receipt_refresh_boundary_findings())
+        return findings
+    findings.extend(_worker_run_receipt_refresh_route_findings(plan, apply=True))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "worker-run-receipt-refresh-backup-cleanup", warning, plan.rel_path))
+    findings.extend(_worker_run_receipt_refresh_boundary_findings())
     return findings
 
 
@@ -4132,6 +4244,296 @@ def _coordination_record_paths(root: Path) -> list[Path]:
             continue
         records.extend(path for path in directory.iterdir() if path.is_file() and path.suffix == ".json")
     return sorted(records)
+
+
+def _worker_run_receipt_refresh_request_findings(
+    inventory: Inventory,
+    request: WorkerRunReceiptRefreshRequest,
+    severity: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                severity,
+                "worker-run-receipt-refresh-refused",
+                "worker run receipt refresh is live-root only; product fixtures and archive roots remain read-only context",
+            )
+        )
+    if not request.target:
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", "--target is required for receipt refresh"))
+        return findings
+    findings.extend(_worker_run_receipt_refresh_target_findings(inventory.root, request.target, severity))
+    return findings
+
+
+def _worker_run_receipt_refresh_target_findings(root: Path, target_rel: str, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+    conflict = _root_relative_path_conflict(target_rel)
+    if conflict:
+        return [Finding(severity, "worker-run-receipt-refresh-refused", f"receipt target {conflict}", target_rel)]
+    if not target_rel.startswith(f"{WORKER_RUN_RECEIPTS_DIR_REL}/") or not target_rel.endswith(".json"):
+        return [
+            Finding(
+                severity,
+                "worker-run-receipt-refresh-refused",
+                f"receipt target must be under {WORKER_RUN_RECEIPTS_DIR_REL}/*.json",
+                target_rel,
+            )
+        ]
+    target = (root / target_rel).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return [Finding(severity, "worker-run-receipt-refresh-refused", "receipt target escapes the target root", target_rel)]
+    parent = root.resolve()
+    for part in Path(target_rel).parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"receipt target directory contains a symlink segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+        if parent.exists() and not parent.is_dir():
+            findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"receipt target directory contains a non-directory segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+    if not target.exists():
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", "receipt target does not exist; refresh only maintains existing worker run receipts", target_rel))
+    elif target.is_symlink():
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", "receipt target must not be a symlink", target_rel))
+    elif not target.is_file():
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", "receipt target is not a regular file", target_rel))
+    return findings
+
+
+def _worker_run_receipt_refresh_plan(
+    root: Path,
+    target_rel: str,
+    severity: str,
+) -> tuple[WorkerRunReceiptRefreshPlan | None, list[Finding]]:
+    target = root / target_rel
+    try:
+        current_text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt could not be read before source-hash refresh: {exc}", target_rel)]
+
+    try:
+        payload = json.loads(current_text)
+    except json.JSONDecodeError as exc:
+        return None, [Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt JSON is malformed: {exc.msg}", target_rel)]
+    if not isinstance(payload, dict):
+        return None, [Finding(severity, "worker-run-receipt-refresh-refused", "worker run receipt JSON must be an object", target_rel)]
+
+    findings = [
+        Finding(
+            "info",
+            "worker-run-receipt-refresh-target",
+            f"refresh source_hashes for existing worker run receipt: {target_rel}",
+            target_rel,
+        )
+    ]
+    payload_findings = _worker_run_receipt_refresh_payload_findings(root, target_rel, payload, severity)
+    findings.extend(payload_findings)
+    if any(finding.severity in {"warn", "error"} for finding in payload_findings):
+        return None, findings
+
+    source_refs, source_ref_findings = _worker_run_receipt_refresh_source_refs(target_rel, payload, severity)
+    findings.extend(source_ref_findings)
+    if any(finding.severity in {"warn", "error"} for finding in source_ref_findings):
+        return None, findings
+
+    source_hashes, hash_findings = _source_hash_entries_for_refs(root, source_refs, code_prefix="worker-run-receipt-refresh")
+    findings.extend(hash_findings)
+    if any(finding.severity == "warn" for finding in hash_findings):
+        findings.append(
+            Finding(
+                severity,
+                "worker-run-receipt-refresh-refused",
+                "source_hash refs must resolve to missing or readable regular files before a protected receipt refresh is written",
+                target_rel,
+            )
+        )
+        return None, findings
+
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    old_source_hashes = tuple(_frontmatter_string_list(payload.get("source_hashes")))
+    if old_source_hashes == tuple(source_hashes):
+        updated_text = current_text
+    else:
+        updated_payload = dict(payload)
+        updated_payload["source_hashes"] = list(source_hashes)
+        updated_text = json.dumps(updated_payload, indent=2) + "\n"
+    proposal_token = _worker_run_receipt_refresh_token(target_rel, current_hash, tuple(source_hashes))
+    return (
+        WorkerRunReceiptRefreshPlan(
+            rel_path=target_rel,
+            current_text=current_text,
+            updated_text=updated_text,
+            source_hashes=tuple(source_hashes),
+            current_receipt_hash=current_hash,
+            proposal_token=proposal_token,
+        ),
+        findings,
+    )
+
+
+def _worker_run_receipt_refresh_payload_findings(
+    root: Path,
+    target_rel: str,
+    data: dict[str, object],
+    severity: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for field in WORKER_RUN_RECEIPT_REQUIRED_SCALARS:
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt missing required field: {field}", target_rel))
+    for field in WORKER_RUN_RECEIPT_REQUIRED_LISTS:
+        if not _frontmatter_string_list(data.get(field)):
+            findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt missing required list field: {field}", target_rel))
+    if data.get("schema") != WORKER_RUN_RECEIPT_SCHEMA:
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt schema should be {WORKER_RUN_RECEIPT_SCHEMA}", target_rel))
+    if data.get("record_type") != "worker-run-receipt":
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", "worker run receipt record_type should be worker-run-receipt", target_rel))
+
+    receipt_id = str(data.get("receipt_id") or "").strip()
+    expected_receipt_id = Path(target_rel).stem
+    if record_id_conflict(receipt_id):
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt receipt_id {receipt_id!r} is unsafe: {record_id_conflict(receipt_id)}", target_rel))
+    elif receipt_id and receipt_id != expected_receipt_id:
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt receipt_id {receipt_id!r} does not match route target {expected_receipt_id!r}", target_rel))
+
+    for finding in _worker_run_receipt_non_authority_findings(target_rel, data, "worker-run-receipt-refresh"):
+        findings.append(Finding(severity, "worker-run-receipt-refresh-refused", finding.message, target_rel))
+
+    for field in ("task_input_refs", "event_stream_refs", "output_refs", "verification_refs"):
+        for value in _frontmatter_string_list(data.get(field)):
+            conflict = _root_relative_path_conflict(value)
+            if conflict:
+                findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"worker run receipt {field} path {conflict}: {value}", target_rel))
+                continue
+            boundary_violation = source_path_boundary_violation(root, root / value, label=f"worker run receipt {field}")
+            if boundary_violation is not None:
+                findings.append(Finding(severity, "worker-run-receipt-refresh-refused", boundary_violation.message, target_rel))
+    return findings
+
+
+def _worker_run_receipt_refresh_source_refs(
+    target_rel: str,
+    data: dict[str, object],
+    severity: str,
+) -> tuple[tuple[str, ...], list[Finding]]:
+    findings: list[Finding] = []
+    refs: list[str] = []
+    seen: set[str] = set()
+    self_refs: list[str] = []
+    for entry in _frontmatter_string_list(data.get("source_hashes")):
+        match = SOURCE_HASH_RE.match(entry.strip())
+        if not match:
+            findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"malformed source_hashes entry: {entry}", target_rel))
+            continue
+        source_rel = match.group(1).replace("\\", "/").strip()
+        if _same_root_relative_path(source_rel, target_rel):
+            self_refs.append(source_rel)
+            continue
+        conflict = _root_relative_path_conflict(source_rel)
+        if conflict:
+            findings.append(Finding(severity, "worker-run-receipt-refresh-refused", f"source hash path {conflict}: {source_rel}", target_rel))
+            continue
+        if any(source_rel.casefold().startswith(prefix) for prefix in CHECKPOINT_PACKAGE_RECEIPT_PROHIBITED_INCLUDED_PREFIXES):
+            findings.append(
+                Finding(
+                    severity,
+                    "worker-run-receipt-refresh-refused",
+                    f"source hash path must not target generated, cache, private, secret, temp, runtime, or VCS files: {source_rel}",
+                    target_rel,
+                )
+            )
+            continue
+        key = _root_relative_path_key(source_rel)
+        if key not in seen:
+            refs.append(source_rel)
+            seen.add(key)
+    if self_refs:
+        findings.append(
+            Finding(
+                "info",
+                "worker-run-receipt-refresh-self-ref-ignored",
+                f"ignored self-referential source_hash refs while refreshing: {', '.join(self_refs)}",
+                target_rel,
+            )
+        )
+    if not refs and not any(finding.severity in {"warn", "error"} for finding in findings):
+        findings.append(
+            Finding(
+                severity,
+                "worker-run-receipt-refresh-refused",
+                f"worker run receipt has no source-bound source_hash refs to refresh after excluding its own target {target_rel}",
+                target_rel,
+            )
+        )
+    return tuple(refs), findings
+
+
+def _worker_run_receipt_refresh_token(target_rel: str, current_hash: str, source_hashes: tuple[str, ...]) -> str:
+    payload = "\n".join((target_rel, current_hash, *source_hashes))
+    return f"{WORKER_RUN_RECEIPT_REFRESH_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _worker_run_receipt_refresh_route_findings(plan: WorkerRunReceiptRefreshPlan, *, apply: bool) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "worker-run-receipt-refresh-token",
+            (
+                f"current receipt sha256={plan.current_receipt_hash}; proposal_token={plan.proposal_token}; "
+                f"apply with: mylittleharness --root <root> evidence --receipt-refresh --apply --target {plan.rel_path} --proposal-token {plan.proposal_token}"
+            ),
+            plan.rel_path,
+        )
+    ]
+    if plan.current_text == plan.updated_text:
+        findings.append(
+            Finding(
+                "info",
+                "worker-run-receipt-refresh-current",
+                "worker run receipt source_hashes are already current; no route write is needed",
+                plan.rel_path,
+            )
+        )
+        return findings
+    before_hash = _short_hash(plan.current_text)
+    after_hash = _short_hash(plan.updated_text)
+    before_bytes = len(plan.current_text.encode("utf-8"))
+    after_bytes = len(plan.updated_text.encode("utf-8"))
+    prefix = "refreshed" if apply else "would refresh"
+    findings.extend(
+        [
+            Finding("info", "worker-run-receipt-refreshed" if apply else "worker-run-receipt-refresh-dry-run", f"{prefix} source_hashes for existing worker run receipt: {plan.rel_path}", plan.rel_path),
+            Finding(
+                "info",
+                "worker-run-receipt-refresh-route-write",
+                f"{prefix} route {plan.rel_path}; before_hash={before_hash}; after_hash={after_hash}; before_bytes={before_bytes}; after_bytes={after_bytes}; source-bound write evidence is independent of Git tracking",
+                plan.rel_path,
+            ),
+        ]
+    )
+    return findings
+
+
+def _worker_run_receipt_refresh_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "worker-run-receipt-refresh-boundary",
+            "worker run receipt refresh updates only existing receipt source_hashes; it cannot approve lifecycle, fan-in, provider routing, credentials, staging, commit, archive, or target acceptance",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "worker-run-receipt-refresh-route",
+            f"worker run receipt refresh is limited to existing {WORKER_RUN_RECEIPTS_DIR_REL}/*.json receipts and creates no runtime, queue, provider gateway, or hidden state",
+            WORKER_RUN_RECEIPTS_DIR_REL,
+        ),
+    ]
 
 
 def _agent_run_record_target_rel(request: AgentRunRecordRequest) -> str:

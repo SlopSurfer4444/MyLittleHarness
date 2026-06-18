@@ -39,6 +39,7 @@ and root escapes. Use `--dry-run` before every mutating default command.
 | `research-import` | research provenance | yes | yes | writes one non-authority research artifact |
 | `research-distill` | research distillate | yes | yes | writes reviewed synthesis with quality and planning gates |
 | `research-compare` | research comparison | yes | yes | writes reviewed comparison and optional source cleanup |
+| `evidence --receipt-refresh` | evidence maintenance | yes | yes plus proposal token | refreshes `source_hashes` only for an existing worker-run receipt JSON |
 | `incubate` | future idea/fix-candidate capture | yes | yes | writes non-authority incubation notes |
 | `intake` | incoming information route | yes | yes | writes one explicit target when reviewed |
 
@@ -53,6 +54,14 @@ optional exact link repairs. The matching `--apply` requires that token and
 refuses current/canonical sources, live consumers, path escapes, target
 collisions, and nonconforming prompt-like files that need a separate
 normalization route.
+Protected worker-run receipt JSON maintenance uses
+`evidence --receipt-refresh --dry-run --target
+project/verification/worker-run-receipts/<id>.json`; the matching apply
+requires the reported proposal token and updates only `source_hashes`.
+It refuses path escapes, symlinks, malformed or unknown JSON, stale tokens,
+unsafe source refs, and authority overclaims, and it cannot approve lifecycle,
+fan-in, provider routing, staging, commits, archives, worker launch, or
+target-repo acceptance.
 `attachment-import` is the route for incoming PDFs, DOCX, XLSX, images, and
 ZIPs. It writes the original binary beside `artifact.md`; the binary remains
 source evidence, and the Markdown card is the metadata authority for hash,

@@ -140,9 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Advanced evidence helper: report closeout evidence or explicitly record source-bound agent run evidence.",
     )
     evidence.add_argument("--record", action="store_true", help="Write or preview an explicit agent run evidence record.")
+    evidence.add_argument("--receipt-refresh", action="store_true", help="Refresh source_hashes on an existing worker-run receipt JSON file.")
     evidence_mode = evidence.add_mutually_exclusive_group()
     evidence_mode.add_argument("--dry-run", action="store_true", help="Preview an agent run evidence record without writing files.")
     evidence_mode.add_argument("--apply", action="store_true", help="Write one explicit agent run evidence record in a live operating root.")
+    evidence.add_argument("--target", dest="receipt_target", help="Root-relative worker-run receipt JSON target for --receipt-refresh.")
+    evidence.add_argument("--proposal-token", dest="proposal_token", help="Reviewed proposal token emitted by --receipt-refresh --dry-run.")
     evidence.add_argument("--record-id", dest="record_id", help="Stable record id used as the Markdown filename under project/verification/agent-runs/.")
     evidence.add_argument("--role", dest="agent_role", help="Agent role that produced the work, such as coder, reviewer, or verifier.")
     evidence.add_argument("--actor", help="Human, agent, or tool actor label.")

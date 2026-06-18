@@ -3238,7 +3238,10 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
             )
         )
     if subcommand == "evidence":
-        return not _looks_like_write_command(command) and _is_mlh_evidence_record_route_command(policy_command)
+        return not _looks_like_write_command(command) and (
+            _is_mlh_evidence_record_route_command(policy_command)
+            or _is_mlh_evidence_receipt_refresh_route_command(policy_command)
+        )
     if subcommand == "retention" and "scan" in tokens:
         return not _looks_like_write_command(command)
     return (
@@ -3276,6 +3279,18 @@ def _is_mlh_evidence_record_route_command(command: str) -> bool:
         and not _looks_like_write_command(command)
         and "--record" in tokens
         and (_has_mlh_option_value(command, "--record-id") or tokens.intersection({"--help", "-h"}))
+        and _has_mlh_review_mode_token(command)
+    )
+
+
+def _is_mlh_evidence_receipt_refresh_route_command(command: str) -> bool:
+    lowered = command.casefold()
+    tokens = _mlh_command_token_set(command)
+    return (
+        _mlh_cli_subcommand(lowered) == "evidence"
+        and not _looks_like_write_command(command)
+        and "--receipt-refresh" in tokens
+        and (_has_mlh_option_value(command, "--target") or tokens.intersection({"--help", "-h"}))
         and _has_mlh_review_mode_token(command)
     )
 
@@ -5265,6 +5280,8 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
     route_id = classify_memory_route(rel).route_id
     topic = _route_topic_from_path(rel)
+    if _is_worker_run_receipt_route_path(rel):
+        return mlh_command("evidence", "--receipt-refresh", "--dry-run", "--target", rel)
     if _is_agent_run_evidence_route_path(rel):
         record_id = _route_topic_from_path(rel) or "<record-id>"
         return mlh_command(

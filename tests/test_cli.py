@@ -7018,6 +7018,161 @@ class CliTests(unittest.TestCase):
             self.assertNotIn(f"src/changed.py sha256={old_changed_hash}", refreshed_text)
             self.assertNotIn(f"{record_ref} sha256=", refreshed_text)
 
+    def test_evidence_receipt_refresh_updates_worker_run_source_hashes_with_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            source_rel = "src/worker.py"
+            source_path = root / source_rel
+            source_path.write_text("print('before')\n", encoding="utf-8")
+            old_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            receipt_rel = "project/verification/worker-run-receipts/launch-1-worker-1.json"
+            receipt_path = root / receipt_rel
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-1-worker-1",
+                        "launch_id": "launch-1",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "worker_status": "succeeded",
+                        "non_authority": "repo-visible evidence-only; cannot approve lifecycle, fan-in, provider routing, staging, commit, archive, or target acceptance",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-1-worker-1.jsonl"],
+                        "output_refs": [source_rel],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [f"{source_rel} sha256={old_hash}"],
+                        "authority": {"approves_lifecycle": False},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            source_path.write_text("print('after')\n", encoding="utf-8")
+            new_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            before = snapshot_tree_bytes(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(["--root", str(root), "evidence", "--receipt-refresh", "--dry-run", "--target", receipt_rel]),
+                    0,
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("worker-run-receipt-refresh-dry-run", dry_rendered)
+            self.assertIn(f"{source_rel} sha256={new_hash[:12]}", dry_rendered)
+            token_match = re.search(r"--proposal-token (wrr-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--receipt-refresh",
+                            "--apply",
+                            "--target",
+                            receipt_rel,
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            apply_rendered = apply_output.getvalue()
+            payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertIn("worker-run-receipt-refreshed", apply_rendered)
+            self.assertEqual([f"{source_rel} sha256={new_hash}"], payload["source_hashes"])
+            self.assertFalse(payload["authority"]["approves_lifecycle"])
+            self.assertEqual("worker-run-receipt", payload["record_type"])
+
+            agents_output = io.StringIO()
+            with redirect_stdout(agents_output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+            self.assertNotIn("check-agents-worker-run-receipt-stale", agents_output.getvalue())
+
+    def test_evidence_receipt_refresh_refuses_stale_token_and_authority_overclaim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            source_rel = "src/worker.py"
+            source_path = root / source_rel
+            source_path.write_text("print('before')\n", encoding="utf-8")
+            old_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            receipt_rel = "project/verification/worker-run-receipts/launch-2-worker-1.json"
+            receipt_path = root / receipt_rel
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            base_payload = {
+                "schema": "mylittleharness.worker-run-receipt.v1",
+                "record_type": "worker-run-receipt",
+                "receipt_id": "launch-2-worker-1",
+                "launch_id": "launch-2",
+                "worker_id": "worker-1",
+                "role": "implementer",
+                "target_root": str(root),
+                "runtime_namespace": "runtime_state_namespace.v1",
+                "worker_status": "succeeded",
+                "non_authority": "repo-visible evidence-only; cannot approve lifecycle, fan-in, provider routing, staging, commit, archive, or target acceptance",
+                "task_input_refs": ["project/implementation-plan.md"],
+                "event_stream_refs": ["project/verification/logs/launch-2-worker-1.jsonl"],
+                "output_refs": [source_rel],
+                "verification_refs": ["project/verification/smoke.md"],
+                "source_hashes": [f"{source_rel} sha256={old_hash}"],
+                "authority": {"approves_lifecycle": False},
+            }
+            receipt_path.write_text(json.dumps(base_payload, indent=2) + "\n", encoding="utf-8")
+            source_path.write_text("print('after')\n", encoding="utf-8")
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(main(["--root", str(root), "evidence", "--receipt-refresh", "--dry-run", "--target", receipt_rel]), 0)
+            token_match = re.search(r"--proposal-token (wrr-[a-f0-9]{16})", dry_output.getvalue())
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            source_path.write_text("print('after drift')\n", encoding="utf-8")
+            before_stale_apply = snapshot_tree_bytes(root)
+            stale_apply = io.StringIO()
+            with redirect_stdout(stale_apply):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--receipt-refresh",
+                            "--apply",
+                            "--target",
+                            receipt_rel,
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    2,
+                )
+            self.assertEqual(before_stale_apply, snapshot_tree_bytes(root))
+            self.assertIn("proposal token mismatch", stale_apply.getvalue())
+
+            base_payload["authority"] = {"approves_lifecycle": True}
+            receipt_path.write_text(json.dumps(base_payload, indent=2) + "\n", encoding="utf-8")
+            authority_output = io.StringIO()
+            with redirect_stdout(authority_output):
+                self.assertEqual(main(["--root", str(root), "evidence", "--receipt-refresh", "--dry-run", "--target", receipt_rel]), 0)
+            authority_rendered = authority_output.getvalue()
+            self.assertIn("worker-run-receipt-refresh-refused", authority_rendered)
+            self.assertIn("approves_lifecycle must remain false", authority_rendered)
+
     def test_evidence_record_refuses_self_output_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -28695,6 +28850,41 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", missing_record_codes)
             self.assertNotIn("hooks-policy-allow-mlh-owner-route-evidence-paths", missing_record_codes)
 
+    def test_hooks_and_suggest_route_worker_receipt_json_refresh_to_evidence_owner(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_ref = "project/" + "verification/worker-run-receipts/launch-1-worker-1.json"
+            owner_preview_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"mylittleharness --root . evidence --receipt-refresh --dry-run --target {receipt_ref}",
+                }
+            )
+            direct_write_input = json.dumps(
+                {"toolName": "shell_command", "command": f"Set-Content {receipt_ref} '{{}}'"}
+            )
+
+            owner_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], owner_preview_input)
+            owner_codes = {finding["code"] for finding in owner_payload["findings"]}
+            self.assertFalse(owner_payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", owner_codes)
+
+            direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
+            direct_codes = {finding["code"] for finding in direct_payload["findings"]}
+            direct_messages = "\n".join(str(finding["message"]) for finding in direct_payload["findings"])
+            self.assertTrue(direct_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_codes)
+            self.assertIn(f"evidence --receipt-refresh --dry-run --target {receipt_ref}", direct_messages)
+            self.assertNotIn("intake --dry-run", direct_messages)
+
+            suggest_output = io.StringIO()
+            with redirect_stdout(suggest_output):
+                self.assertEqual(main(["--root", str(root), "suggest", "--intent", "refresh protected worker run receipt json source hashes"]), 0)
+            suggest_rendered = suggest_output.getvalue()
+            self.assertIn("refresh-worker-run-receipt-source-hashes", suggest_rendered)
+            self.assertIn("evidence --receipt-refresh --dry-run", suggest_rendered)
 
     def test_hooks_pre_tool_allows_mlh_owner_route_dry_run_lifecycle_targets(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
