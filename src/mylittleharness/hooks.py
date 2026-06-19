@@ -1866,6 +1866,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "and initial scaffold packages, "
                     "meta-feedback/incubation blocker notes, "
                     "and reviewed decision-backed verification evidence packages; "
+                    "stage ordinary source/test files separately by exact path, then stage route-produced "
+                    "lifecycle/evidence/archive artifacts separately by exact path; if Git ignore rules hide a "
+                    "route-created artifact, use git add -f -- <exact-route-artifact> for that artifact only; "
                     "broad staging, unrelated dirty work, push, release, provider routing, reset, clean, and authority "
                     "decisions remain blocked; "
                     f"next_safe_review={checkpoint_next_safe}"
@@ -2095,6 +2098,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "or exact eligible target files "
                 "in the actual command workdir/root are allowed, and hook output cannot approve push, release, "
                 "reset, clean, broad add, or authority decisions; "
+                "safe_pattern=stage ordinary source/test files first by exact path, then stage route-produced "
+                "lifecycle/evidence/archive artifacts separately by exact path; if Git ignore rules hide a "
+                "route-created artifact, use git -C <actual-root> add -f -- <exact-route-artifact> for that artifact only; "
                 "next_safe_command=git -C <actual-root> add -- <exact-route-files>; "
                 "git -C <actual-root> diff --cached --check; git -C <actual-root> commit -F <message-file>"
             )
@@ -5379,6 +5385,7 @@ def _local_vcs_checkpoint_next_safe_for_root(root: Path) -> str:
     git_prefix = "gi" + "t -C " + shell_arg(str(root))
     return (
         f"{git_prefix} add -- <exact-route-files>; "
+        f"{git_prefix} add -f -- <exact-route-artifact-if-ignored>; "
         f"{git_prefix} diff --cached --check; "
         f"{git_prefix} commit -F <message-file>"
     )

@@ -31578,6 +31578,9 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertIn("initial scaffold packages", messages)
+                    self.assertIn("stage ordinary source/test files separately by exact path", messages)
+                    self.assertIn("git add -f -- <exact-route-artifact>", messages)
+                    self.assertIn("for that artifact only", messages)
 
             commit_input = json.dumps(
                 {
@@ -31893,6 +31896,9 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertIn("actual command workdir/root", messages)
                     self.assertIn("exact existing MLH route/evidence files", messages)
+                    self.assertIn("stage ordinary source/test files first by exact path", messages)
+                    self.assertIn("git -C <actual-root> add -f -- <exact-route-artifact>", messages)
+                    self.assertIn("for that artifact only", messages)
                     self.assertIn("considered_shapes=", messages)
                     self.assertIn("checkpoint dry-run or evidence/meta-feedback blocker packet", messages)
 
@@ -32194,6 +32200,7 @@ class CliTests(unittest.TestCase):
             self.assertIn(str(neighbor_root), messages)
             self.assertNotIn(str(product_root), messages)
             self.assertIn("add -- <exact-route-files>", messages)
+            self.assertIn("add -f -- <exact-route-artifact-if-ignored>", messages)
             self.assertIn("diff --cached --check", messages)
             self.assertIn("commit -F <message-file>", messages)
 
