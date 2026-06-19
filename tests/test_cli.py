@@ -5103,6 +5103,110 @@ class CliTests(unittest.TestCase):
             self.assertIn("## Intake Payload\n\n# Inner Packet Title", note_text)
             self.assertIn("safe_to_continue_existing_sequence: true", note_text)
 
+    def test_intake_apply_infers_active_plan_metadata_for_verification_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project" / "implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "metadata-inference"\n'
+                'source_incubation: "project/plan-incubation/metadata-inference.md"\n'
+                "---\n"
+                "# Metadata Inference\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace('plan_status: "none"', 'plan_status: "active"', 1).replace('active_plan: ""', 'active_plan: "project/implementation-plan.md"', 1),
+                encoding="utf-8",
+            )
+            target = "project/" + "verification/intake-metadata.md"
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--status",
+                        "passed",
+                        "--text",
+                        "Verification: pytest passed for intake metadata.",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            note_text = (root / target).read_text(encoding="utf-8")
+            self.assertIn('related_plan: "project/implementation-plan.md"', note_text)
+            self.assertIn("source_members:\n  - \"project/plan-incubation/metadata-inference.md\"", note_text)
+            self.assertIn("intake-written", output.getvalue())
+
+    def test_intake_apply_accepts_explicit_verification_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "verification/intake-explicit-metadata.md"
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--text",
+                        "Verification: smoke passed for explicit metadata.",
+                        "--related-plan",
+                        "project/archive/plans/2026-05-01-old-plan.md",
+                        "--source-member",
+                        "project/verification/source-a.md",
+                        "--source-member",
+                        "project/verification/source-b.md",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            note_text = (root / target).read_text(encoding="utf-8")
+            self.assertIn('related_plan: "project/archive/plans/2026-05-01-old-plan.md"', note_text)
+            self.assertIn('  - "project/verification/source-a.md"', note_text)
+            self.assertIn('  - "project/verification/source-b.md"', note_text)
+
+    def test_intake_apply_refuses_unsafe_verification_metadata_paths(self) -> None:
+        cases = (
+            ("--related-plan", "../outside.md"),
+            ("--source-member", "C:/outside.md"),
+        )
+        for flag, value in cases:
+            with self.subTest(flag=flag):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_live_root(Path(tmp))
+                    before = snapshot_tree(root)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(
+                            [
+                                "--root",
+                                str(root),
+                                "intake",
+                                "--apply",
+                                "--text",
+                                "Verification: validation passed.",
+                                flag,
+                                value,
+                                "--target",
+                                "project/verification/unsafe-metadata.md",
+                            ]
+                        )
+
+                    self.assertEqual(code, 2)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("intake-refused", output.getvalue())
+
     def test_intake_apply_accepts_research_prompt_feature_idea_into_live_incubation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

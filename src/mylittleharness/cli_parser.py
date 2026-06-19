@@ -293,6 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
     intake_text.add_argument("--text-file", dest="text_file", help="Read incoming information from a UTF-8 file; use - for stdin.")
     intake.add_argument("--title", help="Optional Markdown title for the applied intake note.")
     intake.add_argument("--status", choices=("pending", "passed", "failed", "partial", "partially-verified", "archived"), help="Explicit status for verification intake frontmatter.")
+    intake.add_argument("--related-plan", dest="related_plan", help="Verification metadata related_plan route; use 'current' to bind the active plan.")
+    intake.add_argument("--source-member", dest="source_members", action="append", default=[], help="Verification metadata source_members route. May be repeated.")
     intake.add_argument("--target", help="Explicit root-relative Markdown target for --apply.")
     research_import = subparsers.add_parser(
         "research-import",

@@ -1431,6 +1431,8 @@ class IntakeRequest:
     title: str
     target: str
     status: str = ""
+    related_plan: str = ""
+    source_members: tuple[str, ...] = ()
 
 
 INTAKE_VERIFICATION_STATUS_VALUES = ("pending", "passed", "failed", "partial", "partially-verified", "archived")
@@ -1479,13 +1481,23 @@ class SpecPostureFrontmatterPlan:
     updated_text: str
 
 
-def make_intake_request(text: str | None, text_source: str, title: str | None, target: str | None, status: str | None = None) -> IntakeRequest:
+def make_intake_request(
+    text: str | None,
+    text_source: str,
+    title: str | None,
+    target: str | None,
+    status: str | None = None,
+    related_plan: str | None = None,
+    source_members: tuple[str, ...] | list[str] | None = None,
+) -> IntakeRequest:
     return IntakeRequest(
         text=str(text or ""),
         text_source=str(text_source or "").strip() or "intake input",
         title=str(title or "").strip(),
         target=_normalized_intake_target(target),
         status=str(status or "").strip(),
+        related_plan=_normalized_intake_metadata_path(related_plan),
+        source_members=_normalized_intake_metadata_paths(source_members or ()),
     )
 
 
@@ -1525,7 +1537,7 @@ def intake_apply_findings(inventory: Inventory, request: IntakeRequest) -> list[
         return errors
 
     target_path = inventory.root / request.target
-    document = _intake_document_text(request, advice)
+    document = _intake_document_text(inventory, request, advice)
     operation = AtomicFileWrite(
         target_path=target_path,
         tmp_path=target_path.with_name(f".{target_path.name}.intake.tmp"),
@@ -13711,6 +13723,18 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
             )
         elif advice.route_id != "verification":
             errors.append(Finding("error", "intake-refused", "--status is only supported for verification intake targets", request.target or None))
+    if request.related_plan and advice.route_id != "verification":
+        errors.append(Finding("error", "intake-refused", "--related-plan is only supported for verification intake targets", request.target or None))
+    if request.source_members and advice.route_id != "verification":
+        errors.append(Finding("error", "intake-refused", "--source-member is only supported for verification intake targets", request.target or None))
+    if request.related_plan and request.related_plan != "current":
+        conflict = root_relative_path_conflict(request.related_plan)
+        if conflict:
+            errors.append(Finding("error", "intake-refused", f"--related-plan must be a root-relative route path: {conflict}", request.related_plan))
+    for source_member in request.source_members:
+        conflict = root_relative_path_conflict(source_member)
+        if conflict:
+            errors.append(Finding("error", "intake-refused", f"--source-member must be a root-relative route path: {conflict}", source_member))
     if not apply and request.target and not advice.apply_allowed:
         errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}", request.target))
     if apply:
@@ -13868,15 +13892,17 @@ def _intake_boundary_findings() -> list[Finding]:
     ]
 
 
-def _intake_document_text(request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
+def _intake_document_text(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
     title = _intake_title(request)
     status = _intake_document_status(request, advice)
     body = _intake_document_body(request)
+    route_metadata = _intake_verification_route_metadata(inventory, request, advice)
     return (
         "---\n"
         f'title: "{_yaml_double_quoted_value(title)}"\n'
         f'status: "{_yaml_double_quoted_value(status)}"\n'
         f'route: "{_yaml_double_quoted_value(advice.route_id)}"\n'
+        f"{route_metadata}"
         f'created: "{date.today().isoformat()}"\n'
         f'intake_source: "{_yaml_double_quoted_value(request.text_source)}"\n'
         "---\n"
@@ -13947,8 +13973,91 @@ def _clean_intake_title(value: str) -> str:
     return cleaned[:80].strip(" .,:;-") or "Incoming Information"
 
 
+def _intake_verification_route_metadata(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
+    if advice.route_id != "verification":
+        return ""
+    related_plan = _intake_related_plan_metadata(inventory, request)
+    source_members = request.source_members or _intake_active_plan_source_members(inventory)
+    lines: list[str] = []
+    if related_plan:
+        lines.append(f'related_plan: "{_yaml_double_quoted_value(related_plan)}"')
+    if source_members:
+        lines.append("source_members:")
+        for source_member in source_members:
+            lines.append(f'  - "{_yaml_double_quoted_value(source_member)}"')
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def _intake_related_plan_metadata(inventory: Inventory, request: IntakeRequest) -> str:
+    if request.related_plan and request.related_plan != "current":
+        return request.related_plan
+    if request.related_plan == "current" or _intake_target_is_verification(request.target):
+        active_plan = _intake_active_plan_rel(inventory)
+        if active_plan:
+            return active_plan
+    return ""
+
+
+def _intake_active_plan_rel(inventory: Inventory) -> str:
+    state_data = inventory.state.frontmatter.data if inventory.state else {}
+    plan_status = str(state_data.get("plan_status") or "").casefold()
+    active_plan = _normalized_intake_metadata_path(state_data.get("active_plan"))
+    if plan_status == "active":
+        active_plan = active_plan or DEFAULT_PLAN_REL
+    if active_plan and not root_relative_path_conflict(active_plan):
+        return active_plan
+    if inventory.active_plan_surface and inventory.active_plan_surface.exists:
+        rel_path = _normalized_intake_metadata_path(inventory.active_plan_surface.rel_path)
+        if rel_path and not root_relative_path_conflict(rel_path):
+            return rel_path
+    return ""
+
+
+def _intake_active_plan_source_members(inventory: Inventory) -> tuple[str, ...]:
+    if not inventory.active_plan_surface or not inventory.active_plan_surface.exists:
+        return ()
+    data = inventory.active_plan_surface.frontmatter.data
+    members: list[str] = []
+    source_incubation = _normalized_intake_metadata_path(data.get("source_incubation"))
+    if source_incubation:
+        members.append(source_incubation)
+    for source_member in _frontmatter_path_values(data.get("source_members")):
+        members.append(source_member)
+    return _normalized_intake_metadata_paths(members)
+
+
+def _frontmatter_path_values(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item or "").strip() for item in value if str(item or "").strip())
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ()
+    return (normalized,)
+
+
+def _intake_target_is_verification(target: str) -> bool:
+    return classify_memory_route(target).route_id == "verification" if target else False
+
+
 def _normalized_intake_target(value: object) -> str:
     return str(value or "").replace("\\", "/").strip().strip("/")
+
+
+def _normalized_intake_metadata_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip()
+
+
+def _normalized_intake_metadata_paths(values: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        rel_path = _normalized_intake_metadata_path(value)
+        if rel_path and rel_path not in seen:
+            normalized.append(rel_path)
+            seen.add(rel_path)
+    return tuple(normalized)
 
 
 def _intake_rel_has_absolute_or_parent_parts(rel_path: str) -> bool:
