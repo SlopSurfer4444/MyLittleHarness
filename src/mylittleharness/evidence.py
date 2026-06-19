@@ -401,6 +401,63 @@ WORKER_RUN_RECEIPT_PRIVATE_TRACE_SOURCE_TOKENS = (
     "runtime trace",
     "telemetry",
 )
+WORKER_RUN_RECEIPT_PRIVATE_TRACE_CONTEXT_KEYS = {
+    "raw",
+    "raw_payload",
+    "raw_provider_payload",
+    "raw_request_payload",
+    "raw_response_payload",
+    "request_payload",
+    "response_payload",
+    "request_body",
+    "response_body",
+    "provider_payload",
+    "provider_request",
+    "provider_response",
+    "provider_request_payload",
+    "provider_response_payload",
+    "sdk_trace",
+    "sdk_traces",
+    "trace_payload",
+    "private_trace_payload",
+}
+WORKER_RUN_RECEIPT_PRIVATE_TRACE_PAYLOAD_KEYS = {
+    "messages",
+    "message",
+    "tool_calls",
+    "input_text",
+    "output_text",
+    "choices",
+    "delta",
+    "content",
+    "arguments",
+    "function_call",
+}
+WORKER_RUN_RECEIPT_PRIVATE_TRACE_FALSE_KEYS = {
+    "raw_payload_persisted",
+    "raw_provider_payload_persisted",
+    "raw_secret_material_persisted",
+    "secret_material_persisted",
+    "private_trace_authoritative",
+    "private_traces_authoritative",
+    "private_persistence_enabled",
+    "persist_private_traces",
+}
+WORKER_RUN_RECEIPT_PRIVATE_TRACE_SENSITIVE_KEYS = {
+    "authorization",
+    "proxy_authorization",
+    "x_api_key",
+    "api_key",
+    "openai_api_key",
+    "azure_openai_api_key",
+    "github_token",
+    "cookie",
+    "set_cookie",
+    "secret",
+    "access_token",
+    "refresh_token",
+    "bearer_token",
+}
 WORKER_RUN_RECEIPT_EVENT_HISTORY_AUTHORITY_VERBS = (
     "approve",
     "approves",
@@ -2547,6 +2604,7 @@ def _worker_run_receipt_metadata_findings(
     findings.extend(_worker_run_receipt_status_namespace_findings(rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_non_authority_findings(rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_event_history_findings(rel_path, data, code_prefix))
+    findings.extend(_worker_run_receipt_privacy_findings(rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_runtime_guard_preflight_findings(root, rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_checkpoint_resume_findings(root, rel_path, data, code_prefix))
     findings.extend(_worker_run_receipt_child_agent_fanout_findings(root, rel_path, data, code_prefix))
@@ -3769,6 +3827,170 @@ def _worker_run_receipt_false_authority_container_findings(
     elif authority not in (None, ""):
         findings.append(Finding("warn", code, f"worker run receipt {label}.authority must be an object when present", rel_path))
     return findings
+
+
+def _worker_run_receipt_privacy_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    return _worker_run_receipt_private_trace_findings(
+        rel_path,
+        "$",
+        data,
+        f"{code_prefix}-privacy-boundary",
+        in_private_context=False,
+    )
+
+
+def _worker_run_receipt_private_trace_findings(
+    rel_path: str,
+    path: str,
+    value: object,
+    code: str,
+    *,
+    in_private_context: bool,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            normalized_key = _worker_run_receipt_normalized_privacy_key(key)
+            child_path = f"{path}.{key}" if path != "$" else f"$.{key}"
+            child_in_private_context = in_private_context or normalized_key in WORKER_RUN_RECEIPT_PRIVATE_TRACE_CONTEXT_KEYS
+            if normalized_key in WORKER_RUN_RECEIPT_PRIVATE_TRACE_CONTEXT_KEYS:
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {child_path} raw/private SDK or provider payload key is forbidden",
+                        rel_path,
+                    )
+                )
+            if in_private_context and normalized_key in WORKER_RUN_RECEIPT_PRIVATE_TRACE_PAYLOAD_KEYS:
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {child_path} raw chat/tool/provider payload field is forbidden",
+                        rel_path,
+                    )
+                )
+            if normalized_key in WORKER_RUN_RECEIPT_PRIVATE_TRACE_FALSE_KEYS and _worker_run_receipt_truthy(child):
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {child_path} private trace persistence or authority flag must be false",
+                        rel_path,
+                    )
+                )
+            if normalized_key in WORKER_RUN_RECEIPT_PRIVATE_TRACE_SENSITIVE_KEYS and not _worker_run_receipt_redacted_secret_value(child):
+                findings.append(
+                    Finding(
+                        "warn",
+                        code,
+                        f"worker run receipt {child_path} secret-like field must be absent or explicitly redacted",
+                        rel_path,
+                    )
+                )
+            findings.extend(
+                _worker_run_receipt_private_trace_findings(
+                    rel_path,
+                    child_path,
+                    child,
+                    code,
+                    in_private_context=child_in_private_context,
+                )
+            )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            findings.extend(
+                _worker_run_receipt_private_trace_findings(
+                    rel_path,
+                    f"{path}[{index}]",
+                    child,
+                    code,
+                    in_private_context=in_private_context,
+                )
+            )
+    elif isinstance(value, str) and _worker_run_receipt_sensitive_string(value):
+        findings.append(
+            Finding(
+                "warn",
+                code,
+                f"worker run receipt {path} must not contain unredacted secret, header, bearer, or provider credential-shaped values",
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _worker_run_receipt_sensitive_string(value: str) -> bool:
+    screened = _worker_run_receipt_scrub_redacted_secret_fragments(value)
+    return any(
+        re.search(pattern, screened, re.IGNORECASE)
+        for pattern in (
+            r"\b(?:Authorization|Proxy-Authorization|X-Api-Key|api-key|Cookie|Set-Cookie)\s*:\s*(?:Bearer\s+)?[A-Za-z0-9._~+/=-]{8,}",
+            r"\bBearer\s+[A-Za-z0-9._-]{8,}",
+            r"\b(?:sk|sk-proj|rk)-[A-Za-z0-9_-]{8,}\b",
+            r"\b(?:OPENAI_API_KEY|AZURE_OPENAI_API_KEY|GITHUB_TOKEN)\s*=\s*[A-Za-z0-9._~+/=-]{8,}",
+        )
+    )
+
+
+def _worker_run_receipt_scrub_redacted_secret_fragments(value: str) -> str:
+    return re.sub(
+        r"(?:<\s*redacted\s*>|\[\s*redacted\s*\]|\bredacted(?:[-_][A-Za-z0-9._-]+)?\b|\*{3,})",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _worker_run_receipt_redacted_secret_value(value: object) -> bool:
+    if value in (None, "", False):
+        return True
+    if isinstance(value, str):
+        normalized = " ".join(value.casefold().split())
+        if normalized in {"false", "none", "nil", "null", "empty", "not-requested", "not-configured", "omitted", "<omitted>"}:
+            return True
+        if _worker_run_receipt_sensitive_string(value):
+            return False
+        if normalized in {"redacted", "<redacted>", "[redacted]", "***"}:
+            return True
+        if "redacted" not in normalized:
+            return False
+        scrubbed = _worker_run_receipt_scrub_redacted_secret_fragments(normalized)
+        residue_words = re.findall(r"[a-z0-9]+", scrubbed.casefold())
+        return all(
+            word
+            in {
+                "api",
+                "authorization",
+                "azure",
+                "bearer",
+                "cookie",
+                "github",
+                "key",
+                "openai",
+                "proxy",
+                "secret",
+                "set",
+                "token",
+                "value",
+                "x",
+            }
+            for word in residue_words
+        )
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            normalized_key = _worker_run_receipt_normalized_privacy_key(str(raw_key))
+            if normalized_key in {"redacted", "omitted"} and _worker_run_receipt_truthy(child):
+                return True
+    return False
+
+
+def _worker_run_receipt_normalized_privacy_key(value: str) -> str:
+    camel_split = re.sub(r"(?<!^)(?=[A-Z])", "_", value)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", camel_split).casefold()
+    return normalized.strip("_")
 
 
 def _worker_run_receipt_ref_list_findings(root: Path, rel_path: str, field: str, value: object, code: str) -> list[Finding]:

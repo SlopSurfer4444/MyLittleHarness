@@ -7421,6 +7421,98 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("private_trace_policy must not treat private SDK traces as authoritative", rendered)
             self.assertNotIn("event_history_summary must not claim event history approves lifecycle", rendered)
 
+    def test_check_focus_agents_warns_on_worker_run_receipt_private_trace_payload_leakage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_dir = root / "project/verification/worker-run-receipts"
+            receipt_dir.mkdir(parents=True)
+            (root / "src").mkdir()
+            (root / "src/worker.py").write_text("print('worker output')\n", encoding="utf-8")
+            (root / "project/verification/logs").mkdir(parents=True)
+            (root / "project/verification/logs/launch-privacy-worker-1.jsonl").write_text(
+                '{"event":"queued"}\n{"event":"completed"}\n',
+                encoding="utf-8",
+            )
+            (root / "project/verification/smoke.md").write_text("# Smoke\n\npassed\n", encoding="utf-8")
+            worker_hash = hashlib.sha256((root / "src/worker.py").read_bytes()).hexdigest()
+            smoke_hash = hashlib.sha256((root / "project/verification/smoke.md").read_bytes()).hexdigest()
+            (receipt_dir / "launch-privacy-worker-1.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-privacy-worker-1",
+                        "launch_id": "launch-privacy",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "runtime_status": "exited",
+                        "worker_status": "succeeded",
+                        "workflow_status": "in-progress",
+                        "verification_verdict": "passed",
+                        "lifecycle_status": "active",
+                        "research_import_status": "not-imported",
+                        "non_authority": "repo-visible-evidence-only; cannot approve lifecycle, Git, or provider routing",
+                        "event_history_summary": "Repo-visible event stream only; private SDK traces excluded.",
+                        "event_history_redaction": "private-traces-excluded",
+                        "private_trace_policy": "private SDK traces are excluded; repo-visible evidence only.",
+                        "task_input_refs": ["project/implementation-plan.md"],
+                        "event_stream_refs": ["project/verification/logs/launch-privacy-worker-1.jsonl"],
+                        "output_refs": ["src/worker.py"],
+                        "verification_refs": ["project/verification/smoke.md"],
+                        "source_hashes": [
+                            f"src/worker.py sha256={worker_hash}",
+                            f"project/verification/smoke.md sha256={smoke_hash}",
+                        ],
+                        "private_traces": {
+                            "stored": False,
+                            "rawPayload": {
+                                "messages": [{"inputText": "private prompt"}],
+                                "toolCalls": [{"rawProviderPayload": {"choices": [{"delta": {"content": "private"}}]}}],
+                            },
+                            "rawPayloadPersisted": True,
+                            "privateTraceAuthoritative": True,
+                            "redacted_summary": "Authorization: <redacted>; Bearer redacted-token",
+                        },
+                        "header_log": "Authorization: Bearer sk-test-secret-123456789",
+                        "mixed_redacted_secret_log": "Authorization: <redacted>; OPENAI_API_KEY=sk-real-secret-123456789",
+                        "credential_debug": {"openaiApiKey": "sk-test-secret-123456789"},
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("$.private_traces.rawPayload raw/private SDK or provider payload key is forbidden", rendered)
+            self.assertIn("$.private_traces.rawPayload.messages raw chat/tool/provider payload field is forbidden", rendered)
+            self.assertIn("$.private_traces.rawPayload.messages[0].inputText raw chat/tool/provider payload field is forbidden", rendered)
+            self.assertIn(
+                "$.private_traces.rawPayload.toolCalls[0].rawProviderPayload raw/private SDK or provider payload key is forbidden",
+                rendered,
+            )
+            self.assertIn(
+                "$.private_traces.rawPayloadPersisted private trace persistence or authority flag must be false",
+                rendered,
+            )
+            self.assertIn(
+                "$.private_traces.privateTraceAuthoritative private trace persistence or authority flag must be false",
+                rendered,
+            )
+            self.assertIn("$.header_log must not contain unredacted secret", rendered)
+            self.assertIn("$.mixed_redacted_secret_log must not contain unredacted secret", rendered)
+            self.assertIn("$.credential_debug.openaiApiKey secret-like field must be absent or explicitly redacted", rendered)
+            self.assertNotIn("$.private_traces.redacted_summary must not contain unredacted secret", rendered)
+
     def test_check_focus_agents_reports_worker_run_receipt_runtime_guard_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
