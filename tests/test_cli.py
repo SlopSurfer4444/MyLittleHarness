@@ -7277,6 +7277,319 @@ class CliTests(unittest.TestCase):
             self.assertIn("worker-run-receipt-refresh-refused", authority_rendered)
             self.assertIn("approves_lifecycle must remain false", authority_rendered)
 
+    def test_evidence_ref_retarget_updates_agent_run_refs_and_source_hashes_with_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            old_ref = "project/implementation-plan.md"
+            new_ref = "project/archive/plans/closed-plan.md"
+            changed_ref = "src/changed.py"
+            verification_ref = "project/verification/smoke.md"
+            record_ref = "project/verification/agent-runs/run-retarget.md"
+            (root / "project/archive/plans").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/agent-runs").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "src").mkdir()
+            (root / old_ref).write_text("# Active plan\n", encoding="utf-8")
+            (root / new_ref).write_text("# Closed plan\n", encoding="utf-8")
+            (root / changed_ref).write_text("print('changed')\n", encoding="utf-8")
+            (root / verification_ref).write_text("# Smoke\n", encoding="utf-8")
+            old_hash = hashlib.sha256((root / old_ref).read_bytes()).hexdigest()
+            changed_hash = hashlib.sha256((root / changed_ref).read_bytes()).hexdigest()
+            record_path = root / record_ref
+            record_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-retarget"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "Retarget evidence refs after closeout."\n'
+                'assigned_scope: "post-archive-evidence-retarget-maintenance"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "done"\n'
+                'attempt_budget: "1/1"\n'
+                "input_refs:\n"
+                f'  - "{old_ref}"\n'
+                "output_refs:\n"
+                f'  - "{changed_ref}"\n'
+                "claimed_paths:\n"
+                f'  - "{changed_ref}"\n'
+                "changed_files:\n"
+                f'  - "{changed_ref}"\n'
+                "commands:\n"
+                '  - "pytest -q tests/test_cli.py"\n'
+                "verification_refs:\n"
+                f'  - "{verification_ref}"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none known"\n'
+                "handoff_refs: []\n"
+                "claim_refs: []\n"
+                "source_hashes:\n"
+                f'  - "{old_ref} sha256={old_hash}"\n'
+                f'  - "{changed_ref} sha256={changed_hash}"\n'
+                "---\n"
+                "# Agent Run Record: run-retarget\n"
+                "\n"
+                "## Changed Files\n"
+                "\n"
+                f"- `{changed_ref}`\n"
+                "\n"
+                "## Verification\n"
+                "\n"
+                f"- `{verification_ref}`\n"
+                "\n"
+                "## Handoff And Claim Pointers\n"
+                "\n"
+                "- none recorded\n"
+                "\n"
+                "## Commands\n"
+                "\n"
+                "- `pytest -q tests/test_cli.py`\n"
+                "\n"
+                "## Source Hashes\n"
+                "\n"
+                f"- `{old_ref} sha256={old_hash}`\n"
+                f"- `{changed_ref} sha256={changed_hash}`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--retarget-ref",
+                            "--dry-run",
+                            "--target",
+                            record_ref,
+                            "--old-ref",
+                            old_ref,
+                            "--new-ref",
+                            new_ref,
+                        ]
+                    ),
+                    0,
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("evidence-ref-retarget-dry-run", dry_rendered)
+            self.assertIn("evidence-ref-retarget-source-hash", dry_rendered)
+            token_match = re.search(r"--proposal-token (eret-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            (root / new_ref).write_text("# Closed plan drift\n", encoding="utf-8")
+            before_stale_apply = snapshot_tree_bytes(root)
+            stale_apply = io.StringIO()
+            with redirect_stdout(stale_apply):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--retarget-ref",
+                            "--apply",
+                            "--target",
+                            record_ref,
+                            "--old-ref",
+                            old_ref,
+                            "--new-ref",
+                            new_ref,
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    2,
+                )
+            self.assertEqual(before_stale_apply, snapshot_tree_bytes(root))
+            self.assertIn("proposal token mismatch", stale_apply.getvalue())
+
+            refreshed_dry = io.StringIO()
+            with redirect_stdout(refreshed_dry):
+                self.assertEqual(
+                    main(["--root", str(root), "evidence", "--retarget-ref", "--dry-run", "--target", record_ref, "--old-ref", old_ref, "--new-ref", new_ref]),
+                    0,
+                )
+            refreshed_token = re.search(r"--proposal-token (eret-[a-f0-9]{16})", refreshed_dry.getvalue())
+            self.assertIsNotNone(refreshed_token)
+            assert refreshed_token is not None
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--retarget-ref",
+                            "--apply",
+                            "--target",
+                            record_ref,
+                            "--old-ref",
+                            old_ref,
+                            "--new-ref",
+                            new_ref,
+                            "--proposal-token",
+                            refreshed_token.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            rendered = apply_output.getvalue()
+            new_hash = hashlib.sha256((root / new_ref).read_bytes()).hexdigest()
+            record_text = record_path.read_text(encoding="utf-8")
+            self.assertIn("evidence-ref-retargeted", rendered)
+            self.assertIn(f'  - "{new_ref}"', record_text)
+            self.assertIn(f"{new_ref} sha256={new_hash}", record_text)
+            self.assertNotIn(f"{old_ref} sha256=", record_text)
+
+    def test_evidence_ref_retarget_updates_handoff_work_claim_and_worker_receipt_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            old_ref = "project/implementation-plan.md"
+            new_ref = "project/archive/plans/closed-plan.md"
+            handoff_ref = "project/verification/handoffs/handoff-1.json"
+            claim_ref = "project/verification/work-claims/claim-1.json"
+            receipt_ref = "project/verification/worker-run-receipts/launch-1-worker-1.json"
+            (root / "project/archive/plans").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/handoffs").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/work-claims").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/worker-run-receipts").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/logs").mkdir(parents=True, exist_ok=True)
+            (root / old_ref).write_text("# Active plan\n", encoding="utf-8")
+            (root / new_ref).write_text("# Closed plan\n", encoding="utf-8")
+            new_hash = hashlib.sha256((root / new_ref).read_bytes()).hexdigest()
+            old_hash = hashlib.sha256((root / old_ref).read_bytes()).hexdigest()
+            (root / "project/verification/logs/launch-1-worker-1.jsonl").write_text("{}\n", encoding="utf-8")
+            (root / handoff_ref).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "handoff-1",
+                        "status": "accepted",
+                        "worker_id": "worker-1",
+                        "role_id": "reviewer",
+                        "execution_slice": "post-archive-evidence-retarget-maintenance",
+                        "allowed_routes": ["evidence"],
+                        "write_scope": ["src/mylittleharness/evidence.py"],
+                        "stop_conditions": ["done"],
+                        "required_outputs": [old_ref],
+                        "evidence_refs": [old_ref],
+                        "approval_packet_refs": [],
+                        "claim_refs": [claim_ref],
+                        "accepted_by": "operator",
+                        "accepted_at_utc": "2026-06-20T00:00:00Z",
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / claim_ref).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-1",
+                        "claim_kind": "implementation",
+                        "owner_role": "coder",
+                        "owner_actor": "codex",
+                        "execution_slice": "post-archive-evidence-retarget-maintenance",
+                        "status": "released",
+                        "claimed_routes": ["evidence"],
+                        "claimed_paths": [old_ref],
+                        "completion_evidence": {
+                            "repo_visible_refs": [old_ref],
+                            "external_tracker_status_authoritative": False,
+                        },
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / receipt_ref).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "launch-1-worker-1",
+                        "launch_id": "launch-1",
+                        "worker_id": "worker-1",
+                        "role": "implementer",
+                        "target_root": str(root),
+                        "runtime_namespace": "runtime_state_namespace.v1",
+                        "worker_status": "succeeded",
+                        "non_authority": "repo-visible evidence-only; cannot approve lifecycle, fan-in, provider routing, staging, commit, archive, or target acceptance",
+                        "task_input_refs": [old_ref],
+                        "event_stream_refs": ["project/verification/logs/launch-1-worker-1.jsonl"],
+                        "output_refs": [new_ref],
+                        "verification_refs": [new_ref],
+                        "source_hashes": [f"{old_ref} sha256={old_hash}"],
+                        "authority": {"approves_lifecycle": False},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            for target_ref in (handoff_ref, claim_ref, receipt_ref):
+                dry_output = io.StringIO()
+                with redirect_stdout(dry_output):
+                    self.assertEqual(
+                        main(["--root", str(root), "evidence", "--retarget-ref", "--dry-run", "--target", target_ref, "--old-ref", old_ref, "--new-ref", new_ref]),
+                        0,
+                    )
+                token_match = re.search(r"--proposal-token (eret-[a-f0-9]{16})", dry_output.getvalue())
+                self.assertIsNotNone(token_match)
+                assert token_match is not None
+                apply_output = io.StringIO()
+                with redirect_stdout(apply_output):
+                    self.assertEqual(
+                        main(
+                            [
+                                "--root",
+                                str(root),
+                                "evidence",
+                                "--retarget-ref",
+                                "--apply",
+                                "--target",
+                                target_ref,
+                                "--old-ref",
+                                old_ref,
+                                "--new-ref",
+                                new_ref,
+                                "--proposal-token",
+                                token_match.group(1),
+                            ]
+                        ),
+                        0,
+                    )
+                self.assertIn("evidence-ref-retargeted", apply_output.getvalue())
+
+            handoff_payload = json.loads((root / handoff_ref).read_text(encoding="utf-8"))
+            claim_payload = json.loads((root / claim_ref).read_text(encoding="utf-8"))
+            receipt_payload = json.loads((root / receipt_ref).read_text(encoding="utf-8"))
+            self.assertEqual("accepted", handoff_payload["status"])
+            self.assertEqual("operator", handoff_payload["accepted_by"])
+            self.assertEqual([new_ref], handoff_payload["evidence_refs"])
+            self.assertEqual([new_ref], handoff_payload["required_outputs"])
+            self.assertEqual("released", claim_payload["status"])
+            self.assertEqual([new_ref], claim_payload["claimed_paths"])
+            self.assertEqual([new_ref], claim_payload["completion_evidence"]["repo_visible_refs"])
+            self.assertEqual([new_ref], receipt_payload["task_input_refs"])
+            self.assertEqual([f"{new_ref} sha256={new_hash}"], receipt_payload["source_hashes"])
+            self.assertFalse(receipt_payload["authority"]["approves_lifecycle"])
+
     def test_evidence_record_refuses_self_output_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

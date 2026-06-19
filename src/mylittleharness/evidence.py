@@ -63,6 +63,7 @@ AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
 WORKER_RUN_RECEIPT_REFRESH_TOKEN_PREFIX = "wrr-"
+EVIDENCE_REF_RETARGET_TOKEN_PREFIX = "eret-"
 CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL = "project/verification/checkpoint-packages"
 CHECKPOINT_PACKAGE_RECEIPT_SCHEMA = "mylittleharness.checkpoint-package-receipt.v1"
 RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA = "mylittleharness.runtime-guard-preflight-receipt.v1"
@@ -79,6 +80,41 @@ COORDINATION_RECORD_DIRS = (
     "project/verification/session-active-work",
     WORKER_RUN_RECEIPTS_DIR_REL,
     CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL,
+)
+EVIDENCE_REF_RETARGET_JSON_TARGET_PREFIXES = (
+    "project/verification/handoffs/",
+    "project/verification/work-claims/",
+    WORKER_RUN_RECEIPTS_DIR_REL + "/",
+)
+EVIDENCE_REF_RETARGET_AGENT_RUN_FIELDS = (
+    "input_refs",
+    "output_refs",
+    "claimed_paths",
+    "changed_files",
+    "verification_refs",
+    "handoff_refs",
+    "claim_refs",
+)
+EVIDENCE_REF_RETARGET_JSON_REF_KEYS = frozenset(
+    {
+        "approval_packet_refs",
+        "claim_refs",
+        "claimed_paths",
+        "decision_refs",
+        "evidence_refs",
+        "included_paths",
+        "input_refs",
+        "missing_anchor_refs",
+        "output_refs",
+        "receipt_refs",
+        "repo_visible_refs",
+        "required_outputs",
+        "route_anchor_refs",
+        "source_hashes",
+        "task_input_refs",
+        "verification_refs",
+        "write_scope",
+    }
 )
 AGENT_RUN_REQUIRED_SCALARS = (
     "schema",
@@ -1092,6 +1128,26 @@ class WorkerRunReceiptRefreshPlan:
     proposal_token: str
 
 
+@dataclass(frozen=True)
+class EvidenceRefRetargetRequest:
+    target: str
+    old_ref: str
+    new_ref: str
+    proposal_token: str
+
+
+@dataclass(frozen=True)
+class EvidenceRefRetargetPlan:
+    rel_path: str
+    current_text: str
+    updated_text: str
+    replacement_count: int
+    source_hashes: tuple[str, ...]
+    current_target_hash: str
+    proposal_token: str
+    target_kind: str
+
+
 def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
     return AgentRunRecordRequest(
         record_id=str(getattr(args, "record_id", "") or "").strip(),
@@ -1124,6 +1180,15 @@ def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
 def make_worker_run_receipt_refresh_request(args: object) -> WorkerRunReceiptRefreshRequest:
     return WorkerRunReceiptRefreshRequest(
         target=str(getattr(args, "receipt_target", "") or "").replace("\\", "/").strip(),
+        proposal_token=str(getattr(args, "proposal_token", "") or "").strip(),
+    )
+
+
+def make_evidence_ref_retarget_request(args: object) -> EvidenceRefRetargetRequest:
+    return EvidenceRefRetargetRequest(
+        target=str(getattr(args, "receipt_target", "") or "").replace("\\", "/").strip(),
+        old_ref=str(getattr(args, "old_ref", "") or "").replace("\\", "/").strip(),
+        new_ref=str(getattr(args, "new_ref", "") or "").replace("\\", "/").strip(),
         proposal_token=str(getattr(args, "proposal_token", "") or "").strip(),
     )
 
@@ -1328,6 +1393,94 @@ def worker_run_receipt_refresh_apply_findings(inventory: Inventory, request: Wor
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "worker-run-receipt-refresh-backup-cleanup", warning, plan.rel_path))
     findings.extend(_worker_run_receipt_refresh_boundary_findings())
+    return findings
+
+
+def evidence_ref_retarget_dry_run_findings(inventory: Inventory, request: EvidenceRefRetargetRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "evidence-ref-retarget-dry-run", "evidence reference retarget proposal only; no files were written"),
+        Finding("info", "evidence-ref-retarget-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _evidence_ref_retarget_request_findings(inventory, request, severity="warn")
+    findings.extend(request_findings)
+    if any(finding.severity in {"warn", "error"} for finding in request_findings):
+        findings.append(Finding("info", "evidence-ref-retarget-validation-posture", "dry-run refused before apply; fix the target and refs before retargeting evidence"))
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+
+    plan, plan_findings = _evidence_ref_retarget_plan(inventory.root, request, severity="warn")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "evidence-ref-retarget-validation-posture", "dry-run refused before apply; fix the existing route-owned evidence record before retargeting refs"))
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+
+    findings.extend(_evidence_ref_retarget_route_findings(plan, request, apply=False))
+    findings.extend(_evidence_ref_retarget_boundary_findings())
+    return findings
+
+
+def evidence_ref_retarget_apply_findings(inventory: Inventory, request: EvidenceRefRetargetRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "evidence-ref-retarget-apply", "evidence reference retarget apply started"),
+        Finding("info", "evidence-ref-retarget-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _evidence_ref_retarget_request_findings(inventory, request, severity="error")
+    findings.extend(request_findings)
+    if any(finding.severity == "error" for finding in request_findings):
+        findings.append(Finding("info", "evidence-ref-retarget-validation-posture", "apply refused before retargeting evidence refs"))
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+
+    plan, plan_findings = _evidence_ref_retarget_plan(inventory.root, request, severity="error")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "evidence-ref-retarget-validation-posture", "apply refused before retargeting evidence refs"))
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+    if not request.proposal_token:
+        findings.append(
+            Finding(
+                "error",
+                "evidence-ref-retarget-refused",
+                f"apply requires --proposal-token {plan.proposal_token} from a matching dry-run",
+                plan.rel_path,
+            )
+        )
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+    if request.proposal_token != plan.proposal_token:
+        findings.append(
+            Finding(
+                "error",
+                "evidence-ref-retarget-refused",
+                "proposal token mismatch; rerun evidence --retarget-ref --dry-run because the target or referenced files changed",
+                plan.rel_path,
+            )
+        )
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+    if plan.current_text == plan.updated_text:
+        findings.extend(_evidence_ref_retarget_route_findings(plan, request, apply=True))
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+
+    target = inventory.root / plan.rel_path
+    tmp_path = target.with_name(f".{target.name}.tmp")
+    backup_path = target.with_name(f".{target.name}.bak")
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target, tmp_path, plan.updated_text, backup_path),),
+            root=inventory.root,
+        )
+    except FileTransactionError as exc:
+        findings.append(Finding("error", "evidence-ref-retarget-refused", f"failed to retarget evidence refs before apply completed: {exc}", plan.rel_path))
+        findings.extend(_evidence_ref_retarget_boundary_findings())
+        return findings
+    findings.extend(_evidence_ref_retarget_route_findings(plan, request, apply=True))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "evidence-ref-retarget-backup-cleanup", warning, plan.rel_path))
+    findings.extend(_evidence_ref_retarget_boundary_findings())
     return findings
 
 
@@ -4466,6 +4619,462 @@ def _coordination_record_paths(root: Path) -> list[Path]:
             continue
         records.extend(path for path in directory.iterdir() if path.is_file() and path.suffix == ".json")
     return sorted(records)
+
+
+def _evidence_ref_retarget_request_findings(
+    inventory: Inventory,
+    request: EvidenceRefRetargetRequest,
+    severity: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                severity,
+                "evidence-ref-retarget-refused",
+                "evidence reference retarget is live-root only; product fixtures and archive roots remain read-only context",
+            )
+        )
+    if not request.target:
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "--target is required for evidence ref retarget"))
+    if not request.old_ref:
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "--old-ref is required for evidence ref retarget"))
+    if not request.new_ref:
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "--new-ref is required for evidence ref retarget"))
+    if not request.target or not request.old_ref or not request.new_ref:
+        return findings
+    findings.extend(_evidence_ref_retarget_target_findings(inventory.root, request.target, severity))
+    findings.extend(_evidence_ref_retarget_ref_findings(inventory.root, request.old_ref, request.new_ref, severity))
+    return findings
+
+
+def _evidence_ref_retarget_target_findings(root: Path, target_rel: str, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+    conflict = _root_relative_path_conflict(target_rel)
+    if conflict:
+        return [Finding(severity, "evidence-ref-retarget-refused", f"target {conflict}", target_rel)]
+    target_kind = _evidence_ref_retarget_target_kind(target_rel)
+    if target_kind == "":
+        return [
+            Finding(
+                severity,
+                "evidence-ref-retarget-refused",
+                (
+                    f"target must be an existing {AGENT_RUN_RECORD_PREFIX}*.md record "
+                    f"or JSON under {', '.join(prefix + '*.json' for prefix in EVIDENCE_REF_RETARGET_JSON_TARGET_PREFIXES)}"
+                ),
+                target_rel,
+            )
+        ]
+    target = (root / target_rel).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return [Finding(severity, "evidence-ref-retarget-refused", "target escapes the target root", target_rel)]
+    parent = root.resolve()
+    for part in Path(target_rel).parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            findings.append(Finding(severity, "evidence-ref-retarget-refused", f"target directory contains a symlink segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+        if parent.exists() and not parent.is_dir():
+            findings.append(Finding(severity, "evidence-ref-retarget-refused", f"target directory contains a non-directory segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+    if not target.exists():
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "target does not exist; retarget only maintains existing evidence records", target_rel))
+    elif target.is_symlink():
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "target must not be a symlink", target_rel))
+    elif not target.is_file():
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "target is not a regular file", target_rel))
+    return findings
+
+
+def _evidence_ref_retarget_ref_findings(root: Path, old_ref: str, new_ref: str, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+    for label, rel_path in (("--old-ref", old_ref), ("--new-ref", new_ref)):
+        conflict = _root_relative_path_conflict(rel_path)
+        if conflict:
+            findings.append(Finding(severity, "evidence-ref-retarget-refused", f"{label} {conflict}", rel_path))
+    if findings:
+        return findings
+    if _same_root_relative_path(old_ref, new_ref):
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "--old-ref and --new-ref must point at different root-relative refs", old_ref))
+        return findings
+    new_path = root / new_ref
+    boundary_violation = source_path_boundary_violation(root, new_path, label="new evidence retarget ref")
+    if boundary_violation is not None:
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", boundary_violation.message, new_ref))
+    elif not new_path.exists():
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "--new-ref must exist before retargeting evidence", new_ref))
+    elif not new_path.is_file():
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", "--new-ref must be a regular file", new_ref))
+    return findings
+
+
+def _evidence_ref_retarget_target_kind(target_rel: str) -> str:
+    if target_rel.startswith(AGENT_RUN_RECORD_PREFIX) and target_rel.endswith(".md"):
+        return "agent-run"
+    if target_rel.endswith(".json") and any(target_rel.startswith(prefix) for prefix in EVIDENCE_REF_RETARGET_JSON_TARGET_PREFIXES):
+        return "json"
+    return ""
+
+
+def _evidence_ref_retarget_plan(
+    root: Path,
+    request: EvidenceRefRetargetRequest,
+    severity: str,
+) -> tuple[EvidenceRefRetargetPlan | None, list[Finding]]:
+    target_kind = _evidence_ref_retarget_target_kind(request.target)
+    if target_kind == "agent-run":
+        return _agent_run_record_ref_retarget_plan(root, request, severity)
+    if target_kind == "json":
+        return _json_evidence_ref_retarget_plan(root, request, severity)
+    return None, [Finding(severity, "evidence-ref-retarget-refused", "target is outside the evidence ref retarget route scope", request.target)]
+
+
+def _agent_run_record_ref_retarget_plan(
+    root: Path,
+    request: EvidenceRefRetargetRequest,
+    severity: str,
+) -> tuple[EvidenceRefRetargetPlan | None, list[Finding]]:
+    target = root / request.target
+    try:
+        current_text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", f"agent run record could not be read before evidence ref retarget: {exc}", request.target)]
+
+    frontmatter = parse_frontmatter(current_text)
+    data = frontmatter.data
+    if not frontmatter.has_frontmatter:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", "agent run record is missing frontmatter; retarget refuses to guess metadata boundaries", request.target)]
+    if frontmatter.errors:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", "agent run record has malformed frontmatter; retarget refuses to guess metadata boundaries", request.target)]
+    if data.get("schema") != AGENT_RUN_SCHEMA:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", f"agent run record schema should be {AGENT_RUN_SCHEMA}", request.target)]
+    if data.get("record_type") != "agent-run":
+        return None, [Finding(severity, "evidence-ref-retarget-refused", "agent run record record_type should be agent-run", request.target)]
+    record_id = str(data.get("record_id") or "").strip()
+    expected_record_id = Path(request.target).stem
+    if record_id_conflict(record_id):
+        return None, [Finding(severity, "evidence-ref-retarget-refused", f"agent run record_id {record_id!r} is unsafe: {record_id_conflict(record_id)}", request.target)]
+    if record_id != expected_record_id:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", f"agent run record_id {record_id!r} does not match route target {expected_record_id!r}", request.target)]
+
+    retargeted_text, replacement_count = _retarget_agent_run_record_refs(current_text, data, request.old_ref, request.new_ref)
+    source_hashes: tuple[str, ...] = ()
+    findings = [
+        Finding(
+            "info",
+            "evidence-ref-retarget-target",
+            f"retarget evidence refs in existing agent run record: {request.target}",
+            request.target,
+        )
+    ]
+    if replacement_count:
+        updated_frontmatter = parse_frontmatter(retargeted_text)
+        source_refs_with_self = _record_source_refs(updated_frontmatter.data)
+        source_refs = tuple(ref for ref in source_refs_with_self if not _same_root_relative_path(ref, request.target))
+        if not source_refs:
+            return None, [
+                *findings,
+                Finding(
+                    severity,
+                    "evidence-ref-retarget-refused",
+                    f"agent run record has no source-bound refs to refresh after excluding its own target {request.target}",
+                    request.target,
+                ),
+            ]
+        refreshed_hashes, hash_findings = _source_hash_entries_for_refs(root, source_refs, code_prefix="evidence-ref-retarget")
+        source_hashes = tuple(refreshed_hashes)
+        findings.extend(hash_findings)
+        retargeted_text = _replace_agent_run_source_hashes(retargeted_text, source_hashes)
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    proposal_token = _evidence_ref_retarget_token(request.target, current_hash, request.old_ref, request.new_ref, retargeted_text, source_hashes)
+    return (
+        EvidenceRefRetargetPlan(
+            rel_path=request.target,
+            current_text=current_text,
+            updated_text=retargeted_text,
+            replacement_count=replacement_count,
+            source_hashes=source_hashes,
+            current_target_hash=current_hash,
+            proposal_token=proposal_token,
+            target_kind="agent-run",
+        ),
+        findings,
+    )
+
+
+def _json_evidence_ref_retarget_plan(
+    root: Path,
+    request: EvidenceRefRetargetRequest,
+    severity: str,
+) -> tuple[EvidenceRefRetargetPlan | None, list[Finding]]:
+    target = root / request.target
+    try:
+        current_text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", f"JSON evidence record could not be read before ref retarget: {exc}", request.target)]
+    try:
+        payload = json.loads(current_text)
+    except json.JSONDecodeError as exc:
+        return None, [Finding(severity, "evidence-ref-retarget-refused", f"JSON evidence record is malformed: {exc.msg}", request.target)]
+    if not isinstance(payload, dict):
+        return None, [Finding(severity, "evidence-ref-retarget-refused", "JSON evidence record must be an object", request.target)]
+
+    findings = [
+        Finding(
+            "info",
+            "evidence-ref-retarget-target",
+            f"retarget evidence refs in existing JSON coordination record: {request.target}",
+            request.target,
+        )
+    ]
+    findings.extend(_json_evidence_ref_retarget_shape_findings(request.target, payload, severity))
+    findings.extend(_json_evidence_ref_retarget_authority_findings(request.target, payload, severity))
+    if any(finding.severity in {"warn", "error"} for finding in findings):
+        return None, findings
+
+    updated_payload, replacement_count = _retarget_json_ref_values(payload, request.old_ref, request.new_ref)
+    source_hashes: tuple[str, ...] = ()
+    if replacement_count and request.target.startswith(f"{WORKER_RUN_RECEIPTS_DIR_REL}/"):
+        payload_findings = _worker_run_receipt_refresh_payload_findings(root, request.target, updated_payload, severity)
+        findings.extend(payload_findings)
+        if any(finding.severity in {"warn", "error"} for finding in payload_findings):
+            return None, findings
+        source_refs, source_ref_findings = _worker_run_receipt_refresh_source_refs(request.target, updated_payload, severity)
+        findings.extend(source_ref_findings)
+        if any(finding.severity in {"warn", "error"} for finding in source_ref_findings):
+            return None, findings
+        refreshed_hashes, hash_findings = _source_hash_entries_for_refs(root, source_refs, code_prefix="evidence-ref-retarget")
+        findings.extend(hash_findings)
+        if any(finding.severity == "warn" for finding in hash_findings):
+            findings.append(
+                Finding(
+                    severity,
+                    "evidence-ref-retarget-refused",
+                    "source_hash refs must resolve to missing or readable regular files before a protected ref retarget is written",
+                    request.target,
+                )
+            )
+            return None, findings
+        source_hashes = tuple(refreshed_hashes)
+        updated_payload = dict(updated_payload)
+        updated_payload["source_hashes"] = list(source_hashes)
+    updated_text = current_text if replacement_count == 0 else json.dumps(updated_payload, indent=2) + "\n"
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    proposal_token = _evidence_ref_retarget_token(request.target, current_hash, request.old_ref, request.new_ref, updated_text, source_hashes)
+    return (
+        EvidenceRefRetargetPlan(
+            rel_path=request.target,
+            current_text=current_text,
+            updated_text=updated_text,
+            replacement_count=replacement_count,
+            source_hashes=source_hashes,
+            current_target_hash=current_hash,
+            proposal_token=proposal_token,
+            target_kind="json",
+        ),
+        findings,
+    )
+
+
+def _json_evidence_ref_retarget_shape_findings(target_rel: str, data: dict[str, object], severity: str) -> list[Finding]:
+    expectations: tuple[str, str] | None = None
+    if target_rel.startswith("project/verification/handoffs/"):
+        expectations = ("mylittleharness.handoff-packet.v1", "handoff-packet")
+    elif target_rel.startswith("project/verification/work-claims/"):
+        expectations = ("mylittleharness.work-claim.v1", "work-claim")
+    elif target_rel.startswith(f"{WORKER_RUN_RECEIPTS_DIR_REL}/"):
+        expectations = (WORKER_RUN_RECEIPT_SCHEMA, "worker-run-receipt")
+    if expectations is None:
+        return []
+    expected_schema, expected_record_type = expectations
+    findings: list[Finding] = []
+    if data.get("schema") != expected_schema:
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", f"JSON evidence record schema should be {expected_schema}", target_rel))
+    if data.get("record_type") != expected_record_type:
+        findings.append(Finding(severity, "evidence-ref-retarget-refused", f"JSON evidence record record_type should be {expected_record_type}", target_rel))
+    return findings
+
+
+def _json_evidence_ref_retarget_authority_findings(target_rel: str, data: object, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+
+    def walk(value: object, path: tuple[str, ...]) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized_key = str(key or "").strip()
+                if normalized_key in {
+                    "approves_lifecycle",
+                    "approves_archive",
+                    "approves_commit",
+                    "approves_release",
+                    "external_tracker_status_authoritative",
+                } and _json_truthy(child):
+                    dotted = ".".join((*path, normalized_key))
+                    findings.append(Finding(severity, "evidence-ref-retarget-refused", f"{dotted} must remain false; evidence ref retarget cannot carry authority overclaims", target_rel))
+                walk(child, (*path, normalized_key))
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, path)
+
+    walk(data, ())
+    return findings
+
+
+def _retarget_json_ref_values(value: object, old_ref: str, new_ref: str, active_key: str | None = None) -> tuple[object, int]:
+    if isinstance(value, dict):
+        changed: dict[str, object] = {}
+        count = 0
+        for key, child in value.items():
+            child_value, child_count = _retarget_json_ref_values(child, old_ref, new_ref, str(key))
+            changed[key] = child_value
+            count += child_count
+        return changed, count
+    if isinstance(value, list):
+        changed_items: list[object] = []
+        count = 0
+        for child in value:
+            child_value, child_count = _retarget_json_ref_values(child, old_ref, new_ref, active_key)
+            changed_items.append(child_value)
+            count += child_count
+        return changed_items, count
+    if isinstance(value, str) and active_key in EVIDENCE_REF_RETARGET_JSON_REF_KEYS:
+        retargeted, count = _retarget_ref_string(value, old_ref, new_ref, allow_source_hash=active_key == "source_hashes")
+        return retargeted, count
+    return value, 0
+
+
+def _retarget_agent_run_record_refs(text: str, data: dict[str, object], old_ref: str, new_ref: str) -> tuple[str, int]:
+    updated_text = text
+    replacement_count = 0
+    for field in EVIDENCE_REF_RETARGET_AGENT_RUN_FIELDS:
+        values = _frontmatter_string_list(data.get(field))
+        if not values:
+            continue
+        new_values: list[str] = []
+        changed = False
+        for value in values:
+            if _same_root_relative_path(value, old_ref):
+                new_values.append(new_ref)
+                changed = True
+                replacement_count += 1
+            else:
+                new_values.append(value)
+        if changed:
+            updated_text = _replace_frontmatter_list(updated_text, field, tuple(new_values))
+    updated_lines: list[str] = []
+    for line in updated_text.splitlines():
+        replacement = line
+        for template in ("- `{}`", "- handoff: `{}`", "- claim: `{}`"):
+            if line == template.format(old_ref):
+                replacement = template.format(new_ref)
+                replacement_count += 1
+                break
+        updated_lines.append(replacement)
+    updated_text = _join_preserving_trailing_newline(updated_lines, updated_text)
+    return updated_text, replacement_count
+
+
+def _retarget_ref_string(value: str, old_ref: str, new_ref: str, *, allow_source_hash: bool) -> tuple[str, int]:
+    normalized = value.replace("\\", "/").strip()
+    if _same_root_relative_path(normalized, old_ref):
+        return new_ref, 1
+    if allow_source_hash:
+        match = SOURCE_HASH_RE.match(normalized)
+        if match and _same_root_relative_path(match.group(1).strip(), old_ref):
+            suffix = normalized[match.end(1) :]
+            return f"{new_ref}{suffix}", 1
+    return value, 0
+
+
+def _json_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "yes", "1", "authoritative", "approved"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return False
+
+
+def _evidence_ref_retarget_token(target_rel: str, current_hash: str, old_ref: str, new_ref: str, updated_text: str, source_hashes: tuple[str, ...]) -> str:
+    payload = "\n".join((target_rel, current_hash, old_ref, new_ref, hashlib.sha256(updated_text.encode("utf-8")).hexdigest(), *source_hashes))
+    return f"{EVIDENCE_REF_RETARGET_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _evidence_ref_retarget_route_findings(plan: EvidenceRefRetargetPlan, request: EvidenceRefRetargetRequest, *, apply: bool) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "evidence-ref-retarget-token",
+            (
+                f"current target sha256={plan.current_target_hash}; proposal_token={plan.proposal_token}; "
+                f"apply with: mylittleharness --root <root> evidence --retarget-ref --apply --target {plan.rel_path} "
+                f"--old-ref {request.old_ref} --new-ref {request.new_ref} --proposal-token {plan.proposal_token}"
+            ),
+            plan.rel_path,
+        )
+    ]
+    if plan.replacement_count == 0 or plan.current_text == plan.updated_text:
+        findings.append(
+            Finding(
+                "info",
+                "evidence-ref-retarget-current",
+                f"old ref was not present in scoped provenance fields for {plan.rel_path}; no route write is needed",
+                plan.rel_path,
+            )
+        )
+        return findings
+    before_hash = _short_hash(plan.current_text)
+    after_hash = _short_hash(plan.updated_text)
+    before_bytes = len(plan.current_text.encode("utf-8"))
+    after_bytes = len(plan.updated_text.encode("utf-8"))
+    prefix = "retargeted" if apply else "would retarget"
+    findings.extend(
+        [
+            Finding(
+                "info",
+                "evidence-ref-retargeted" if apply else "evidence-ref-retarget-dry-run",
+                f"{prefix} {plan.replacement_count} scoped provenance ref(s) in existing {plan.target_kind} evidence target: {plan.rel_path}",
+                plan.rel_path,
+            ),
+            Finding(
+                "info",
+                "evidence-ref-retarget-route-write",
+                f"{prefix} route {plan.rel_path}; before_hash={before_hash}; after_hash={after_hash}; before_bytes={before_bytes}; after_bytes={after_bytes}; source-bound write evidence is independent of Git tracking",
+                plan.rel_path,
+            ),
+        ]
+    )
+    if plan.source_hashes:
+        findings.append(
+            Finding(
+                "info",
+                "evidence-ref-retarget-source-hashes",
+                f"refreshed {len(plan.source_hashes)} source_hash entry/entries after retargeting provenance refs",
+                plan.rel_path,
+            )
+        )
+    return findings
+
+
+def _evidence_ref_retarget_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "evidence-ref-retarget-boundary",
+            "evidence ref retarget updates only scoped provenance refs and refreshed source_hashes in existing route-owned evidence; it cannot approve lifecycle, archive, roadmap status, provider routing, staging, commit, or acceptance",
+            "project/verification",
+        ),
+        Finding(
+            "info",
+            "evidence-ref-retarget-route",
+            "evidence ref retarget is limited to existing agent-run Markdown plus handoff, work-claim, and worker-run receipt JSON records; it creates no runtime, queue, database, cache, adapter state, or provider gateway",
+            "project/verification",
+        ),
+    ]
 
 
 def _worker_run_receipt_refresh_request_findings(

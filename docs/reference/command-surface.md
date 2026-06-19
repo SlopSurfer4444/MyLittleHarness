@@ -40,6 +40,7 @@ and root escapes. Use `--dry-run` before every mutating default command.
 | `research-distill` | research distillate | yes | yes | writes reviewed synthesis with quality and planning gates |
 | `research-compare` | research comparison | yes | yes | writes reviewed comparison and optional source cleanup |
 | `evidence --receipt-refresh` | evidence maintenance | yes | yes plus proposal token | refreshes `source_hashes` only for an existing worker-run receipt JSON |
+| `evidence --retarget-ref` | evidence maintenance | yes | yes plus proposal token | retargets scoped provenance refs in existing route-owned evidence |
 | `incubate` | future idea/fix-candidate capture | yes | yes | writes non-authority incubation notes |
 | `intake` | incoming information route | yes | yes | writes one explicit target when reviewed |
 
@@ -62,6 +63,16 @@ It refuses path escapes, symlinks, malformed or unknown JSON, stale tokens,
 unsafe source refs, and authority overclaims, and it cannot approve lifecycle,
 fan-in, provider routing, staging, commits, archives, worker launch, or
 target-repo acceptance.
+Protected evidence provenance retargeting uses
+`evidence --retarget-ref --dry-run --target <route-owned-evidence>
+--old-ref <root-relative-ref> --new-ref <existing-root-relative-ref>`.
+The matching apply requires the reported proposal token and updates only scoped
+provenance ref fields in existing agent-run Markdown, handoff JSON,
+work-claim JSON, or worker-run receipt JSON. Agent-run and worker-run receipt
+targets refresh `source_hashes` after retargeting. It refuses path escapes,
+symlinks, missing new refs, malformed records, stale tokens, and authority
+overclaims, and it cannot approve lifecycle, archive, roadmap status,
+provider routing, staging, commits, or acceptance.
 `attachment-import` is the route for incoming PDFs, DOCX, XLSX, images, and
 ZIPs. It writes the original binary beside `artifact.md`; the binary remains
 source evidence, and the Markdown card is the metadata authority for hash,

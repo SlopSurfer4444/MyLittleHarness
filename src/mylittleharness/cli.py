@@ -87,8 +87,11 @@ from .evidence import (
     agent_run_record_apply_findings,
     agent_run_record_dry_run_findings,
     agent_run_record_findings,
+    evidence_ref_retarget_apply_findings,
+    evidence_ref_retarget_dry_run_findings,
     evidence_findings,
     make_agent_run_record_request,
+    make_evidence_ref_retarget_request,
     make_worker_run_receipt_refresh_request,
     worker_run_receipt_refresh_apply_findings,
     worker_run_receipt_refresh_dry_run_findings,
@@ -762,14 +765,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if command == "evidence":
-        if args.record and args.receipt_refresh:
-            parser.error("evidence --record and --receipt-refresh are mutually exclusive")
+        evidence_modes = [bool(args.record), bool(args.receipt_refresh), bool(args.retarget_ref)]
+        if sum(evidence_modes) > 1:
+            parser.error("evidence --record, --receipt-refresh, and --retarget-ref are mutually exclusive")
         if args.record and not (args.dry_run or args.apply):
             parser.error("evidence --record requires --dry-run or --apply")
         if args.receipt_refresh and not (args.dry_run or args.apply):
             parser.error("evidence --receipt-refresh requires --dry-run or --apply")
-        if (args.dry_run or args.apply) and not (args.record or args.receipt_refresh):
-            parser.error("evidence --dry-run/--apply are only valid with --record or --receipt-refresh")
+        if args.retarget_ref and not (args.dry_run or args.apply):
+            parser.error("evidence --retarget-ref requires --dry-run or --apply")
+        if (args.dry_run or args.apply) and not any(evidence_modes):
+            parser.error("evidence --dry-run/--apply are only valid with --record, --receipt-refresh, or --retarget-ref")
         if args.record:
             request = make_agent_run_record_request(args)
             report_name = "evidence --record --apply" if args.apply else "evidence --record --dry-run"
@@ -782,6 +788,14 @@ def main(argv: list[str] | None = None) -> int:
             request = make_worker_run_receipt_refresh_request(args)
             report_name = "evidence --receipt-refresh --apply" if args.apply else "evidence --receipt-refresh --dry-run"
             findings = worker_run_receipt_refresh_apply_findings(inventory, request) if args.apply else worker_run_receipt_refresh_dry_run_findings(inventory, request)
+            findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+            result = _result_for(findings)
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            return 2 if args.apply and result == "error" else 0
+        if args.retarget_ref:
+            request = make_evidence_ref_retarget_request(args)
+            report_name = "evidence --retarget-ref --apply" if args.apply else "evidence --retarget-ref --dry-run"
+            findings = evidence_ref_retarget_apply_findings(inventory, request) if args.apply else evidence_ref_retarget_dry_run_findings(inventory, request)
             findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
             result = _result_for(findings)
             emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -2897,6 +2911,19 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["Use snapshot inspection as safety-evidence review only; manual rollback and source files remain operator decisions."]
         return ["snapshot inspection completed as a terminal-only read-only report; it did not approve repair, rollback, cleanup, closeout, archive, commit, or lifecycle decision."]
     if command == "evidence":
+        is_ref_retarget_dry_run = any(finding.code == "evidence-ref-retarget-dry-run" for finding in findings)
+        if is_ref_retarget_dry_run and any(
+            finding.code == "evidence-ref-retarget-refused" and finding.severity in {"warn", "error"} for finding in findings
+        ):
+            return ["evidence ref-retarget dry-run was refused before any protected evidence ref write preview became reliable."]
+        if is_ref_retarget_dry_run:
+            return ["evidence ref-retarget dry-run reported the target, exact old/new refs, refreshed source hashes where needed, and proposal token without writing files."]
+        if any(finding.code == "evidence-ref-retargeted" for finding in findings):
+            return ["evidence ref-retarget apply updated one existing route-owned evidence target; lifecycle, archive, roadmap status, provider routing, staging, commit, and acceptance remain explicit."]
+        if any(finding.code == "evidence-ref-retarget-current" for finding in findings):
+            return ["evidence ref-retarget found no matching scoped provenance refs in the existing target; no route write was needed."]
+        if any(finding.code == "evidence-ref-retarget-refused" and finding.severity == "error" for finding in findings):
+            return ["evidence ref-retarget apply was refused before protected evidence refs were changed."]
         is_receipt_refresh_dry_run = any(finding.code == "worker-run-receipt-refresh-dry-run" for finding in findings)
         if is_receipt_refresh_dry_run and any(
             finding.code == "worker-run-receipt-refresh-refused" and finding.severity in {"warn", "error"} for finding in findings
