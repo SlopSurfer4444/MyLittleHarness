@@ -232,8 +232,10 @@ from .task_session import (
     task_session_receipt_dry_run_findings,
     task_session_sections,
 )
-from .writeback import make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
+from .writeback import CLOSEOUT_WRITEBACK_FIELDS, make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
 from .cli_parser import build_parser
+
+_CLOSEOUT_FILE_INPUT_MAX_BYTES = 64 * 1024
 
 
 COMMANDS = (
@@ -376,6 +378,133 @@ def _underscore_option_typo_hint(argv: list[str], parser: argparse.ArgumentParse
             return option, dashed
     return None
 
+
+def _closeout_cli_option(field: str) -> str:
+    return f"--{field.replace('_', '-')}"
+
+
+def _closeout_file_cli_option(field: str) -> str:
+    return f"{_closeout_cli_option(field)}-file"
+
+
+def _resolve_closeout_file_inputs(root: Path, args: argparse.Namespace, *, command: str) -> list[Finding]:
+    findings: list[Finding] = []
+    for field in CLOSEOUT_WRITEBACK_FIELDS:
+        file_value = getattr(args, f"{field}_file", None)
+        if not file_value:
+            continue
+        file_option = _closeout_file_cli_option(field)
+        inline_option = _closeout_cli_option(field)
+        inline_value = getattr(args, field, None)
+        if str(inline_value or "").strip():
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-conflict",
+                    f"{file_option} cannot be combined with {inline_option}; choose one source for {field}",
+                    str(file_value),
+                )
+            )
+            continue
+        path = Path(str(file_value))
+        if not path.is_absolute():
+            path = root / path
+        display_path = _display_closeout_file_input_path(root, path)
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} could not be read from {display_path}: {exc}",
+                    display_path,
+                )
+            )
+            continue
+        if not path.is_file():
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} must name a regular UTF-8 text file: {display_path}",
+                    display_path,
+                )
+            )
+            continue
+        if stat.st_size > _CLOSEOUT_FILE_INPUT_MAX_BYTES:
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} is too large ({stat.st_size} bytes); closeout file inputs are limited to {_CLOSEOUT_FILE_INPUT_MAX_BYTES} bytes",
+                    display_path,
+                )
+            )
+            continue
+        try:
+            text = path.read_text(encoding="utf-8").rstrip("\r\n")
+        except UnicodeDecodeError as exc:
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} is not valid UTF-8 text: {exc}",
+                    display_path,
+                )
+            )
+            continue
+        except OSError as exc:
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} could not be read from {display_path}: {exc}",
+                    display_path,
+                )
+            )
+            continue
+        if not text.strip():
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} resolved to an empty closeout value",
+                    display_path,
+                )
+            )
+            continue
+        if "\n" in text or "\r" in text:
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-metadata-file-input-refused",
+                    f"{file_option} must resolve to one closeout line; put multi-paragraph evidence in the active plan or project/verification",
+                    display_path,
+                )
+            )
+            continue
+        setattr(args, field, text)
+        findings.append(
+            Finding(
+                "info",
+                "lifecycle-metadata-file-input",
+                f"{command} resolved {file_option} from {display_path}; {field} participates in the same dry-run/apply review as {inline_option}",
+                display_path,
+            )
+        )
+    return findings
+
+
+def _display_closeout_file_input_path(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def _has_error_finding(findings: list[Finding]) -> bool:
+    return any(finding.severity == "error" for finding in findings)
 
 
 
@@ -1025,37 +1154,42 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "writeback":
-        request = make_writeback_request(
-            archive_active_plan=args.archive_active_plan,
-            compact_only=args.compact_only,
-            allow_auto_compaction=args.allow_auto_compaction,
-            source_hash=args.source_hash,
-            from_active_plan=args.from_active_plan,
-            roadmap_item=args.roadmap_item,
-            roadmap_status=args.roadmap_status,
-            archived_plan=args.archived_plan,
-            archive_collision_policy=args.archive_collision_policy,
-            worktree_start_state=args.worktree_start_state,
-            task_scope=args.task_scope,
-            docs_decision=args.docs_decision,
-            state_writeback=args.state_writeback,
-            verification=args.verification,
-            commit_decision=args.commit_decision,
-            residual_risk=args.residual_risk,
-            next_state=args.next_state,
-            carry_forward=args.carry_forward,
-            work_result=args.work_result,
-            active_phase=args.active_phase,
-            phase_status=args.phase_status,
-            last_archived_plan=args.last_archived_plan,
-            product_source_root=args.product_source_root,
-        )
         report_name = "writeback --apply" if args.apply else "writeback --dry-run"
         if args.compact_only:
             report_name += " --compact-only"
         if args.allow_auto_compaction:
             report_name += " --allow-auto-compaction"
-        findings = writeback_apply_findings(inventory, request) if args.apply else writeback_dry_run_findings(inventory, request)
+        file_input_findings = _resolve_closeout_file_inputs(inventory.root, args, command="writeback")
+        if _has_error_finding(file_input_findings):
+            findings = file_input_findings
+        else:
+            request = make_writeback_request(
+                archive_active_plan=args.archive_active_plan,
+                compact_only=args.compact_only,
+                allow_auto_compaction=args.allow_auto_compaction,
+                source_hash=args.source_hash,
+                from_active_plan=args.from_active_plan,
+                roadmap_item=args.roadmap_item,
+                roadmap_status=args.roadmap_status,
+                archived_plan=args.archived_plan,
+                archive_collision_policy=args.archive_collision_policy,
+                worktree_start_state=args.worktree_start_state,
+                task_scope=args.task_scope,
+                docs_decision=args.docs_decision,
+                state_writeback=args.state_writeback,
+                verification=args.verification,
+                commit_decision=args.commit_decision,
+                residual_risk=args.residual_risk,
+                next_state=args.next_state,
+                carry_forward=args.carry_forward,
+                work_result=args.work_result,
+                active_phase=args.active_phase,
+                phase_status=args.phase_status,
+                last_archived_plan=args.last_archived_plan,
+                product_source_root=args.product_source_root,
+            )
+            findings = file_input_findings
+            findings.extend(writeback_apply_findings(inventory, request) if args.apply else writeback_dry_run_findings(inventory, request))
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -1064,7 +1198,12 @@ def main(argv: list[str] | None = None) -> int:
         report_name = "transition --apply" if args.apply else "transition --dry-run"
         if args.allow_auto_compaction:
             report_name += " --allow-auto-compaction"
-        findings = _transition_apply_findings(inventory, args) if args.apply else _transition_dry_run_findings(inventory, args)
+        file_input_findings = _resolve_closeout_file_inputs(inventory.root, args, command="transition")
+        if _has_error_finding(file_input_findings):
+            findings = file_input_findings
+        else:
+            findings = file_input_findings
+            findings.extend(_transition_apply_findings(inventory, args) if args.apply else _transition_dry_run_findings(inventory, args))
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))

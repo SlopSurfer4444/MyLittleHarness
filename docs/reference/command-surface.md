@@ -46,6 +46,15 @@ and root escapes. Use `--dry-run` before every mutating default command.
 
 These commands are advanced by design. Their output can guide an operator, but
 only an explicit apply route writes repo-visible authority.
+`writeback` and `transition` accept file-backed closeout metadata for the same
+fields as their inline closeout options: append `-file` to a closeout field
+option, such as `--state-writeback-file`, `--verification-file`,
+`--residual-risk-file`, or `--work-result-file`. File inputs are UTF-8 text,
+must resolve to one closeout line, cannot be combined with the matching inline
+option in the same command, and are normalized into the same dry-run/apply
+request as inline values. For `transition`, the resolved file contents
+participate in review-token matching through the closeout payload; changing the
+file contents after dry-run requires a fresh dry-run token.
 For protected incubation cleanup, `memory-hygiene --dry-run --archive-list-file
 <project/verification/reviewed-list.txt> --archive-folder
 project/archive/reference/<reviewed-folder>` validates an explicit reviewed

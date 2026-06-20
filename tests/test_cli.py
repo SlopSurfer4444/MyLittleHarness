@@ -24911,6 +24911,121 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("writeback-acceptance-evidence-missing", rendered)
             self.assertNotIn("dry-run refused before apply", rendered)
 
+    def test_writeback_dry_run_reads_closeout_field_files_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            closeout_dir = root / "project/verification/closeout-fields"
+            closeout_dir.mkdir(parents=True)
+            state_file = closeout_dir / "state-writeback.txt"
+            verification_file = closeout_dir / "verification.txt"
+            state_file.write_text('Implemented file inputs with quotes, semicolons; and Windows-safe punctuation.\n', encoding="utf-8")
+            verification_file.write_text("PYTHONDONTWRITEBYTECODE=1 pytest tests/test_cli.py::CliTests passed.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback-file",
+                        "project/verification/closeout-fields/state-writeback.txt",
+                        "--verification-file",
+                        "project/verification/closeout-fields/verification.txt",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0, rendered)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("lifecycle-metadata-file-input", rendered)
+            self.assertIn("--state-writeback-file", rendered)
+            self.assertIn("--verification-file", rendered)
+            self.assertNotIn("lifecycle-metadata-file-input-refused", rendered)
+
+    def test_writeback_refuses_inline_and_file_for_same_closeout_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            closeout_file = root / "project/verification/state-writeback.txt"
+            closeout_file.parent.mkdir(parents=True)
+            closeout_file.write_text("file-backed closeout text\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--state-writeback",
+                        "inline closeout text",
+                        "--state-writeback-file",
+                        "project/verification/state-writeback.txt",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("status: error", rendered)
+            self.assertIn("lifecycle-metadata-file-input-conflict", rendered)
+            self.assertIn("--state-writeback-file cannot be combined with --state-writeback", rendered)
+
+    def test_transition_review_token_binds_resolved_closeout_file_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            closeout_dir = root / "project/verification/closeout-fields"
+            closeout_dir.mkdir(parents=True)
+            state_file = closeout_dir / "state-writeback.txt"
+            verification_file = closeout_dir / "verification.txt"
+            state_file.write_text("implemented file-backed lifecycle metadata inputs in src/mylittleharness/cli.py\n", encoding="utf-8")
+            verification_file.write_text("focused transition file-input token regression passed\n", encoding="utf-8")
+            command = [
+                "--root",
+                str(root),
+                "transition",
+                "--dry-run",
+                "--complete-current-phase",
+                "--docs-decision",
+                "not-needed",
+                "--state-writeback-file",
+                "project/verification/closeout-fields/state-writeback.txt",
+                "--verification-file",
+                "project/verification/closeout-fields/verification.txt",
+                "--commit-decision",
+                "manual policy; no staging",
+            ]
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(command)
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0, dry_rendered)
+            self.assertIn("lifecycle-metadata-file-input", dry_rendered)
+            token = re.search(r"review token: ([0-9a-f]{16})", dry_rendered).group(1)
+
+            state_file.write_text("changed after review; token must now refuse apply\n", encoding="utf-8")
+            before_apply = snapshot_tree(root)
+            apply_command = command.copy()
+            apply_command[apply_command.index("--dry-run")] = "--apply"
+            apply_command.extend(["--review-token", token])
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(apply_command)
+            apply_rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 2)
+            self.assertEqual(before_apply, snapshot_tree(root))
+            self.assertIn("transition-review-token-mismatch", apply_rendered)
+            self.assertIn("transition-review-token-refresh", apply_rendered)
+
     def test_transition_apply_completes_archives_and_opens_next_plan_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="pending")

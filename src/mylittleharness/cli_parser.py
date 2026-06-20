@@ -6,6 +6,20 @@ from .adapter import APPROVAL_RELAY_TARGET, MCP_READ_PROJECTION_TARGET
 from .meta_feedback import META_FEEDBACK_ROOT_ENV_VAR
 
 
+_CLOSEOUT_FIELD_DESTS = (
+    "worktree_start_state",
+    "task_scope",
+    "docs_decision",
+    "state_writeback",
+    "verification",
+    "commit_decision",
+    "residual_risk",
+    "next_state",
+    "carry_forward",
+    "work_result",
+)
+
+
 def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -28,6 +42,16 @@ def _nonnegative_float(value: str) -> float:
 
 def _hide_suppressed_top_level_commands(subparsers: argparse._SubParsersAction) -> None:
     subparsers._choices_actions = [action for action in subparsers._choices_actions if action.help != argparse.SUPPRESS]
+
+
+def _add_closeout_file_args(parser: argparse.ArgumentParser, *, help_prefix: str) -> None:
+    for field in _CLOSEOUT_FIELD_DESTS:
+        option = field.replace("_", "-")
+        parser.add_argument(
+            f"--{option}-file",
+            dest=f"{field}_file",
+            help=f"Read {help_prefix} {field} value from a UTF-8 text file instead of --{option}.",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -451,6 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--next-state", dest="next_state", help="Explicit next/no-next closeout state: no-next-action, human-decision-required, or legal-dry-run-command:<dry-run command>.")
     writeback.add_argument("--carry-forward", dest="carry_forward", help="Optional closeout carry_forward value to record.")
     writeback.add_argument("--work-result", dest="work_result", help="Optional plain-language closeout work_result capsule to record.")
+    _add_closeout_file_args(writeback, help_prefix="closeout")
     writeback.add_argument("--active-phase", dest="active_phase", help="Lifecycle active_phase value to write to project-state frontmatter.")
     writeback.add_argument("--phase-status", dest="phase_status", help="Lifecycle phase_status value to write to project-state frontmatter.")
     writeback.add_argument("--last-archived-plan", dest="last_archived_plan", help="Lifecycle last_archived_plan value to write to project-state frontmatter.")
@@ -512,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--next-state", dest="next_state", help="Explicit next/no-next archive closeout state: no-next-action, human-decision-required, or legal-dry-run-command:<dry-run command>.")
     transition.add_argument("--carry-forward", dest="carry_forward", help="Optional archive closeout carry_forward value to record.")
     transition.add_argument("--work-result", dest="work_result", help="Optional plain-language archive closeout work_result capsule to record.")
+    _add_closeout_file_args(transition, help_prefix="archive closeout")
     memory_hygiene = subparsers.add_parser(
         "memory-hygiene",
         help=argparse.SUPPRESS,
