@@ -34162,6 +34162,61 @@ class CliTests(unittest.TestCase):
             )
             self.assertNotIn("next_safe_command=mylittleharness --root <root> check", messages)
 
+    def test_hooks_pre_tool_allows_read_only_product_source_git_ref_inspection(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operator")
+            product_root = Path(tmp) / "product"
+            product_root.mkdir()
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+
+            readonly_cases = (
+                f"git --work-tree {product_root} branch --show-current",
+                f"git --work-tree={product_root} tag --points-at HEAD",
+                f"git --work-tree {product_root} for-each-ref refs/heads --format=%(refname:short)",
+            )
+            unsafe_cases = (
+                f"git --work-tree {product_root} branch new-feature",
+                f"git --work-tree {product_root} branch -D old-feature",
+                f"git --work-tree {product_root} tag v1.2.3",
+                f"git --work-tree {product_root} tag -d v1.2.3",
+            )
+
+            for command in readonly_cases:
+                with self.subTest(command=command):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-read-only-product-source-vcs-inspection", codes)
+                    self.assertNotIn("hooks-policy-block-product-root-path", codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", codes)
+
+            for command in unsafe_cases:
+                with self.subTest(command=command):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-product-root-path", codes)
+                    self.assertNotIn("hooks-policy-allow-read-only-product-source-vcs-inspection", codes)
+
     def test_hooks_pre_tool_blocks_wrapped_alias_and_runtime_write_forms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

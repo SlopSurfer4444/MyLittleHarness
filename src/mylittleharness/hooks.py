@@ -253,7 +253,19 @@ SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|apply_patch)\b"
     r")"
 )
-READ_ONLY_GIT_INSPECTION_COMMANDS = {"cat-file", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
+READ_ONLY_GIT_INSPECTION_COMMANDS = {
+    "cat-file",
+    "diff",
+    "for-each-ref",
+    "grep",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "show-ref",
+    "status",
+}
+READ_ONLY_GIT_REF_INSPECTION_COMMANDS = {"branch", "tag"}
 GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push", "reset", "checkout", "clean", "restore", "rm", "mv"}
 GIT_OPTIONS_WITH_VALUES = {
     "-C",
@@ -1602,6 +1614,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     ]
     allow_read_only_product_source_smoke = _is_read_only_product_source_smoke_command(inventory, command)
     allow_read_only_product_source_inspection = _is_read_only_product_source_inspection_command(inventory, data, command)
+    allow_read_only_product_source_vcs_inspection = _is_read_only_product_source_vcs_inspection_command(
+        inventory, command, paths
+    )
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(data))
@@ -1612,6 +1627,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         or _is_bounded_mlh_read_tool_request(data)
         or allow_read_only_product_source_smoke
         or allow_read_only_product_source_inspection
+        or allow_read_only_product_source_vcs_inspection
         or allow_read_only_subagent_delegation
         or allow_reviewed_local_vcs_delegation
     )
@@ -1982,6 +1998,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed read-only MLH inspection of configured product_source_root; report output is advisory "
                     "and writes, apply/build/rebuild/cache/server actions, lifecycle mutation, and Git mutation remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_read_only_product_source_vcs_inspection:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-product-source-vcs-inspection",
+                (
+                    "allowed read-only Git inspection of configured product_source_root from an operating-root "
+                    "context; branch/tag creation, deletion, force/update options, writes, staging, commit, push, "
+                    "reset, clean, release, and lifecycle decisions remain blocked"
                 ),
                 paths[0] if paths else None,
             )
@@ -3411,7 +3440,119 @@ def _is_hook_pathish_token(token: str) -> bool:
 def _is_read_only_git_inspection_command(command: str) -> bool:
     if _looks_like_write_command(command):
         return False
-    return _git_subcommand(command) in READ_ONLY_GIT_INSPECTION_COMMANDS
+    subcommand = _git_subcommand(command)
+    if subcommand in READ_ONLY_GIT_INSPECTION_COMMANDS:
+        return True
+    if subcommand in READ_ONLY_GIT_REF_INSPECTION_COMMANDS:
+        return _is_read_only_git_ref_inspection_command(command)
+    return False
+
+
+def _is_read_only_git_ref_inspection_command(command: str) -> bool:
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand_index < 0:
+        return False
+    args = [_clean_token(token) for token in tokens[subcommand_index + 1 :] if _clean_token(token)]
+    if not args:
+        return True
+    if subcommand == "branch":
+        return _git_ref_inspection_args_are_read_only(
+            args,
+            forbidden_exact={
+                "-c",
+                "-C",
+                "-d",
+                "-D",
+                "-f",
+                "-m",
+                "-M",
+                "--copy",
+                "--create-reflog",
+                "--delete",
+                "--edit-description",
+                "--force",
+                "--move",
+                "--no-track",
+                "--recurse-submodules",
+                "--set-upstream-to",
+                "--track",
+                "--unset-upstream",
+            },
+            value_options={"--abbrev", "--color", "--contains", "--format", "--merged", "--no-merged", "--points-at", "--sort"},
+            list_options={"--list", "-l"},
+            flag_options={"--all", "--column", "--ignore-case", "--no-abbrev", "--no-column", "--remotes", "--show-current", "--verbose", "-a", "-r", "-v", "-vv"},
+            combined_flag_re=r"^-[arv]+$",
+        )
+    if subcommand == "tag":
+        return _git_ref_inspection_args_are_read_only(
+            args,
+            forbidden_exact={
+                "-a",
+                "-d",
+                "-f",
+                "-F",
+                "-m",
+                "-s",
+                "-u",
+                "--annotate",
+                "--delete",
+                "--file",
+                "--force",
+                "--local-user",
+                "--message",
+                "--sign",
+            },
+            value_options={"--color", "--contains", "--format", "--merged", "--no-merged", "--points-at", "--sort"},
+            list_options={"--list", "-l"},
+            flag_options={"--ignore-case", "-n"},
+            combined_flag_re=r"^-n\d*$",
+        )
+    return False
+
+
+def _git_ref_inspection_args_are_read_only(
+    args: list[str],
+    *,
+    forbidden_exact: set[str],
+    value_options: set[str],
+    list_options: set[str],
+    flag_options: set[str],
+    combined_flag_re: str,
+) -> bool:
+    allow_patterns = False
+    expecting_value = False
+    for arg in args:
+        if not arg:
+            continue
+        if expecting_value:
+            expecting_value = False
+            continue
+        if arg == "--":
+            allow_patterns = True
+            continue
+        option_name = arg.split("=", 1)[0]
+        if arg in forbidden_exact or option_name in forbidden_exact:
+            return False
+        if option_name in list_options:
+            allow_patterns = True
+            continue
+        if option_name in value_options:
+            if "=" not in arg:
+                expecting_value = True
+            continue
+        if arg in flag_options or re.match(combined_flag_re, arg):
+            continue
+        if arg.startswith("-"):
+            return False
+        if not allow_patterns:
+            return False
+    return not expecting_value
+
+
+def _is_read_only_product_source_vcs_inspection_command(inventory: Inventory, command: str, paths: list[str]) -> bool:
+    return _is_read_only_git_inspection_command(command) and any(
+        _is_under_configured_product_root(inventory, path) for path in paths
+    )
 
 
 def _is_read_only_mlh_inspection_command(command: str) -> bool:
