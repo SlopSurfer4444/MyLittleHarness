@@ -1,10 +1,10 @@
 # MyLittleHarness
 
-**Repo-native lifecycle and evidence layer for AI-assisted development.**
+**Repo-visible workflow safety for AI-assisted development.**
 
-MyLittleHarness helps coding agents and humans recover current project state from repo-visible files, preview lifecycle moves before applying them, and leave durable verification and closeout evidence in the target repository.
+MyLittleHarness gives a target repository a small operating layer that a human or coding agent can trust after the chat is gone. It makes the repo answer the questions that usually get lost between sessions: what is active, what can be changed, what was verified, and what still needs a real decision.
 
-It is intentionally small: a Python CLI and repo templates that make the repository carry the operating truth. It is not an agent framework, orchestrator, coding assistant, task runner, CI replacement, issue tracker, vector-memory product, or hidden control plane.
+It stays intentionally small: a Python CLI and repo templates that make the repository carry the operating truth. It is not an agent framework, orchestrator, coding assistant, task runner, CI replacement, issue tracker, vector-memory product, or hidden control plane.
 
 ## Why Use It
 
@@ -18,28 +18,30 @@ AI-assisted work usually fails around the code, not inside the code:
 - repair actions are too broad
 - closeout evidence disappears after the session
 
-MyLittleHarness gives the repository a durable operating layer so a file-reading, shell-capable agent can restart from the repo itself and a human still controls what becomes true.
+MyLittleHarness makes those handoffs less fragile. A file-reading, shell-capable agent can restart from the repo itself, and a human still controls what becomes true.
 
 ## What It Does
 
-MyLittleHarness works on a target repository. The product source checkout is only the place you run the tool from while developing or installing it.
+MyLittleHarness works on a target repository: the repo you want it to service. The product source checkout is only the place you run or develop the tool.
 
 Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.
 Product source carries reusable product truth; operating memory belongs in target repositories.
 
-Core behavior:
+In practice, MyLittleHarness gives you:
 
-- `init` creates the repo-visible operating files for a target repository.
-- `check` reports lifecycle, contract, context, routing, and hygiene findings.
-- `migrate` previews or applies compatibility updates for older roots.
-- `repair` previews or applies bounded repair actions through explicit routes.
-- `detach` previews or applies removal of the operating scaffold.
-- `status`, `check`, and `intelligence --focus routes` show route discovery without growing `AGENTS.md` into a dense manual.
-- `evidence --record` is an explicit source-bound record rail; bare `evidence`, `evidence --record`, and `closeout` reports are not approval by themselves.
+- `init` to create the repo-visible operating files for a target repository.
+- `check` to report lifecycle, contract, context, routing, and hygiene findings.
+- `migrate` to preview or apply compatibility updates for older roots.
+- `repair` to preview or apply bounded repair actions through explicit routes.
+- `detach` to preview or apply removal of the operating scaffold.
+- `status`, `check`, and `intelligence --focus routes` to discover legal routes without growing `AGENTS.md` into a dense manual.
+- `evidence --record` as an explicit source-bound record rail; bare `evidence`, `evidence --record`, and `closeout` reports are not approval by themselves.
 
-Route output is advisory only. Lifecycle approval still comes from explicit dry-run/apply routes, repo-visible writeback, human review where required, and local Git decisions made outside MLH.
+Route output is advisory only until it is applied. Lifecycle approval still comes from explicit dry-run/apply routes, repo-visible writeback, human review where required, and local Git decisions made outside MLH.
 
 ## Quick Start From Source
+
+Use the source checkout to run MLH. Point `--root` at the repository you want MLH to service.
 
 ```powershell
 cd <mylittleharness-source>
@@ -64,7 +66,7 @@ The package metadata declares Python `>=3.11`, license `Apache-2.0`, version `1.
 Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest and keeps `.codex/project-workflow.toml` only as the legacy fallback manifest when needed.
 `.codex/project-workflow.toml` is legacy/client-adapter compatibility, not the core product path.
 
-A target root typically receives:
+A target root typically receives a small operating scaffold:
 
 - `AGENTS.md`: compact operator contract for any file-reading, shell-capable agent.
 - `.mylittleharness/project-workflow.toml`: neutral lifecycle manifest.
@@ -77,7 +79,7 @@ Generated projections accelerate inspection. They do not become authority. If ge
 
 ## First-Run Operator Path
 
-The first-run path is deliberately short: prove the product checkout can run, then point every lifecycle command at the target repository.
+The first-run path is deliberately short: prove the product checkout can run, then point lifecycle commands at the target repository.
 
 ```powershell
 $ProductRoot = "<mylittleharness-source>"
@@ -118,7 +120,7 @@ Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, 
 
 The operating root is the repository being serviced. Repo-visible files remain authoritative. Command output is useful evidence only after accepted state is written back through the appropriate route.
 
-The normal loop is:
+The normal operator loop is:
 
 1. Read the operator contract and state files.
 2. Run `check` before mutating repair work.
@@ -140,7 +142,9 @@ MyLittleHarness is a local repository tool.
 - Project-local hooks, MCP projection helpers, and dashboards are read or signal surfaces until a route writes accepted state.
 - Optional wrappers must not store the only copy of accepted decisions, current focus, docs decisions, repair approval, verification, or closeout evidence.
 
-Project-local Codex native hooks can be installed with `hooks adapter --client codex --dry-run|--apply --scope project`. project-local Codex native hooks are optional non-authoritative sensors and not correctness prerequisites. Codex native hooks stay optional non-authoritative sensors outside the correctness path.
+The important promise is not that MLH decides for you. It narrows the path, shows the next reviewed command, and leaves evidence where the next operator can inspect it.
+
+For frequent Codex work, project-local Codex native hooks are recommended early-warning sensors. Install them with `hooks adapter --client codex --dry-run|--apply --scope project` after the first successful check. They surface route context and unsafe shortcuts at tool time, but they remain optional non-authoritative sensors and not correctness prerequisites. Codex native hooks stay optional non-authoritative sensors outside the correctness path.
 
 ## Docs Decision
 
