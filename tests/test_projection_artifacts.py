@@ -340,7 +340,7 @@ class ProjectionArtifactTests(unittest.TestCase):
 
             current_output = io.StringIO()
             with redirect_stdout(current_output):
-                current_code = main(["--root", str(root), "intelligence", "--focus", "search", "--path", ".agents/docmap.yaml"])
+                current_code = main(["--root", str(root), "intelligence", "--path", ".agents/docmap.yaml"])
             current_rendered = current_output.getvalue()
             self.assertEqual(current_code, 0)
             self.assertIn("projection-artifact-query-current", current_rendered)
@@ -350,7 +350,7 @@ class ProjectionArtifactTests(unittest.TestCase):
             (root / "README.md").write_text("# Changed\nSee `.agents/docmap.yaml`.\n", encoding="utf-8")
             stale_output = io.StringIO()
             with redirect_stdout(stale_output):
-                stale_code = main(["--root", str(root), "intelligence", "--focus", "search", "--path", ".agents/docmap.yaml"])
+                stale_code = main(["--root", str(root), "intelligence", "--path", ".agents/docmap.yaml"])
             stale_rendered = stale_output.getvalue()
             self.assertEqual(stale_code, 0)
             self.assertIn("navigation-cache-artifacts-refresh", stale_rendered)

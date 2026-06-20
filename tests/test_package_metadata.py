@@ -4,6 +4,7 @@ import ast
 import os
 import sys
 import tempfile
+import tarfile
 import tomllib
 import unittest
 import zipfile
@@ -263,6 +264,24 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("mylittleharness/templates/workflow/workflow-artifact-model-spec.md", names)
         self.assertIn("mylittleharness/templates/workflow/workflow-plan-synthesis-spec.md", names)
 
+    def test_sdist_includes_source_docs_tests_and_build_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sdist_name = mylittleharness_build.build_sdist(tmp)
+            self.assertEqual("mylittleharness-1.0.0.tar.gz", sdist_name)
+            with tarfile.open(Path(tmp) / sdist_name, "r:gz") as sdist:
+                names = set(sdist.getnames())
+
+        prefix = "mylittleharness-1.0.0/"
+        self.assertIn(prefix + "pyproject.toml", names)
+        self.assertIn(prefix + "README.md", names)
+        self.assertIn(prefix + "LICENSE", names)
+        self.assertIn(prefix + "build_backend/mylittleharness_build.py", names)
+        self.assertIn(prefix + "src/mylittleharness/cli.py", names)
+        self.assertIn(prefix + "docs/README.md", names)
+        self.assertIn(prefix + "tests/test_package_metadata.py", names)
+        self.assertFalse(any("__pycache__" in name for name in names))
+        self.assertFalse(any(name.startswith(prefix + ".mylittleharness/generated/") for name in names))
+
     def test_build_backend_rejects_path_shaped_metadata_before_outputs(self) -> None:
         original_project_metadata = mylittleharness_build._project_metadata
         try:
@@ -271,6 +290,11 @@ class PackageMetadataTests(unittest.TestCase):
                 output = Path(tmp)
                 with self.assertRaisesRegex(ValueError, "path separators"):
                     mylittleharness_build.build_wheel(str(output))
+                self.assertEqual([], list(output.iterdir()))
+            with tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp)
+                with self.assertRaisesRegex(ValueError, "path separators"):
+                    mylittleharness_build.build_sdist(str(output))
                 self.assertEqual([], list(output.iterdir()))
 
             mylittleharness_build._project_metadata = lambda: {"name": "mylittleharness", "version": "../escape"}

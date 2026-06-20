@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import re
+import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -14,9 +15,27 @@ ROOT = Path(__file__).resolve().parents[1]
 _PATH_SAFE_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _PATH_SAFE_VERSION = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$")
 _PATH_FORBIDDEN_CHARS = {"/", "\\", ":"}
+_SDIST_FILE_NAMES = ("AGENTS.md", "LICENSE", "README.md", "pyproject.toml", "uv.lock")
+_SDIST_DIR_NAMES = (".agents", ".mylittleharness", "build_backend", "docs", "project", "src", "tests")
+_SDIST_EXCLUDED_PARTS = {
+    ".git",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+}
+_SDIST_EXCLUDED_RELS = {
+    ".mylittleharness/generated",
+    ".mylittleharness/runtime",
+}
 
 
 def get_requires_for_build_wheel(config_settings: object | None = None) -> list[str]:
+    return []
+
+
+def get_requires_for_build_sdist(config_settings: object | None = None) -> list[str]:
     return []
 
 
@@ -49,6 +68,18 @@ def build_wheel(
         record_path = f"{dist_info}/RECORD"
         wheel.writestr(record_path, _record_payload(records, record_path))
     return wheel_name
+
+
+def build_sdist(sdist_directory: str, config_settings: object | None = None) -> str:
+    name, version = _package_identity()
+    archive_name = f"{name}-{version}.tar.gz"
+    archive_path = _safe_output_path(Path(sdist_directory), archive_name)
+    root_prefix = f"{name}-{version}"
+
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for rel_path, data in _sdist_payloads():
+            archive.addfile(_tar_info(f"{root_prefix}/{rel_path}", data), io.BytesIO(data))
+    return archive_name
 
 
 def _project_metadata() -> dict[str, object]:
@@ -149,6 +180,18 @@ def _record_payload(records: list[tuple[str, bytes]], record_path: str) -> str:
     return output.getvalue()
 
 
+def _tar_info(arcname: str, data: bytes) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(arcname)
+    info.size = len(data)
+    info.mode = 0o644
+    info.mtime = 0
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    return info
+
+
 def _normalized_name(name: object) -> str:
     return str(name).replace("-", "_")
 
@@ -214,3 +257,43 @@ def _package_source_payloads() -> list[tuple[str, bytes]]:
             raise ValueError(f"package source member escapes package root: {rel_path}") from exc
         payloads.append((rel_path, path.read_bytes()))
     return payloads
+
+
+def _sdist_payloads() -> list[tuple[str, bytes]]:
+    root_resolved = ROOT.resolve()
+    files: set[Path] = set()
+    for name in _SDIST_FILE_NAMES:
+        path = ROOT / name
+        if path.is_file():
+            files.add(path)
+    for directory_name in _SDIST_DIR_NAMES:
+        directory = ROOT / directory_name
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if path.is_dir():
+                continue
+            rel_path = path.relative_to(ROOT)
+            rel = rel_path.as_posix()
+            if _sdist_excluded(rel_path):
+                continue
+            if path.is_symlink():
+                raise ValueError(f"refusing symlinked source distribution member: {rel}")
+            try:
+                path.resolve().relative_to(root_resolved)
+            except ValueError as exc:
+                raise ValueError(f"source distribution member escapes project root: {rel}") from exc
+            files.add(path)
+
+    payloads: list[tuple[str, bytes]] = []
+    for path in sorted(files, key=lambda candidate: candidate.relative_to(ROOT).as_posix()):
+        rel_path = path.relative_to(ROOT).as_posix()
+        payloads.append((rel_path, path.read_bytes()))
+    return payloads
+
+
+def _sdist_excluded(rel_path: Path) -> bool:
+    rel_text = rel_path.as_posix()
+    if any(rel_text == excluded or rel_text.startswith(f"{excluded}/") for excluded in _SDIST_EXCLUDED_RELS):
+        return True
+    return any(part in _SDIST_EXCLUDED_PARTS for part in rel_path.parts)
