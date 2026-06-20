@@ -1,24 +1,14 @@
 # MyLittleHarness
 
-**Repo-native memory and safety rails for AI-assisted software work.**
+**Repo-native lifecycle and evidence layer for AI-assisted development.**
 
-> Stop making your AI agent remember the project. Let the repository remember.
+MyLittleHarness helps coding agents and humans recover current project state from repo-visible files, preview lifecycle moves before applying them, and leave durable verification and closeout evidence in the target repository.
 
-MyLittleHarness helps AI coding agents understand a repository without depending on chat history, hidden state, or vibes.
+It is intentionally small: a Python CLI and repo templates that make the repository carry the operating truth. It is not an agent framework, orchestrator, coding assistant, task runner, CI replacement, issue tracker, vector-memory product, or hidden control plane.
 
-It keeps the project's operating truth in visible files: current focus, active plans, roadmap, repair boundaries, verification, closeout evidence, archives, and generated projections.
+## Why Use It
 
-The goal is simple:
-
-> AI agents should be able to resume work from the repository itself, and humans should still control what becomes true.
-
----
-
-## Why this exists
-
-AI coding tools are good at producing code.
-
-The hard part is everything around the code:
+AI-assisted work usually fails around the code, not inside the code:
 
 - the current plan lives in a chat thread
 - the next agent cannot tell what is active
@@ -28,321 +18,71 @@ The hard part is everything around the code:
 - repair actions are too broad
 - closeout evidence disappears after the session
 
-MyLittleHarness gives the repository a durable operating layer so agents can work with clearer rails.
+MyLittleHarness gives the repository a durable operating layer so a file-reading, shell-capable agent can restart from the repo itself and a human still controls what becomes true.
 
-It does **not** make the model magically smarter.
+## What It Does
 
-It makes the workspace easier to operate.
-
-- Less context reconstruction.
-- Less task-selection ambiguity.
-- Less scope creep.
-- Faster verification.
-- Better resumability.
-- Safer autonomous loops.
-
----
-
-## What it is
-
-MyLittleHarness is a small CLI and file layout that turns a repository into a better workspace for AI-assisted development.
-
-It answers questions like:
-
-- What is the current project state?
-- Is there an active plan?
-- What should an agent read before acting?
-- Which files are authoritative?
-- Which files are generated cache?
-- What repair is safe to preview?
-- What counts as closeout evidence?
-- Can another agent resume from the repo alone?
-
-Core idea:
-
-> Files hold authority. Metadata routes. Git records history. Generated projections accelerate. Diagnostics warn. Mutation stays explicit and fail-closed.
-
----
-
-## What it is not
-
-MyLittleHarness is **not**:
-
-- an AI agent framework
-- an orchestrator
-- a workflow runner
-- a scheduler
-- a CI replacement
-- a hidden control plane
-- a mandatory MCP, IDE, hook, or CI dependency
-
-Your agent, editor, orchestrator, or shell workflow still decides what to do.
-
-MyLittleHarness defines what the repository is allowed to treat as true.
-
----
-
-## Core and optional helpers
-
-The core MLH workflow is file-first and does not require a daemon, dashboard,
-MCP client, hook, or IDE integration.
-
-Optional local helpers exist around that core:
-
-- hooks can inject context or block deterministic unsafe shortcuts
-- the MCP adapter can expose read-only projection/search helpers over stdio
-- `dashboard --inspect` can summarize current repo-visible posture
-- `mlhd` can refresh disposable generated context and runtime cockpit cache
-
-Those helpers are session/runtime convenience layers. They are not authority, do
-not approve lifecycle decisions, and must fail open to the repo-visible files.
-
----
-
-## The short version
-
-Without MyLittleHarness:
-
-```text
-agent -> chat memory -> guesses current state -> edits repo -> writes report somewhere
-```
-
-With MyLittleHarness:
-
-```text
-agent -> repo-visible state -> active plan -> bounded action -> verification -> closeout evidence
-```
-
-The repository becomes the handoff surface.
-
-A new agent can enter later and recover the working context without needing the previous chat.
-
----
-
-## Install / run from source
-
-From a checkout of this repository:
-
-```bash
-export PYTHONPATH=src
-python -m mylittleharness --root /path/to/target check
-```
-
-If installed as a console script:
-
-```bash
-mylittleharness --root /path/to/target check
-```
-
-MyLittleHarness uses an explicit `--root` so the target repository is always named.
-
----
-
-## First run
-
-Attach MyLittleHarness to a target repository:
-
-```bash
-export PYTHONPATH=src
-
-TargetRoot="/path/to/target"
-
-python -m mylittleharness --root "$TargetRoot" init --dry-run
-python -m mylittleharness --root "$TargetRoot" init --apply --project "My Project"
-python -m mylittleharness --root "$TargetRoot" check
-```
-
-Preview repair posture:
-
-```bash
-python -m mylittleharness --root "$TargetRoot" repair --dry-run
-```
-
-Migrate a legacy workflow manifest to the neutral path:
-
-```bash
-python -m mylittleharness --root "$TargetRoot" migrate --dry-run
-python -m mylittleharness --root "$TargetRoot" migrate --apply
-```
-
-Preview detach posture:
-
-```bash
-python -m mylittleharness --root "$TargetRoot" detach --dry-run
-```
-
-Apply modes are intentionally explicit. Prefer dry-run first.
-Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest and does not create client-specific hook adapters by default. `migrate --apply` copies an existing legacy `.codex/project-workflow.toml` to the neutral path, preserves the legacy file, and refuses missing legacy files, divergent existing neutral manifests, symlinked targets, and root escapes. Codex users can opt in later with `hooks adapter --client codex --dry-run|--apply --scope project`, which writes `.codex/hooks.json` plus the generated helper only through that reviewed rail. Those hooks are optional non-authoritative sensors, not correctness prerequisites; Codex Trust and user-global client configuration remain client-owned.
-
----
-
-## Main commands
-
-### `init`
-
-Creates the MyLittleHarness operating scaffold inside a target repository.
-
-Use it when you want the repo to start carrying its own AI-work state.
-
-```bash
-mylittleharness --root /path/to/target init --dry-run
-mylittleharness --root /path/to/target init --apply --project "My Project"
-```
-
-### `check`
-
-Runs read-only orientation and diagnostics.
-
-Use it as the first command for a new session, new agent, or suspicious repo state.
-
-```bash
-mylittleharness --root /path/to/target check
-```
-
-Use `check --quick` for the same routine read-only posture with a compact text report that hides the full source inventory. Rerun plain `check` for full section detail, or `check --deep` for broader link, context, hygiene, and grain diagnostics.
-
-### `migrate`
-
-Copies a legacy `.codex/project-workflow.toml` manifest to `.mylittleharness/project-workflow.toml`.
-
-Use it when a live operating root is still on the legacy manifest path and you want an explicit, reviewable neutral-manifest migration.
-
-```bash
-mylittleharness --root /path/to/target migrate --dry-run
-mylittleharness --root /path/to/target migrate --apply
-```
-
-Apply preserves the legacy manifest and refuses conflicting or unsafe targets.
-
-### `repair`
-
-Previews or applies bounded repairs.
-
-Repair is not a "fix everything" button. It is designed to stay explicit and narrow.
-
-```bash
-mylittleharness --root /path/to/target repair --dry-run
-```
-
-### `detach`
-
-Creates a marker-only detach posture without treating generated artifacts as authority.
-
-```bash
-mylittleharness --root /path/to/target detach --dry-run
-```
-
-Advanced commands exist for recovery and deeper lifecycle work. Start with [`docs/README.md`](docs/README.md), [`docs/reference/command-surface.md`](docs/reference/command-surface.md), [`docs/security.md`](docs/security.md), [`docs/specs/attach-repair-status-cli.md`](docs/specs/attach-repair-status-cli.md), and [`docs/specs/metadata-routing-and-evidence.md`](docs/specs/metadata-routing-and-evidence.md) when you need the full command surface.
-
----
-
-## Product repo vs target repo
-
-MyLittleHarness keeps a strict split:
-
-```text
-MyLittleHarness product repo
-  reusable source code
-  tests
-  package metadata
-  product docs
-
-target repository
-  project state
-  active plans
-  roadmap
-  verification
-  closeout evidence
-  archives
-  generated projections
-```
-
-This repository is the product source.
-
-Your application repository is the target.
-
-The target owns its own operating memory.
+MyLittleHarness works on a target repository. The product source checkout is only the place you run the tool from while developing or installing it.
 
 Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.
-The product checkout should show reusable product truth; operating memory belongs in target repositories.
-`.mylittleharness/project-workflow.toml` is the neutral workflow manifest, and `.codex/project-workflow.toml` is legacy/client-adapter compatibility, not the core product path.
+Product source carries reusable product truth; operating memory belongs in target repositories.
 
----
+Core behavior:
 
-## Generated projections are disposable
+- `init` creates the repo-visible operating files for a target repository.
+- `check` reports lifecycle, contract, context, routing, and hygiene findings.
+- `migrate` previews or applies compatibility updates for older roots.
+- `repair` previews or applies bounded repair actions through explicit routes.
+- `detach` previews or applies removal of the operating scaffold.
+- `status`, `check`, and `intelligence --focus routes` show route discovery without growing `AGENTS.md` into a dense manual.
+- `evidence --record` is an explicit source-bound record rail; bare `evidence`, `evidence --record`, and `closeout` reports are not approval by themselves.
 
-MyLittleHarness may create generated projection files under:
+Route output is advisory only. Lifecycle approval still comes from explicit dry-run/apply routes, repo-visible writeback, human review where required, and local Git decisions made outside MLH.
 
-```text
-.mylittleharness/generated/projection/
+## Quick Start From Source
+
+```powershell
+cd <mylittleharness-source>
+$env:PYTHONPATH = "src"
+
+python -m mylittleharness --root <target-repo> init --dry-run
+python -m mylittleharness --root <target-repo> init --apply --project "My Project"
+python -m mylittleharness --root <target-repo> check
+python -m mylittleharness --root <target-repo> repair --dry-run
 ```
 
-These files can accelerate navigation, route discovery, backlinks, relationships, and search.
+After installation, the console script is equivalent:
 
-They are **not** authority.
-
-Deleting generated projection output must not change what the repository is allowed to treat as true.
-
-- Generated state is build-to-delete.
-- Refreshes preserve old-good artifacts and indexes when a publish fails.
-- Reports are diagnostics, not decisions.
-- Snapshots are safety evidence, not authority.
-
----
-
-## Why agents get more efficient
-
-MyLittleHarness improves agent performance by reducing operational ambiguity.
-
-It gives agents durable answers to questions that otherwise burn context and cause mistakes:
-
-```text
-What are we doing?
-What is active?
-What is blocked?
-What is accepted?
-What is generated?
-What can be repaired?
-What requires human review?
-What counts as evidence?
-Where should closeout go?
+```powershell
+mylittleharness --root <target-repo> check
 ```
 
-That means an agent can spend more effort on the actual task instead of reconstructing project process from chat history.
+The package metadata declares Python `>=3.11`, license `Apache-2.0`, version `1.0.0`, no required runtime dependencies, and the `mylittleharness` console script.
 
-The gain is not magic.
+## What First Run Adds
 
-It is better workspace geometry.
+Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest and keeps `.codex/project-workflow.toml` only as the legacy fallback manifest when needed.
+`.codex/project-workflow.toml` is legacy/client-adapter compatibility, not the core product path.
 
----
+A target root typically receives:
 
-## Safety model
+- `AGENTS.md`: compact operator contract for any file-reading, shell-capable agent.
+- `.mylittleharness/project-workflow.toml`: neutral lifecycle manifest.
+- `project/project-state.md`: current repo-visible operating state.
+- optional `project/roadmap.md` sequencing route for accepted work.
+- optional `project/verification/*.md` proof/evidence records.
+- generated projection/context files under `.mylittleharness/generated/`.
 
-MyLittleHarness is built around a few safety rules:
-
-- authority lives in repo-visible files
-- generated files are subordinate
-- diagnostics do not approve mutation
-- repair should be previewed before apply
-- apply commands name the target root
-- lifecycle movement is explicit
-- verification success does not silently authorize the next phase
-- humans keep the final say
-
-Any shell-capable or file-reading agent can use the repo-visible state.
-
-No hidden control plane is required. Optional session helpers and `mlhd`
-runtime cache can improve ergonomics, but they remain disposable and
-non-authoritative.
-
----
+Generated projections accelerate inspection. They do not become authority. If generated cache and source files disagree, source files win and cache can be rebuilt.
 
 ## First-Run Operator Path
 
-```bash
-export PYTHONPATH=src
-ProductRoot="$(pwd)"
-TargetRoot="/path/to/target"
+The first-run path is deliberately short: prove the product checkout can run, then point every lifecycle command at the target repository.
+
+```powershell
+$ProductRoot = "<mylittleharness-source>"
+$TargetRoot = "<target-repository>"
+$env:PYTHONPATH = "src"
 
 python -m mylittleharness --root "$ProductRoot" bootstrap --package-smoke
 python -m mylittleharness --root "$TargetRoot" init --dry-run
@@ -352,93 +92,116 @@ python -m mylittleharness --root "$TargetRoot" repair --dry-run
 python -m mylittleharness --root "$TargetRoot" detach --dry-run
 ```
 
-Apply modes stay explicit and target-bound after dry-run review. `bootstrap --inspect`, `tasks --inspect`, hooks, CI, MCP clients, semantic providers, global installation, and workstation adoption can help later; they are not required first-contact steps.
-When `init --apply` or compatibility `attach --apply` writes the operating scaffold, it writes `.mylittleharness/project-workflow.toml` and leaves project-local Codex native hooks unchanged by default. `migrate --apply` is only for legacy roots and copies `.codex/project-workflow.toml` to the neutral path without deleting the legacy file. Project-local Codex native hooks remain optional non-authoritative sensors, not correctness prerequisites, and are installed or refreshed only by `hooks adapter --client codex --dry-run|--apply --scope project`.
+Apply modes stay explicit and target-bound. Commands such as `init --apply`, `migrate --apply`, `repair --apply`, and `detach --apply` are available when the dry-run route is reviewed, but they are not required first-contact steps.
 
-Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible files plus CLI reports. Start with `AGENTS.md`, `.mylittleharness/project-workflow.toml`, and `project/project-state.md`; use `.codex/project-workflow.toml` only as the legacy fallback manifest when the neutral manifest is absent. Read `project/implementation-plan.md` only when `plan_status = "active"` or the user asks about plan, phase, or closeout. When a plan is active, `active_phase` and `phase_status` are first-class continuation pointers. `status`/`check` report a compact lifecycle route table for live roots, and `intelligence --focus routes` prints the same read-only route table for the `project/roadmap.md` sequencing route, decision/do-not-revisit records, ADR records, and optional `project/verification/*.md` proof/evidence records. For fuzzy repo, lifecycle, impact, or product-source navigation, start with `dashboard --inspect` or `dashboard --inspect --json` as the cockpit packet, then use `intelligence --query`, optional `adapter --client-config --target mcp-read-projection`, and `rg` or direct file reads for exact verification. Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow, but no Codex skill or generated docs-impact report is required for v1.
+## Portable Agent Start Pass
 
-For adoption handoffs, `suggest --intent "context pack for Deep Research adoption"` emits a pointer-only context pack. It names the bootstrap authority files, read-only navigation commands, MCP config preview command, exact-verification expectation, and reviewed `research-import`/`research-distill` flow without copying authority bodies, calling an external model, creating a public repo, publishing, mutating lifecycle, staging, committing, pushing, or approving provider routing.
+Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible files plus CLI reports.
 
-Treat `dashboard --inspect` output as a read-only projection: it starts no daemon, listener, hook, dispatcher, worker, cache refresh, or product mutation; it cannot approve lifecycle movement, repair, archive, staging, commit, push, release, roadmap status, or product-diff acceptance; and any `mlhd` runtime/cache fields are disposable diagnostics only. The JSON payload includes source refs and a `nextLegalDryRun` candidate so an agent can see the next legal preview route, but the dashboard does not approve running or applying that route.
+Start with `AGENTS.md`, `.mylittleharness/project-workflow.toml`, and `project/project-state.md`; use `.codex/project-workflow.toml` only as the legacy fallback manifest when the neutral manifest is absent.
 
----
+Read `project/implementation-plan.md` only when `plan_status = "active"`. When active, prefer first-class `active_phase` and `phase_status` values over prose inference.
 
-## Diagnostics And Closeout
+Useful first reads:
 
-Docs decisions use the portable vocabulary `updated`, `not-needed`, or `uncertain`. Consider docs when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, `audit-links`, or `check` output changes.
+- `status`/`check` report a compact lifecycle route table for live roots.
+- `project/roadmap.md` sequencing route tracks accepted work when present.
+- decision/do-not-revisit records and ADR records preserve durable choices.
+- `intelligence --focus routes` prints the same read-only route table.
+- start with `dashboard --inspect` or `dashboard --inspect --json` as the cockpit packet when you need a broader root snapshot.
+- `adapter --client-config --target mcp-read-projection` prints read-only MCP client wiring.
+- `rg` or direct file reads for exact verification remain the final inspection path.
 
-bare `evidence`, `evidence --record`, and `closeout` are separate surfaces: bare `evidence` is a terminal-only read-only report, while `evidence --record` is an explicit source-bound record rail. Route output is advisory only, and diagnostics must not store the only copy of accepted decisions, current focus, docs decisions, repair approval, verification, or closeout evidence.
+Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow. They are convenience layers, not correctness layers.
 
-`check` keeps common drift compact: primary instruction-surface size warnings, link/docmap/stale-root/rule-context/remainder drift, route metadata, and lifecycle posture stay in the report. Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics. `check --deep` adds links, context, hygiene, and report-only grain diagnostics. Grain diagnostics inspect active-plan slice size. `active-plan-auto-continue`, current-phase-only, `auto_continue`, and `stop_conditions` keep phase movement explicit until a writeback or transition rail changes lifecycle state.
+## Lifecycle Model
 
----
+The operating root is the repository being serviced. Repo-visible files remain authoritative. Command output is useful evidence only after accepted state is written back through the appropriate route.
 
-## Local Release Checklist
+The normal loop is:
+
+1. Read the operator contract and state files.
+2. Run `check` before mutating repair work.
+3. Preview mutating lifecycle actions with `--dry-run`.
+4. Apply only the reviewed route with `--apply`.
+5. Record verification, docs decision, state transfer, and residual risk in repo-visible state.
+6. Use Git for local savepoints when the user or workflow calls for them.
+
+Active plans carry `current-phase-only`, `auto_continue`, and `stop_conditions` so phase movement stays explicit. The `active-plan-auto-continue` route vocabulary exists to make that boundary visible, not to make verification success automatically advance work.
+
+## Trust Boundaries
+
+MyLittleHarness is a local repository tool.
+
+- Core CLI behavior does not need model calls or provider credentials.
+- There is no hidden daemon by default.
+- Generated cache is disposable.
+- Optional helpers cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions.
+- Project-local hooks, MCP projection helpers, and dashboards are read or signal surfaces until a route writes accepted state.
+- Optional wrappers must not store the only copy of accepted decisions, current focus, docs decisions, repair approval, verification, or closeout evidence.
+
+Project-local Codex native hooks can be installed with `hooks adapter --client codex --dry-run|--apply --scope project`. project-local Codex native hooks are optional non-authoritative sensors and not correctness prerequisites. Codex native hooks stay optional non-authoritative sensors outside the correctness path.
+
+## Docs Decision
+
+Closeout records a `docs_decision` as `updated`, `not-needed`, or `uncertain`.
+
+Use `updated` when the change alters behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing docs meaning. Use `not-needed` when the change is internal and docs are unaffected. Use `uncertain` only for provisional handoff.
+
+`audit-links` and `check` can route attention, but no Codex skill or generated docs-impact report is required for v1.
+
+## Diagnostics
+
+Routine `check` stays compact. It reports primary instruction-surface size warnings and root-level lifecycle findings first.
+
+Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics. `check --deep` adds links, context, hygiene, and report-only grain diagnostics. Grain diagnostics inspect active-plan slice size.
+
+For route review, use `status`, `check`, or `intelligence --focus routes`. For broader drift review, look at link/docmap/stale-root/rule-context/remainder drift only when the current task calls for it.
+
+## Optional Integrations
+
+Optional helpers are there to reduce repeated reading, not to move authority out of the repository.
+
+- `dashboard --inspect` gives a broad root packet.
+- `mlhd` can keep local projection cache warm.
+- MCP projection tools expose read-only navigation data.
+- Project-local Codex hooks can surface pre-tool and post-tool context.
+- CI may run `check` or tests.
+
+All of these are wrappers around repo-visible state and CLI reports.
+
+## Local Release Posture
+
+The current product posture is a local `1.0.0` release candidate. The release confidence claim is documentation-and-verification based, not a public publication claim.
 
 The local release checklist is:
 
 - package metadata and runtime version agree on `1.0.0`
-- CI runs `python -m unittest discover -s tests` on supported Python and OS targets
 - `bootstrap --package-smoke` passes from temporary source/build/install locations outside the product source checkout
 - Wheel, build, and install artifacts are verification outputs only
-- the CLI rejects standalone `bootstrap --apply`
-- the command surface and security/session-helper boundaries are documented
-- the product source declares Apache-2.0 licensing in `LICENSE` and package metadata
-
----
+- `bootstrap` rejects standalone `bootstrap --apply`
+- owner approval is still required before package-index publication, signed artifact release, global installation, push, tag, artifact upload, or public release announcement
 
 ## Development
 
-This package is intentionally stdlib-first.
+From the product checkout:
 
-Baseline:
-
-- Python `>=3.11`
-- no runtime dependencies
-- console script: `mylittleharness`
-
-Useful local checks:
-
-```bash
+```powershell
+$env:PYTHONPATH = "src"
 python -m unittest discover -s tests
-python -m mylittleharness --root . check
-python -m mylittleharness --root . bootstrap --package-smoke
+python -m mylittleharness --root . check --quick
 ```
 
----
+Use focused tests for bounded edits, then broader verification when the touched surface has wider behavior. Keep package, build, and install artifacts out of the product source tree unless a verified packaging route creates temporary outputs outside the checkout.
+
+## Docs Map
+
+- `docs/README.md`: product documentation index and release posture.
+- `docs/security.md`: local trust and security boundaries.
+- `docs/reference/command-surface.md`: command overview.
+- `docs/specs/`: product behavior, lifecycle, and boundary specs.
+- `project/specs/workflow/`: workflow capability and artifact model specs.
 
 ## Status
 
-MyLittleHarness is currently a local `1.0.0` release-candidate posture.
-
-That means:
-
-- the package version is `1.0.0`
-- the repo is structured as reusable product source
-- local verification and package-smoke flows exist
-- this is not a claim of package-index publication
-- this is not a claim of production adoption
-- this is not a workstation mutation tool
-
----
-
-## When to use it
-
-Use MyLittleHarness if:
-
-- you work with AI coding agents across multiple sessions
-- you want repo-native handoff instead of chat-only memory
-- you need active plans and closeout evidence to survive context resets
-- you want generated reports and caches to stay non-authoritative
-- you want bounded repair instead of broad autonomous cleanup
-- you want humans to stay in control while agents move faster
-
----
-
-## Mental model
-
-MyLittleHarness is a harness, not a horse.
-
-It does not replace your agent.
-
-It gives the agent something safer to pull against.
+MyLittleHarness is best described as a repo-visible workflow safety utility for solo-first AI-assisted development. Use it when the repository needs to remember current focus, lifecycle gates, verification, docs decisions, and closeout evidence in a form the next human or agent can inspect without relying on chat history.
