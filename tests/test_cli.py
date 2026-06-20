@@ -30102,6 +30102,99 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", read_then_write_codes)
             self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", read_then_write_codes)
 
+    def test_hooks_pre_tool_allows_mlh_check_json_parsing_with_lifecycle_route_literals(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            incubation_path = "project/" + "plan-incubation/hook-feedback.md"
+            read_only_commands = (
+                "mylittleharness --root . check --quick --json | Select-String " + state_path,
+                (
+                    "$json = mylittleharness --root . check --quick --json; "
+                    "$json | ConvertFrom-Json | Select-Object status | Select-String "
+                    + incubation_path
+                ),
+                "python -m mylittleharness --root . status --json | Select-String " + state_path,
+            )
+
+            for command in read_only_commands:
+                with self.subTest(command=command):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+
+            check_then_write_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . check --quick --json; "
+                        f"Set-Content {incubation_path} '# bypass'"
+                    ),
+                }
+            )
+            check_then_git_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . check --quick --json; "
+                        f"git add {state_path}"
+                    ),
+                }
+            )
+            check_then_route_apply_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . check --quick --json; "
+                        "mylittleharness --root . roadmap --apply --action update "
+                        f"--item-id hook-policy --source-incubation {incubation_path}"
+                    ),
+                }
+            )
+
+            check_then_write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                check_then_write_input,
+            )
+            check_then_git_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                check_then_git_input,
+            )
+            check_then_route_apply_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                check_then_route_apply_input,
+            )
+
+            check_then_write_codes = {finding["code"] for finding in check_then_write_payload["findings"]}
+            check_then_git_codes = {finding["code"] for finding in check_then_git_payload["findings"]}
+            check_then_route_apply_codes = {
+                finding["code"] for finding in check_then_route_apply_payload["findings"]
+            }
+
+            self.assertTrue(check_then_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", check_then_write_codes)
+            self.assertTrue(check_then_git_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", check_then_git_codes)
+            self.assertTrue(check_then_route_apply_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", check_then_route_apply_codes)
+
     def test_hooks_pre_tool_allows_grouped_read_only_ledger_extraction_but_blocks_grouped_writes(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

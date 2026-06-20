@@ -1592,6 +1592,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_read_only_source_paths = (
         _is_read_only_source_discovery_command(command)
         or _is_read_only_git_inspection_command(command)
+        or _is_read_only_mlh_inspection_command(command)
         or _is_bounded_mlh_read_tool_request(data)
         or allow_read_only_product_source_smoke
         or allow_read_only_product_source_inspection
@@ -3394,6 +3395,21 @@ def _is_read_only_git_inspection_command(command: str) -> bool:
     if _looks_like_write_command(command):
         return False
     return _git_subcommand(command) in READ_ONLY_GIT_INSPECTION_COMMANDS
+
+
+def _is_read_only_mlh_inspection_command(command: str) -> bool:
+    if _looks_like_write_command(command) or _looks_like_git_stage_or_commit(command.casefold()):
+        return False
+    if _has_unresolved_mlh_splat_invocation(command):
+        return False
+    policy_command = _mlh_policy_command(command)
+    tokens = _mlh_command_token_set(policy_command)
+    if tokens.intersection(READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS):
+        return False
+    subcommands = _mlh_cli_subcommands(policy_command)
+    return bool(subcommands) and all(
+        subcommand in READ_ONLY_PRODUCT_SOURCE_INSPECTION_COMMANDS for subcommand in subcommands
+    )
 
 
 def _is_read_only_product_source_smoke_command(inventory: Inventory, command: str) -> bool:
@@ -5611,14 +5627,24 @@ def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
 
 
 def _mlh_cli_subcommand(command: str) -> str:
+    subcommands = _mlh_cli_subcommands(command)
+    return subcommands[0] if subcommands else ""
+
+
+def _mlh_cli_subcommands(command: str) -> tuple[str, ...]:
     tokens = _shell_tokens(_mlh_policy_command(command))
+    subcommands: list[str] = []
     for index, token in enumerate(tokens):
         if _is_mlh_executable_token(token):
-            return _next_mlh_subcommand(tokens, index + 1)
+            subcommand = _next_mlh_subcommand(tokens, index + 1)
+            if subcommand:
+                subcommands.append(subcommand)
         if _is_python_executable_token(token) and index + 2 < len(tokens):
             if _clean_token(tokens[index + 1]) == "-m" and _clean_token(tokens[index + 2]) == "my" + "littleharness":
-                return _next_mlh_subcommand(tokens, index + 3)
-    return ""
+                subcommand = _next_mlh_subcommand(tokens, index + 3)
+                if subcommand:
+                    subcommands.append(subcommand)
+    return tuple(subcommands)
 
 
 def _shell_tokens(command: str) -> list[str]:
