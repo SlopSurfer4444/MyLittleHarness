@@ -30596,6 +30596,46 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-active-plan-roadmap-intake-matrix", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
 
+    def test_hooks_user_prompt_allows_descriptive_route_checkpoint_handoff(self) -> None:
+        from mylittleharness.hooks import HOOK_USER_PROMPT_SUBMIT, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            prompt = (
+                "Updated handoff for read/navigation review only: describe lifecycle checkpoint symptoms around "
+                "project/implementation-plan.md, project/project-state.md, and project/roadmap.md. "
+                "This is blocker evidence and route context; do not skip dry-run, do not push, do not release, "
+                "and broad staging remains blocked."
+            )
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_USER_PROMPT_SUBMIT,
+                [],
+                json.dumps({"prompt": prompt}),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-descriptive-route-navigation-prompt", finding_codes)
+            self.assertNotIn("hooks-policy-block-shortcut-prompt", finding_codes)
+
+    def test_hooks_user_prompt_warns_for_explicit_bypass_shortcut_prompt(self) -> None:
+        from mylittleharness.hooks import HOOK_USER_PROMPT_SUBMIT, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_USER_PROMPT_SUBMIT,
+                [],
+                json.dumps({"prompt": "bypass lifecycle rails, skip check, and mark done without plan"}),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-block-shortcut-prompt", finding_codes)
+            self.assertNotIn("hooks-policy-allow-descriptive-route-navigation-prompt", finding_codes)
+
     def test_hooks_pre_tool_allows_source_explicit_read_only_subagent_delegation_prompt(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -30655,6 +30695,34 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_descriptive_checkpoint_handoff_delegation_prompt(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Read-only handoff review. Context only: lifecycle checkpoint symptoms reference "
+                "project/implementation-plan.md, project/project-state.md, project/roadmap.md, "
+                f"and product file {product_ref}. Inspect blocker evidence and report. "
+                "Do not use apply_patch, do not stage, do not commit, do not push, and do not release."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Checkpoint handoff review"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-subagent-delegation", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
     def test_hooks_pre_tool_allows_delegation_prompt_context_with_runtime_backend_language(self) -> None:
@@ -32013,6 +32081,59 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertIn("does not approve route content, closeout, commit, push", messages)
+
+    def test_hooks_pre_tool_allows_post_closeout_route_package_with_active_plan_tombstone(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            tombstone_rel = "project/" + "implementation-plan.md"
+            tombstone_path = root / tombstone_rel
+            if tombstone_path.exists():
+                tombstone_path.unlink()
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- " + " ".join((state_rel, roadmap_rel, archive_rel, tombstone_rel)),
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_reports_deleted_path_for_root", return_value=True):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_blocks_partial_post_closeout_route_package_with_active_plan_tombstone(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, _roadmap_rel, _archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            tombstone_rel = "project/" + "implementation-plan.md"
+            tombstone_path = root / tombstone_rel
+            if tombstone_path.exists():
+                tombstone_path.unlink()
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- " + " ".join((state_rel, tombstone_rel)),
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_reports_deleted_path_for_root", return_value=True):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
 
     def test_hooks_pre_tool_allows_exact_post_closeout_local_vcs_staging_and_commit(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

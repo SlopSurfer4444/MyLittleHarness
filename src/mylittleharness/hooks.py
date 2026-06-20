@@ -352,9 +352,10 @@ LIFECYCLE_MARKDOWN_PREFIXES = (
     "project/roadmap",
     "project/archive/",
 )
+ACTIVE_PLAN_ROUTE_PATH = "project/implementation-plan.md"
 LIFECYCLE_AUTHORITY_PATHS = (
     "project/project-state.md",
-    "project/implementation-plan.md",
+    ACTIVE_PLAN_ROUTE_PATH,
     "project/roadmap.md",
 )
 TEMPORARY_ROADMAP_MANIFEST_RE = re.compile(r"^project/verification/roadmap-routing-\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.json$")
@@ -1559,7 +1560,20 @@ def _user_prompt_policy_findings(inventory: Inventory, hook_input_text: str) -> 
             "project/project-state.md" if inventory.state and inventory.state.exists else None,
         )
     ]
-    if _looks_like_shortcut_prompt(text):
+    if _looks_like_descriptive_route_navigation_prompt(text):
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-descriptive-route-navigation-prompt",
+                (
+                    "prompt appears to describe lifecycle/checkpoint route context for navigation or review; "
+                    "descriptive handoff text is not treated as a mutation shortcut, while explicit bypass, "
+                    "write, Git, release, or provider instructions remain guarded by pre-tool checks"
+                ),
+                "project/project-state.md" if inventory.state and inventory.state.exists else None,
+            )
+        )
+    elif _looks_like_shortcut_prompt(text):
         findings.append(
             Finding(
                 "warn",
@@ -2988,7 +3002,7 @@ def _path_policy_findings(
             continue
         if allow_active_plan_spec_doc_patch and _is_active_plan_spec_doc_patch_path(inventory, rel):
             continue
-        if allow_post_closeout_lifecycle_route_stage and _is_existing_lifecycle_route_file(inventory, rel):
+        if allow_post_closeout_lifecycle_route_stage and _is_post_closeout_lifecycle_route_stage_path(inventory, rel):
             continue
         if allow_post_closeout_local_vcs_stage and _is_exact_post_closeout_stage_file(inventory, rel):
             continue
@@ -3535,7 +3549,18 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return False
     if not paths:
         return False
-    return all(_is_existing_lifecycle_route_file(inventory, path) for path in paths)
+    if all(_is_existing_lifecycle_route_file(inventory, path) for path in paths):
+        return True
+    if _has_shell_command_separator(command):
+        return False
+    pathspecs = _git_stage_pathspecs(command)
+    return bool(_coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, pathspecs))
+
+
+def _is_post_closeout_lifecycle_route_stage_path(inventory: Inventory, path: str) -> bool:
+    return _is_existing_lifecycle_route_file(inventory, path) or _is_post_closeout_active_plan_tombstone_path(
+        inventory, path
+    )
 
 
 def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, command: str) -> bool:
@@ -4202,7 +4227,7 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
         return set()
     if not any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS):
         return set()
-    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    normalized = _normalized_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
     if not normalized:
         return set()
     state_rel = "project/" + "project-state.md"
@@ -4211,7 +4236,8 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
     if not last_archive_rel or not _is_deferred_archive_plan_route_path(last_archive_rel):
         return set()
     expected = {state_rel, roadmap_rel, last_archive_rel}
-    if normalized != expected:
+    expected_with_tombstone = {state_rel, roadmap_rel, last_archive_rel, ACTIVE_PLAN_ROUTE_PATH}
+    if normalized != expected and normalized != expected_with_tombstone:
         return set()
     if not _is_reviewed_post_closeout_archive_plan_file(inventory, last_archive_rel):
         return set()
@@ -4819,8 +4845,11 @@ def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths:
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
+        normalized = _normalized_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
+    if not normalized:
         return (
-            f"the {label} include missing, broad, wildcard, directory, generated/runtime, or non-MLH-route "
+            f"the {label} include missing, broad, wildcard, directory, generated/runtime, non-MLH-route, "
+            "or unreviewed active-plan tombstone "
             f"files in the actual command root; considered_shapes={shapes}; next_safe=split exact route files, "
             "rerun a checkpoint dry-run or evidence/meta-feedback blocker packet, then retry exact local-only staging"
         )
@@ -5066,6 +5095,51 @@ def _normalized_route_produced_lifecycle_paths(inventory: Inventory, paths: list
     return normalized
 
 
+def _normalized_post_closeout_lifecycle_route_checkpoint_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    normalized: set[str] = set()
+    for path in paths:
+        rel = _hook_route_rel_path(inventory, path)
+        clean = _normalize_hook_path(rel).casefold() if rel else ""
+        if not clean:
+            return set()
+        if clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+            return set()
+        if any(char in clean for char in "*?[]"):
+            return set()
+        if clean.startswith(POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
+            return set()
+        if _is_existing_lifecycle_route_file(inventory, rel):
+            normalized.add(clean)
+            continue
+        if _is_post_closeout_active_plan_tombstone_path(inventory, clean):
+            normalized.add(clean)
+            continue
+        return set()
+    return normalized
+
+
+def _is_post_closeout_active_plan_tombstone_path(inventory: Inventory, path: str) -> bool:
+    rel = _hook_route_rel_path(inventory, path)
+    clean = _normalize_hook_path(rel).casefold() if rel else ""
+    if clean != ACTIVE_PLAN_ROUTE_PATH:
+        return False
+    if _has_active_plan(inventory):
+        return False
+    state = inventory.state
+    if not state or not state.exists:
+        return False
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return False
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return False
+    if _is_existing_lifecycle_route_file(inventory, clean):
+        return False
+    return _git_reports_deleted_path_for_root(inventory.root, clean)
+
+
 def _active_plan_rel_path(inventory: Inventory) -> str:
     state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     return _normalize_hook_path(str(state.get("active_plan") or "")).casefold()
@@ -5095,6 +5169,41 @@ def _git_staged_paths_for_root(root: Path) -> tuple[str, ...]:
     if result.returncode != 0:
         return ()
     return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _git_reports_deleted_path_for_root(root: Path, rel_path: str) -> bool:
+    clean = _normalize_hook_path(rel_path).casefold()
+    if not clean or any(char in clean for char in "*?[]"):
+        return False
+    try:
+        status_result = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "--", clean],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        status_result = None
+    if status_result is not None and status_result.returncode == 0:
+        for line in status_result.stdout.splitlines():
+            if "D" in line[:2]:
+                return True
+    try:
+        diff_result = subprocess.run(
+            ["git", "-C", str(root), "diff", "--cached", "--name-status", "--", clean],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if diff_result.returncode != 0:
+        return False
+    return any(line.split(maxsplit=1)[0] == "D" for line in diff_result.stdout.splitlines() if line.strip())
 
 
 def _git_stage_pathspecs(command: str) -> list[str]:
@@ -5251,9 +5360,63 @@ def _active_plan_roadmap_policy_relevant(inventory: Inventory, command: str, pat
 
 
 def _looks_like_shortcut_prompt(text: str) -> bool:
-    lowered = (text or "").casefold()
-    shortcut_terms = ("without plan", "skip check", "skip dry-run", "no frontmatter", "archive anyway", "mark done", "shortcut", "шорткат", "без плана", "без проверки")
+    lowered = _scrub_negated_subagent_delegation_guardrails(str(text or "")).casefold()
+    shortcut_terms = (
+        "without plan",
+        "skip check",
+        "skip dry-run",
+        "no frontmatter",
+        "archive anyway",
+        "mark done",
+        "bypass",
+        "shortcut",
+        "шорткат",
+        "без плана",
+        "без проверки",
+    )
     return any(term in lowered for term in shortcut_terms)
+
+
+def _looks_like_descriptive_route_navigation_prompt(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    context_markers = (
+        "handoff",
+        "read/navigation",
+        "navigation refs",
+        "context only",
+        "read-only",
+        "review",
+        "inspect",
+        "blocker evidence",
+        "checkpoint symptoms",
+        "route context",
+    )
+    route_markers = (
+        "lifecycle",
+        "checkpoint",
+        "route-produced",
+        "dry-run/apply",
+        "project/project-state.md",
+        "project/implementation-plan.md",
+        "project/roadmap.md",
+    )
+    boundary_markers = (
+        "do not",
+        "must not",
+        "should not",
+        "no push",
+        "no release",
+        "without push",
+        "without release",
+        "remain blocked",
+        "stays blocked",
+        "stop before",
+    )
+    return (
+        any(marker in lowered for marker in context_markers)
+        and any(marker in lowered for marker in route_markers)
+        and any(marker in lowered for marker in boundary_markers)
+    )
 
 
 def _looks_like_generated_cache_write(paths: list[str], command: str) -> bool:
