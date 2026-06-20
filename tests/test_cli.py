@@ -12579,6 +12579,139 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: check"))
             self.assertNotIn("handoff allowed_routes contains unknown route id: evidence", rendered)
 
+    def test_coordination_historical_legacy_route_aliases_cover_claims_and_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            claim_dir = root / "project/verification/work-claims"
+            handoff_dir = root / "project/verification/handoffs"
+            claim_dir.mkdir(parents=True, exist_ok=True)
+            handoff_dir.mkdir(parents=True, exist_ok=True)
+            (claim_dir / "released-legacy-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "released-legacy-alias",
+                        "claim_kind": "write",
+                        "owner_role": "coordinator",
+                        "owner_actor": "codex",
+                        "execution_slice": "slice-a",
+                        "claimed_routes": ["docs", "memory-hygiene", "missing-route"],
+                        "claimed_paths": [],
+                        "claimed_resources": [],
+                        "status": "released",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (claim_dir / "active-legacy-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "active-legacy-alias",
+                        "claim_kind": "write",
+                        "owner_role": "coordinator",
+                        "owner_actor": "codex",
+                        "execution_slice": "slice-b",
+                        "claimed_routes": ["docs"],
+                        "claimed_paths": [],
+                        "claimed_resources": [],
+                        "status": "active",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (handoff_dir / "accepted-docs-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "accepted-docs-alias",
+                        "status": "accepted",
+                        "accepted_by": "operator",
+                        "accepted_at_utc": "2026-06-17T00:00:00Z",
+                        "worker_id": "worker-a",
+                        "role_id": "reviewer",
+                        "execution_slice": "slice-a",
+                        "allowed_routes": ["docs"],
+                        "write_scope": ["docs/reference/command-surface.md"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["review"],
+                        "evidence_refs": [],
+                        "approval_packet_refs": [],
+                        "claim_refs": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (handoff_dir / "created-docs-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "created-docs-alias",
+                        "status": "created",
+                        "worker_id": "worker-b",
+                        "role_id": "reviewer",
+                        "execution_slice": "slice-b",
+                        "allowed_routes": ["docs"],
+                        "write_scope": ["docs/reference/command-surface.md"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["review"],
+                        "evidence_refs": [],
+                        "approval_packet_refs": [],
+                        "claim_refs": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("check-coordination-evidence-work-claim-route-legacy-alias", rendered)
+            self.assertIn("released work claim claimed_routes contains legacy command alias docs", rendered)
+            self.assertIn("historical alias for route id product-docs", rendered)
+            self.assertIn("legacy command alias memory-hygiene", rendered)
+            self.assertIn("historical alias for route id archive", rendered)
+            self.assertIn("check-coordination-evidence-handoff-route-legacy-alias", rendered)
+            self.assertIn("accepted handoff allowed_routes contains legacy command alias docs", rendered)
+            self.assertEqual(1, rendered.count("work claim claimed_routes contains unknown route id: docs"))
+            self.assertEqual(1, rendered.count("work claim claimed_routes contains unknown route id: missing-route"))
+            self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: docs"))
+
+            claim_status = io.StringIO()
+            with redirect_stdout(claim_status):
+                self.assertEqual(main(["--root", str(root), "claim", "--status"]), 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("work-claim-identity-work-claim-route-legacy-alias", claim_status.getvalue())
+            self.assertIn("work-claim-identity-work-claim-route-unknown", claim_status.getvalue())
+
+            handoff_status = io.StringIO()
+            with redirect_stdout(handoff_status):
+                self.assertEqual(main(["--root", str(root), "handoff", "--status"]), 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("handoff-identity-handoff-route-legacy-alias", handoff_status.getvalue())
+            self.assertIn("handoff-identity-handoff-route-unknown", handoff_status.getvalue())
+
     def test_coordination_dry_run_refusals_do_not_claim_apply_was_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

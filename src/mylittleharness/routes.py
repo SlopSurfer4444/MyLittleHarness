@@ -237,6 +237,12 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
 
 ROUTE_REGISTRY: tuple[MemoryRoute, ...] = LIVE_LIFECYCLE_ROUTES + SUPPORT_ROUTES
 ROUTE_BY_ID = {route.route_id: route for route in ROUTE_REGISTRY}
+LEGACY_ROUTE_ID_ALIASES = {
+    "check": "verification",
+    "docs": "product-docs",
+    "evidence": "agent-runs",
+    "memory-hygiene": "archive",
+}
 CHANGED_ROUTE_METADATA_PROFILES: dict[str, ChangedRouteMetadataProfile] = {
     "adrs": ChangedRouteMetadataProfile("adrs", ("status",), ()),
     "decisions": ChangedRouteMetadataProfile("decisions", ("status",), ()),
@@ -342,6 +348,10 @@ def doc_target_exists(root: Path, value: str) -> bool:
 
 def route_id_is_known(route_id: str) -> bool:
     return str(route_id or "").strip() in ROUTE_BY_ID
+
+
+def legacy_route_alias_target(route_id: str) -> str | None:
+    return LEGACY_ROUTE_ID_ALIASES.get(str(route_id or "").strip())
 
 
 def route_destination_policy_for_field(field: str, *, owner_route_id: str = "") -> RouteDestinationPolicy | None:

@@ -121,6 +121,14 @@ count, and explicit authority flags. It keeps warnings visible, does not change
 exit codes, and cannot approve lifecycle movement, archive, roadmap status, Git
 state, release, provider routing, or cache truth.
 
+Coordination identity diagnostics keep route-id validation strict. Active work
+claims and newly created handoffs that cite command names such as `docs`,
+`memory-hygiene`, `check`, or `evidence` still warn as unknown route ids.
+Historical released claims and accepted handoffs may render those command-era
+labels as `*-route-legacy-alias` info findings mapped to current route ids such
+as `product-docs`, `archive`, `verification`, or `agent-runs`, so old evidence
+stays reviewable without hiding current route-vocabulary errors.
+
 ## Machine-Readable Audit Surface
 
 `manifest --inspect --json` includes a `command_surface` array with schema

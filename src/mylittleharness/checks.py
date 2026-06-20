@@ -125,6 +125,7 @@ from .routes import (
     existing_doc_target_candidates,
     is_exact_doc_target,
     intake_target_matches_route,
+    legacy_route_alias_target,
     lifecycle_route_rows,
     normalize_route_path,
     route_destination_matches,
@@ -174,10 +175,6 @@ BUG_HUNT_LEDGER_REL = "project/verification/continuous-bug-hunt-ledger.md"
 BUG_HUNT_COVERAGE_REL = "project/verification/bug-hunt-roadmap-coverage.md"
 BUG_HUNT_DISPOSITION_STATUSES = {"fixed", "delegated", "rejected-with-reason", "still-open"}
 BUG_HUNT_ROADMAP_OWNER_STATUSES = {"accepted", "active", "done"}
-ACCEPTED_HANDOFF_LEGACY_ROUTE_ALIASES = {
-    "check": "verification",
-    "evidence": "agent-runs",
-}
 COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
 COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
 RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
@@ -610,7 +607,18 @@ def _coordination_work_claim_identity_findings(root: Path, code_prefix: str) -> 
             findings.append(Finding("warn", f"{code_prefix}-work-claim-status-unknown", f"work claim status is unsupported: {status}", rel_path))
         for route_id in _coordination_string_list(data.get("claimed_routes")):
             if not route_id_is_known(route_id):
-                findings.append(Finding("warn", f"{code_prefix}-work-claim-route-unknown", f"work claim claimed_routes contains unknown route id: {route_id}", rel_path))
+                legacy_target = _released_work_claim_legacy_route_alias(route_id, data)
+                if legacy_target:
+                    findings.append(
+                        Finding(
+                            "info",
+                            f"{code_prefix}-work-claim-route-legacy-alias",
+                            _legacy_route_alias_message("released work claim claimed_routes", route_id, legacy_target),
+                            rel_path,
+                        )
+                    )
+                else:
+                    findings.append(Finding("warn", f"{code_prefix}-work-claim-route-unknown", f"work claim claimed_routes contains unknown route id: {route_id}", rel_path))
         for rel in _coordination_string_list(data.get("claimed_paths")):
             findings.extend(_coordination_ref_shape_findings(root, rel, rel_path, code_prefix, "work-claim-claimed-path", require_existing=False))
         lease = str(data.get("lease_expires_at") or "").strip()
@@ -698,10 +706,7 @@ def _coordination_handoff_identity_findings(root: Path, code_prefix: str) -> lis
                         Finding(
                             "info",
                             f"{code_prefix}-handoff-route-legacy-alias",
-                            (
-                                f"accepted handoff allowed_routes contains legacy command alias {route_id}; "
-                                f"treated as historical alias for route id {legacy_target} in read-only diagnostics only"
-                            ),
+                            _legacy_route_alias_message("accepted handoff allowed_routes", route_id, legacy_target),
                             rel_path,
                         )
                     )
@@ -723,11 +728,24 @@ def _coordination_handoff_identity_findings(root: Path, code_prefix: str) -> lis
     return findings
 
 
+def _legacy_route_alias_message(surface: str, route_id: str, legacy_target: str) -> str:
+    return (
+        f"{surface} contains legacy command alias {route_id}; "
+        f"treated as historical alias for route id {legacy_target} in read-only diagnostics only"
+    )
+
+
+def _released_work_claim_legacy_route_alias(route_id: str, data: dict[str, object]) -> str | None:
+    if str(data.get("status") or "").strip() != "released":
+        return None
+    return legacy_route_alias_target(route_id)
+
+
 def _accepted_handoff_legacy_route_alias(route_id: str, data: dict[str, object]) -> str | None:
     if str(data.get("status") or "").strip() != "accepted":
         return None
     normalized = str(route_id or "").strip()
-    target = ACCEPTED_HANDOFF_LEGACY_ROUTE_ALIASES.get(normalized)
+    target = legacy_route_alias_target(normalized)
     if target is None:
         return None
     evidence_refs = _coordination_string_list(data.get("evidence_refs"))
@@ -737,8 +755,6 @@ def _accepted_handoff_legacy_route_alias(route_id: str, data: dict[str, object])
     elif normalized == "evidence":
         if not any(ref.startswith("project/verification/agent-runs/") for ref in evidence_refs):
             return None
-    else:
-        return None
     return target
 
 
