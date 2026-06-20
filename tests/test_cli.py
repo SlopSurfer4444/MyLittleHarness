@@ -29847,6 +29847,37 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_read_navigation_delegation_prompt_with_negated_route_guardrails(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            roadmap_path = "project/" + "roadmap.md"
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Read/navigation refs only for a review helper: inspect "
+                f"{state_path}, {roadmap_path}, and product file {product_ref}. "
+                "Do not run writeback --apply, do not use apply_patch, do not git commit, "
+                "and do not skip dry-run. Return a read-only report."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Read navigation review"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-subagent-delegation", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
     def test_hooks_pre_tool_allows_lifecycle_dry_run_closeout_text_paths_with_stderr_capture(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -29933,7 +29964,7 @@ class CliTests(unittest.TestCase):
             state_path = "project/" + "project-state.md"
             product_ref = (product_root / "src" / "allowed.py").as_posix()
             prompt = (
-                "Read-only research, then use "
+                "Read-only research over read/navigation refs, then use "
                 f"{state_path} and {product_ref} to run my"
                 + "littleharness --root . writeback --"
                 + "apply --phase-status complete and "
@@ -29944,6 +29975,33 @@ class CliTests(unittest.TestCase):
                 {
                     "toolName": "multi_agent_v1.spawn_agent",
                     "parameters": {"prompt": prompt, "agent": "researcher"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-subagent-delegation", finding_codes)
+
+    def test_hooks_pre_tool_blocks_read_navigation_delegation_prompt_with_apply_patch_shortcut(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = "project/" + "project-state.md"
+            product_ref = (product_root / "src" / "allowed.py").as_posix()
+            prompt = (
+                "Use read/navigation refs for context: "
+                f"{state_path} and {product_ref}. "
+                "After inspection, use apply_patch to update the lifecycle note."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Unsafe read navigation update"},
                 }
             )
 

@@ -174,6 +174,9 @@ READ_ONLY_SUBAGENT_DELEGATION_MARKERS = (
     "do not write",
     "do not mutate",
     "evidence/navigation",
+    "read/navigation",
+    "read navigation",
+    "navigation refs",
     "inspect",
     "research",
     "analyze",
@@ -208,8 +211,8 @@ LOCAL_VCS_DELEGATION_BOUNDARY_MARKERS = (
 SUBAGENT_DELEGATION_FORBIDDEN_RE = re.compile(
     r"(?i)"
     r"(?:"
-    r"\bmy(?:littleharness)?\s+[^\n\r;]*\s--apply\b|"
-    r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\s+[^\n\r;]*\s--apply\b|"
+    r"\bmy(?:littleharness)?\b[^\n\r;]*\s--apply\b|"
+    r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r;]*\s--apply\b|"
     r"\barchive-active-plan\b|"
     r"\bmark\s+(?:roadmap\s+)?done\b|"
     r"\bgit\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
@@ -220,6 +223,22 @@ SUBAGENT_DELEGATION_FORBIDDEN_RE = re.compile(
     r")"
 )
 SUBAGENT_DELEGATION_LOCAL_VCS_RE = re.compile(r"(?i)\bgit\s+(?:add|stage|commit)\b")
+SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE = re.compile(
+    r"(?i)\b(?:do\s+not|don't|must\s+not|should\s+not|never|no|without)\s+"
+    r"(?:(?:run|use|execute|call|invoke)\s+)?"
+    r"(?:"
+    r"my(?:littleharness)?\b[^\n\r;]*\s--apply\b|"
+    r"(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r;]*\s--apply\b|"
+    r"archive-active-plan\b|"
+    r"mark\s+(?:roadmap\s+)?done\b|"
+    r"git\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
+    r"apply_patch\b|"
+    r"(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item)\b|"
+    r"(?:skip\s+dry-run|skip\s+review|skip\s+check)\b|"
+    r"(?:start|launch|serve|run)\s+(?:worker|provider|daemon|runtime|launcher)\b|"
+    r"mlhd\s+run-once\s+--apply\b"
+    r")"
+)
 SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE = re.compile(
     r"(?i)\b(?:do\s+not|don't|no|without)\s+"
     r"(?:push(?:ing)?|release|releasing|publish(?:ing)?|provider|daemon|runtime|launcher)\b"
@@ -1610,6 +1629,12 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
     allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
+    mutation_check_command = (
+        _scrub_negated_subagent_delegation_guardrails(command)
+        if _is_subagent_delegation_tool_request(data)
+        else command
+    )
+    mutation_check_lowered = mutation_check_command.casefold()
     if _active_plan_roadmap_policy_relevant(inventory, command, paths):
         findings.append(
             Finding(
@@ -2060,7 +2085,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     blocked_scope[0] if blocked_scope else out_of_scope[0],
                 )
             )
-    if _looks_like_unsafe_mlh_mutation(lowered) and not _has_explicit_mlh_review_mode(lowered):
+    if _looks_like_unsafe_mlh_mutation(mutation_check_lowered) and not _has_explicit_mlh_review_mode(mutation_check_lowered):
         findings.append(
             Finding(
                 "error",
@@ -2068,7 +2093,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "blocked MLH mutating command without explicit dry-run/apply or a recognized read-only/cache route",
             )
         )
-    if _looks_like_next_plan_apply(lowered) and _has_active_plan(inventory):
+    if _looks_like_next_plan_apply(mutation_check_lowered) and _has_active_plan(inventory):
         findings.append(
             Finding(
                 "error",
@@ -2078,7 +2103,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             )
         )
     if (
-        _looks_like_git_stage_or_commit(lowered)
+        _looks_like_git_stage_or_commit(mutation_check_lowered)
         and not allow_apply_patch_intent
         and not allow_post_closeout_lifecycle_route_stage
         and not allow_route_produced_lifecycle_route_stage
@@ -3046,10 +3071,15 @@ def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
     raw = str(text or "")
     if _is_reviewed_local_vcs_delegation_prompt(raw):
         scrubbed = SUBAGENT_DELEGATION_LOCAL_VCS_RE.sub(" ", raw)
-        scrubbed = SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
+        scrubbed = _scrub_negated_subagent_delegation_guardrails(scrubbed)
         return bool(SUBAGENT_DELEGATION_FORBIDDEN_RE.search(scrubbed) or SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed))
-    scrubbed = SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", raw)
+    scrubbed = _scrub_negated_subagent_delegation_guardrails(raw)
     return bool(SUBAGENT_DELEGATION_FORBIDDEN_RE.search(scrubbed) or SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed))
+
+
+def _scrub_negated_subagent_delegation_guardrails(text: str) -> str:
+    scrubbed = SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE.sub(" ", str(text or ""))
+    return SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
 
 
 def _is_reviewed_local_vcs_delegation_prompt(text: str) -> bool:
