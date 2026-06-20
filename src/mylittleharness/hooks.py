@@ -3572,7 +3572,7 @@ def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, comma
     if subcommand not in {"add", "stage"}:
         return False
     pathspecs = _git_stage_pathspecs(command)
-    return _coherent_route_produced_lifecycle_paths(inventory, pathspecs)
+    return bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
 
 
 def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
@@ -4067,6 +4067,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
     if post_closeout_route_paths:
         return post_closeout_route_paths
+    staged_lifecycle_paths = _coherent_lifecycle_stage_paths_with_existing_index(inventory, paths)
+    if staged_lifecycle_paths:
+        return staged_lifecycle_paths
     post_closeout_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
     if post_closeout_paths:
         return post_closeout_paths
@@ -4244,6 +4247,40 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
     if not _roadmap_references_archived_plan(inventory, last_archive_rel):
         return set()
     return normalized
+
+
+def _coherent_route_produced_lifecycle_stage_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    direct = _coherent_route_produced_lifecycle_paths(inventory, paths)
+    if direct:
+        return _normalized_route_produced_lifecycle_paths(inventory, paths)
+    return _coherent_lifecycle_stage_paths_with_existing_index(inventory, paths)
+
+
+def _coherent_lifecycle_stage_paths_with_existing_index(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    if not paths:
+        return set()
+    normalized_route = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    normalized_post_closeout = _normalized_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
+    normalized_current = normalized_route or normalized_post_closeout
+    if not normalized_current:
+        return set()
+    staged_paths = _git_staged_paths(inventory)
+    if not staged_paths:
+        return set()
+    combined_paths = tuple(staged_paths) + tuple(paths)
+    if _active_plan_ready_for_route_produced_lifecycle_git(inventory) and _coherent_route_produced_lifecycle_paths(
+        inventory, combined_paths
+    ):
+        combined = _normalized_route_produced_lifecycle_paths(inventory, combined_paths)
+        return combined if normalized_current <= combined else set()
+    combined = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, combined_paths)
+    if combined and normalized_current <= combined:
+        return combined
+    return set()
 
 
 def _coherent_verification_decision_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:

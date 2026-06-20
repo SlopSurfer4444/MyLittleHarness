@@ -32817,6 +32817,44 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_neighbor_split_route_produced_lifecycle_artifact_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_active_live_root(Path(tmp) / "neighbor", phase_status="complete")
+            state_rel = "project/" + "project-state.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            archive_rel = "project/" + "archive/plans/active-closeout.md"
+            state_path = neighbor_root / state_rel
+            archive = neighbor_root / archive_rel
+            archive.parent.mkdir(parents=True)
+            (neighbor_root / roadmap_rel).write_text("# Roadmap\n", encoding="utf-8")
+            archive.write_text("# Active Closeout\n", encoding="utf-8")
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                .replace('phase_status: "complete"', f'phase_status: "complete"\nlast_archived_plan: "{archive_rel}"')
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- phase_status: complete\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{neighbor_root}" add -- {archive_rel}',
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=(state_rel, roadmap_rel)):
+                payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
     def test_hooks_pre_tool_allows_neighbor_exact_new_target_file_staging_and_commit(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -33806,6 +33844,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", partial_codes)
             self.assertIn("next_safe_command=", partial_messages)
             self.assertIn(archive_rel, partial_messages)
+
+    def test_hooks_pre_tool_allows_split_route_produced_lifecycle_artifact_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state_rel = "project/" + "project-state.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            archive_rel = "project/" + "archive/plans/active-closeout.md"
+            state_path = root / state_rel
+            archive = root / archive_rel
+            archive.parent.mkdir(parents=True)
+            (root / roadmap_rel).write_text("# Roadmap\n", encoding="utf-8")
+            archive.write_text("# Active Closeout\n", encoding="utf-8")
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                .replace('phase_status: "complete"', f'phase_status: "complete"\nlast_archived_plan: "{archive_rel}"')
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- phase_status: complete\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", archive_rel]),
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=(state_rel, roadmap_rel)):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
     def test_hooks_pre_tool_allows_route_produced_lifecycle_commit_with_coherent_staged_set(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
