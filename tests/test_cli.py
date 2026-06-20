@@ -20161,6 +20161,167 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(before, snapshot_tree(root))
                     self.assertIn(expected, output.getvalue())
 
+    def test_roadmap_apply_refusal_names_legal_relationship_recovery_paths(self) -> None:
+        def write_rel(root: Path, rel_path: str, text: str) -> None:
+            path = root / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        cases = (
+            (
+                "archived plan as source evidence",
+                lambda root: write_rel(root, "project/archive/plans/old-plan.md", "# Old Plan\n"),
+                ["--source-member", "project/archive/plans/old-plan.md"],
+                "implementation plan routes belong in `related_plan` or `archived_plan`",
+            ),
+            (
+                "external evidence URI",
+                lambda root: None,
+                ["--source-research", "https://example.com/research.md"],
+                "external evidence must first become a root-relative MLH route",
+            ),
+            (
+                "verification evidence in source_research",
+                lambda root: write_rel(root, "project/verification/evidence.md", "# Evidence\n"),
+                ["--source-research", "project/verification/evidence.md"],
+                "`source_research` only accepts research routes; use `source_members`",
+            ),
+            (
+                "product code as source evidence",
+                lambda root: write_rel(root, "src/mylittleharness/roadmap.py", "# product code\n"),
+                ["--source-member", "src/mylittleharness/roadmap.py"],
+                "product source and test paths belong in `target_artifacts`",
+            ),
+        )
+        for label, arrange, relationship_args, expected_hint in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_active_live_root(Path(tmp))
+                    write_sample_roadmap(root)
+                    arrange(root)
+                    before = snapshot_tree(root)
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(
+                            [
+                                "--root",
+                                str(root),
+                                "roadmap",
+                                "--apply",
+                                "--action",
+                                "update",
+                                "--item-id",
+                                "minimal-roadmap-mutation-rail",
+                                *relationship_args,
+                            ]
+                        )
+
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 2, rendered)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("roadmap-refused", rendered)
+                    self.assertIn("relationship vocabulary:", rendered)
+                    self.assertIn(expected_hint, rendered)
+
+    def test_persisted_roadmap_bad_source_refs_name_legal_relationship_recovery_paths(self) -> None:
+        def write_rel(root: Path, rel_path: str, text: str) -> None:
+            path = root / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        def write_roadmap(root: Path, field: str, value: str) -> None:
+            source_line = f"- `{field}`: `{value}`\n"
+            if field == "source_members":
+                source_line = f"- `source_members`: `{json.dumps([value])}`\n"
+            target_rel = "src/mylittleharness/planning.py"
+            write_rel(root, target_rel, "# target\n")
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Bad Source Ref Plan\n\n"
+                "- `id`: `bad-source-ref-plan`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `bad-source-ref-plan`\n"
+                "- `slice_goal`: `Refuse bad source relationship refs before opening a plan.`\n"
+                "- `slice_members`: `[\"bad-source-ref-plan\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `diagnostic only`\n"
+                "- `dependencies`: `[]`\n"
+                f"{source_line}"
+                f"- `target_artifacts`: `{json.dumps([target_rel])}`\n"
+                "- `verification_summary`: `Bad source refs must name the legal field or route.`\n"
+                "- `docs_decision`: `updated`\n",
+                encoding="utf-8",
+            )
+
+        cases = (
+            (
+                "archived plan as source evidence",
+                lambda root: write_rel(root, "project/archive/plans/old-plan.md", "# Old Plan\n"),
+                "source_members",
+                "project/archive/plans/old-plan.md",
+                "implementation plan routes belong in `related_plan` or `archived_plan`",
+            ),
+            (
+                "external evidence URI",
+                lambda root: None,
+                "source_research",
+                "https://example.com/research.md",
+                "external evidence must first become a root-relative MLH route",
+            ),
+            (
+                "verification evidence in source_research",
+                lambda root: write_rel(root, "project/verification/evidence.md", "# Evidence\n"),
+                "source_research",
+                "project/verification/evidence.md",
+                "`source_research` only accepts research routes; use `source_members`",
+            ),
+            (
+                "product code as source evidence",
+                lambda root: write_rel(root, "src/mylittleharness/roadmap.py", "# product code\n"),
+                "source_members",
+                "src/mylittleharness/roadmap.py",
+                "product source and test paths belong in `target_artifacts`",
+            ),
+        )
+        for label, arrange, field, value, expected_hint in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_live_root(Path(tmp))
+                    arrange(root)
+                    write_roadmap(root, field, value)
+                    before = snapshot_tree(root)
+
+                    check_output = io.StringIO()
+                    with redirect_stdout(check_output):
+                        check_code = main(["--root", str(root), "check"])
+                    check_rendered = check_output.getvalue()
+                    self.assertEqual(check_code, 1, check_rendered)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn(expected_hint, check_rendered)
+
+                    dry_output = io.StringIO()
+                    with redirect_stdout(dry_output):
+                        dry_code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "bad-source-ref-plan"])
+                    dry_rendered = dry_output.getvalue()
+                    self.assertEqual(dry_code, 0, dry_rendered)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertFalse((root / "project/implementation-plan.md").exists())
+                    self.assertIn("plan-roadmap-source-evidence-refused", dry_rendered)
+                    self.assertIn(expected_hint, dry_rendered)
+
+                    apply_output = io.StringIO()
+                    with redirect_stdout(apply_output):
+                        apply_code = main(["--root", str(root), "plan", "--apply", "--roadmap-item", "bad-source-ref-plan"])
+                    apply_rendered = apply_output.getvalue()
+                    self.assertEqual(apply_code, 2, apply_rendered)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertFalse((root / "project/implementation-plan.md").exists())
+                    self.assertIn("plan-roadmap-source-evidence-refused", apply_rendered)
+                    self.assertIn(expected_hint, apply_rendered)
+
     def test_roadmap_apply_refuses_product_and_fallback_roots_without_writes(self) -> None:
         for maker, expected in ((lambda path: make_root(path, active=False, mirrors=False), "product-source compatibility fixture"), (make_fallback_root, "fallback/archive")):
             with self.subTest(expected=expected):

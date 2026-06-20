@@ -1466,7 +1466,10 @@ def roadmap_source_evidence_blockers(
         for field, rel_path in _roadmap_source_evidence_refs(item.fields):
             problem = _roadmap_source_evidence_problem(inventory, field, rel_path)
             if problem:
-                blockers.append(f"roadmap item {item_id!r} {field} evidence {problem}: {rel_path}")
+                blockers.append(
+                    f"roadmap item {item_id!r} {field} evidence {problem}: {rel_path}; "
+                    f"{_roadmap_source_evidence_recovery_hint(field, rel_path)} before relying on roadmap-derived plan input"
+                )
     return tuple(_dedupe_nonempty(blockers))
 
 
@@ -4055,29 +4058,40 @@ def _path_relationship_errors(
 ) -> list[Finding]:
     errors: list[Finding] = []
     if _rel_has_absolute_or_parent_parts(rel_path):
-        return [Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} must be a root-relative path without parent segments", ROADMAP_REL)]
+        return [
+            Finding(
+                "error",
+                "roadmap-refused",
+                _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} must be a root-relative path without parent segments"),
+                ROADMAP_REL,
+            )
+        ]
     if not rel_path.endswith(".md"):
-        errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} must point to a Markdown route", rel_path))
+        errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} must point to a Markdown route"), rel_path))
     if not _route_destination_allowed(field, rel_path):
-        errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} points at an incompatible route: {rel_path}", rel_path))
+        errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} points at an incompatible route: {rel_path}"), rel_path))
     path = inventory.root / rel_path
     if _path_escapes_root(inventory.root, path):
-        errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} path escapes the target root", rel_path))
+        errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} path escapes the target root"), rel_path))
         return errors
     for parent in _parents_between(inventory.root, path.parent):
         parent_rel = parent.relative_to(inventory.root).as_posix()
         if parent.exists() and parent.is_symlink():
-            errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} path contains a symlink segment: {parent_rel}", parent_rel))
+            errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} path contains a symlink segment: {parent_rel}"), parent_rel))
         elif parent.exists() and not parent.is_dir():
-            errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} path contains a non-directory segment: {parent_rel}", parent_rel))
+            errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} path contains a non-directory segment: {parent_rel}"), parent_rel))
     if not path.exists():
         if _normalize_rel(rel_path) not in allowed_missing_paths:
-            errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} target is missing: {rel_path}", rel_path))
+            errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} target is missing: {rel_path}"), rel_path))
     elif path.is_symlink():
-        errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} target is a symlink", rel_path))
+        errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} target is a symlink"), rel_path))
     elif not path.is_file():
-        errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} target is not a regular file", rel_path))
+        errors.append(Finding("error", "roadmap-refused", _relationship_refusal_message(field, rel_path, f"--{field.replace('_', '-')} target is not a regular file"), rel_path))
     return errors
+
+
+def _relationship_refusal_message(field: str, rel_path: str, message: str) -> str:
+    return f"{message}; relationship vocabulary: {_roadmap_relationship_recovery_hint(field, rel_path)}"
 
 
 def _route_destination_allowed(field: str, rel_path: str) -> bool:
@@ -4435,23 +4449,15 @@ def _roadmap_readiness_blockers(
         source_rel = _normalize_rel(_field_scalar(fields, field))
         if not source_rel:
             continue
-        problem = _roadmap_readiness_path_problem(inventory, source_rel)
+        problem = _roadmap_source_evidence_problem(inventory, field, source_rel)
         if problem:
-            blockers.append(f"{field} evidence is {problem}: {source_rel}")
-            continue
-        quality_problem = _roadmap_readiness_research_quality_problem(inventory, source_rel)
-        if quality_problem:
-            blockers.append(f"{field} research quality gate blocks planning: {quality_problem}: {source_rel}")
+            blockers.append(f"{field} evidence {problem}: {source_rel}; {_roadmap_source_evidence_recovery_hint(field, source_rel)}")
     for source_rel in source_member_rels:
         if not source_rel:
             continue
-        problem = _roadmap_readiness_path_problem(inventory, source_rel)
+        problem = _roadmap_source_evidence_problem(inventory, SOURCE_MEMBERS_FIELD, source_rel)
         if problem:
-            blockers.append(f"{SOURCE_MEMBERS_FIELD} evidence is {problem}: {source_rel}")
-            continue
-        quality_problem = _roadmap_readiness_research_quality_problem(inventory, source_rel)
-        if quality_problem:
-            blockers.append(f"{SOURCE_MEMBERS_FIELD} research quality gate blocks planning: {quality_problem}: {source_rel}")
+            blockers.append(f"{SOURCE_MEMBERS_FIELD} evidence {problem}: {source_rel}; {_roadmap_source_evidence_recovery_hint(SOURCE_MEMBERS_FIELD, source_rel)}")
 
     markers = tuple(field for field in HUMAN_REVIEW_GATE_FIELDS if _human_review_gate_enabled(fields.get(field)))
     if markers:
@@ -5102,7 +5108,7 @@ def _roadmap_source_evidence_findings_for_item(
                 _roadmap_source_evidence_problem_code(field, problem),
                 (
                     f"roadmap item {item_id!r} {field} evidence {problem}: {rel_path}; "
-                    f"{_roadmap_source_evidence_recovery_hint(field)} before relying on roadmap-derived plan input"
+                    f"{_roadmap_source_evidence_recovery_hint(field, rel_path)} before relying on roadmap-derived plan input"
                 ),
                 source,
                 item.start + 1,
@@ -5127,9 +5133,13 @@ def _roadmap_source_evidence_refs(fields: dict[str, object]) -> tuple[tuple[str,
 
 
 def _roadmap_source_evidence_problem(inventory: Inventory, field: str, rel_path: str) -> str:
+    if _roadmap_relationship_ref_is_external(rel_path):
+        return "target is not a root-relative MLH route"
     problem = _roadmap_readiness_path_problem(inventory, rel_path)
     if problem:
         return f"target is {problem}"
+    if not _route_destination_allowed(field, rel_path):
+        return "route is incompatible with this relationship field"
     if field == "source_incubation":
         return ""
     quality_problem = _roadmap_readiness_research_quality_problem(inventory, rel_path)
@@ -5147,21 +5157,74 @@ def _roadmap_source_evidence_problem_code(field: str, problem: str) -> str:
     return f"roadmap-{normalized_field}-missing"
 
 
-def _roadmap_source_evidence_recovery_hint(field: str) -> str:
+def _roadmap_source_evidence_recovery_hint(field: str, rel_path: str) -> str:
+    vocabulary = _roadmap_relationship_recovery_hint(field, rel_path)
     if field == "source_incubation":
         return (
             "recover or recreate the incubation note, retarget the item to an existing incubation/archive note, "
-            "or run `mylittleharness --root <root> memory-hygiene --dry-run --scan`"
+            "or run `mylittleharness --root <root> memory-hygiene --dry-run --scan`; "
+            f"relationship vocabulary: {vocabulary}"
         )
     if field == "source_research":
         return (
             "restore or regenerate the research artifact, retarget source_research, or update the research quality "
-            "frontmatter through an explicit reviewed route"
+            "frontmatter through an explicit reviewed route; "
+            f"relationship vocabulary: {vocabulary}"
         )
     return (
         "restore or retarget source_members evidence, or update discovery packet quality_status/planning_reliance "
-        "through an explicit reviewed route"
+        "through an explicit reviewed route; "
+        f"relationship vocabulary: {vocabulary}"
     )
+
+
+def _roadmap_relationship_recovery_hint(field: str, rel_path: str) -> str:
+    normalized = _normalize_rel(rel_path)
+    folded = normalized.casefold()
+    if _roadmap_relationship_ref_is_external(normalized):
+        return (
+            "external evidence must first become a root-relative MLH route: use `research-import` "
+            "or `research-distill` for research Markdown, or `attachment-import` for binary/source files, "
+            "then reference that route with `source_research` or `source_members`"
+        )
+    if folded == DEFAULT_PLAN_REL or folded.startswith("project/archive/plans/"):
+        return (
+            "implementation plan routes belong in `related_plan` or `archived_plan`; "
+            "use `source_members` only for evidence routes"
+        )
+    if folded.startswith(("src/", "tests/")):
+        return (
+            "product source and test paths belong in `target_artifacts` and verification commands, "
+            "not roadmap source relationship fields"
+        )
+    if field == "source_research":
+        return (
+            "`source_research` only accepts research routes; use `source_members` for incubation, "
+            "verification, attachment, or mixed evidence routes"
+        )
+    if field == SOURCE_MEMBERS_FIELD:
+        return (
+            "`source_members` accepts incubation, research, verification, or attachment routes; "
+            "use `related_plan`/`archived_plan` for plans and `target_artifacts` for product code"
+        )
+    if field in {"source_incubation", RELATED_INCUBATION_FIELD}:
+        return (
+            f"`{field}` only accepts incubation routes; use `source_members` for research, "
+            "verification, or attachment evidence"
+        )
+    if field in {"related_plan", "archived_plan", "implemented_by"}:
+        return (
+            f"`{field}` accepts active or archived implementation plan routes; "
+            "source evidence belongs in `source_incubation`, `source_research`, or `source_members`"
+        )
+    return "retarget the field to a compatible root-relative MLH route or import/adopt the evidence through an explicit route first"
+
+
+def _roadmap_relationship_ref_is_external(rel_path: str) -> bool:
+    normalized = str(rel_path or "").strip()
+    if not normalized:
+        return False
+    return bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", normalized) or re.match(r"^[A-Za-z]:", normalized) or normalized.startswith(("/", "\\\\")))
 
 
 def _roadmap_scope_source_text(inventory: Inventory, fields: dict[str, object]) -> str:

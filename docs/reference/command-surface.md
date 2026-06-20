@@ -55,6 +55,14 @@ option in the same command, and are normalized into the same dry-run/apply
 request as inline values. For `transition`, the resolved file contents
 participate in review-token matching through the closeout payload; changing the
 file contents after dry-run requires a fresh dry-run token.
+Roadmap relationship fields use a narrow vocabulary. `source_incubation` and
+`related_incubation` point to incubation routes, `source_research` points to
+research routes, `source_members` points to incubation, research, verification,
+or attachment evidence routes, and `related_plan`/`archived_plan` point to
+implementation plans. External evidence must first be imported or adopted
+through a route such as `research-import`, `research-distill`, or
+`attachment-import`; product source and test paths belong in `target_artifacts`
+and verification commands, not source relationship fields.
 For protected incubation cleanup, `memory-hygiene --dry-run --archive-list-file
 <project/verification/reviewed-list.txt> --archive-folder
 project/archive/reference/<reviewed-folder>` validates an explicit reviewed
