@@ -17418,6 +17418,50 @@ class CliTests(unittest.TestCase):
             self.assertIn("imported_text sha256=", text)
             self.assertIn("Promotion into specs, plans, or project state requires", text)
 
+    def test_research_import_adopt_existing_apply_writes_route_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = root / "project/research/plain.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            body = "# Plain\n\nExisting research body.\n"
+            target.write_text(body, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--apply",
+                        "--adopt-existing",
+                        "--target",
+                        "project/research/plain.md",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("research-import-adopt-existing-written", rendered)
+            self.assertIn("research-import-adopt-existing-route-write", rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/research/plain.md"], changed)
+            text = target.read_text(encoding="utf-8")
+            self.assertIn('status: "imported"', text)
+            self.assertIn('adoption_mode: "existing-target"', text)
+            self.assertIn("pre_adoption_file sha256=", text)
+            self.assertTrue(text.endswith(body))
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check", "--focus", "validation"])
+            self.assertEqual(check_code, 0)
+            check_rendered = check_output.getvalue()
+            self.assertNotIn("research-frontmatter", check_rendered)
+            self.assertNotIn("route-metadata-status", check_rendered)
+
     def test_discover_dry_run_reports_packet_and_gates_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

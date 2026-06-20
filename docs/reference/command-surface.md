@@ -86,6 +86,11 @@ provider routing, staging, commits, or acceptance.
 ZIPs. It writes the original binary beside `artifact.md`; the binary remains
 source evidence, and the Markdown card is the metadata authority for hash,
 provenance, related research, docs decision, and lifecycle boundaries.
+`research-import --adopt-existing --target project/research/<artifact>.md`
+adopts one existing research Markdown file by adding route-visible metadata
+when it has no frontmatter. It refuses malformed or non-research frontmatter,
+does not copy, move, archive, delete, stage, commit, or approve lifecycle work,
+and remains a dry-run/apply rail.
 
 ## Read-Only Helpers
 

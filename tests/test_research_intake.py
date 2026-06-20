@@ -165,6 +165,115 @@ class ResearchIntakeTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("target research artifact already exists", rendered)
 
+    def test_adopt_existing_dry_run_reports_target_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = root / "project/research/plain.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("# Plain\n\nExisting research body.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            findings = research_import_dry_run_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    None,
+                    None,
+                    target="project/research/plain.md",
+                    adopt_existing=True,
+                ),
+            )
+
+            self.assertEqual(before, snapshot_tree(root))
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertIn("research-import-dry-run", rendered)
+            self.assertIn("research-import-adopt-existing-source-hash", rendered)
+            self.assertIn("research-import-adopt-existing-metadata", rendered)
+            self.assertIn("research-import-adopt-existing-route-write", rendered)
+
+    def test_adopt_existing_apply_prepends_frontmatter_and_preserves_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = root / "project/research/plain.md"
+            target.parent.mkdir(parents=True)
+            body = "# Plain\n\nExisting research body.\n"
+            target.write_text(body, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    None,
+                    None,
+                    target="project/research/plain.md",
+                    adopt_existing=True,
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertIn("research-import-adopt-existing-written", rendered)
+            self.assertIn("research-import-adopt-existing-route-write", rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/research/plain.md"], changed)
+            text = target.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))
+            self.assertIn('status: "imported"', text)
+            self.assertIn('adoption_mode: "existing-target"', text)
+            self.assertIn('derived_from: "existing project/research artifact"', text)
+            self.assertIn("pre_adoption_file sha256=", text)
+            self.assertTrue(text.endswith(body))
+
+    def test_adopt_existing_is_idempotent_for_valid_research_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = root / "project/research/imported.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("---\nstatus: \"imported\"\n---\n# Imported\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    None,
+                    None,
+                    target="project/research/imported.md",
+                    adopt_existing=True,
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-adopt-existing-already-route-visible", rendered)
+            self.assertNotIn("research-import-adopt-existing-route-write", rendered)
+
+    def test_adopt_existing_refuses_malformed_or_nonresearch_frontmatter_without_writes(self) -> None:
+        cases = (
+            ("bad.md", "---\nstatus: \"imported\"\n- dangling\n---\n# Bad\n", "frontmatter is malformed"),
+            ("wrong.md", "---\nstatus: \"accepted\"\n---\n# Wrong\n", "no recognized research status"),
+        )
+        for name, text, expected in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_live_root(Path(tmp))
+                    target = root / "project/research" / name
+                    target.parent.mkdir(parents=True)
+                    target.write_text(text, encoding="utf-8")
+                    before = snapshot_tree(root)
+
+                    findings = research_import_apply_findings(
+                        load_inventory(root),
+                        make_research_import_request(
+                            None,
+                            None,
+                            target=f"project/research/{name}",
+                            adopt_existing=True,
+                        ),
+                    )
+
+                    rendered = "\n".join(finding.render() for finding in findings)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn(expected, rendered)
+
     def test_discovery_packet_dry_run_reports_source_bound_packet_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

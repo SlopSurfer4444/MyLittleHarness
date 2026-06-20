@@ -1095,6 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
             related_prompt=args.related_prompt,
             input_path=input_path,
             source_attachment=args.from_attachment,
+            adopt_existing=args.adopt_existing,
         )
         report_name = "research-import --apply" if args.apply else "research-import --dry-run"
         findings = research_import_apply_findings(inventory, request) if args.apply else research_import_dry_run_findings(inventory, request)

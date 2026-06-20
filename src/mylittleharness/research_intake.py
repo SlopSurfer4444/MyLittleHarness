@@ -40,6 +40,7 @@ DISCOVERY_PACKET_READY_STATUS = "ready-for-plan"
 DISCOVERY_PACKET_DEFAULT_STATUS = "draft"
 DISCOVERY_PACKET_BLOCKED_STATUSES = {"blocked", "contested", "draft"}
 DISCOVERY_PACKET_STATUSES = {DISCOVERY_PACKET_READY_STATUS, *DISCOVERY_PACKET_BLOCKED_STATUSES}
+RESEARCH_ROUTE_STATUSES = {"imported", "distilled", "compared", "research-ready"}
 _DISCOVERY_PACKET_QUALITY_STATUSES = {QUALITY_STATUS_SUFFICIENT, QUALITY_STATUS_PROVISIONAL}
 _DISCOVERY_PACKET_PLANNING_RELIANCE = {PLANNING_RELIANCE_ALLOWED, PLANNING_RELIANCE_BLOCKED}
 DECISION_PACKET_FIELDS = (
@@ -85,6 +86,7 @@ class ResearchImportRequest:
     related_prompt: str = ""
     input_path: str = ""
     source_attachment: str = ""
+    adopt_existing: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,7 @@ class ResearchImportTarget:
     input_path: str
     source_attachment: str
     imported_text_hash: str
+    adopt_existing: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +156,7 @@ def make_research_import_request(
     related_prompt: str | None = None,
     input_path: str | None = None,
     source_attachment: str | None = None,
+    adopt_existing: bool = False,
 ) -> ResearchImportRequest:
     return ResearchImportRequest(
         title=_normalized_note(title),
@@ -164,6 +168,7 @@ def make_research_import_request(
         related_prompt=_normalize_rel(related_prompt),
         input_path=_normalized_note(input_path),
         source_attachment=_normalize_rel(source_attachment),
+        adopt_existing=adopt_existing,
     )
 
 
@@ -290,9 +295,21 @@ def research_import_dry_run_findings(inventory: Inventory, request: ResearchImpo
     if target:
         findings.extend(_target_findings(target, apply=False))
     if target and not errors:
-        rendered, render_findings = _render_research_import(inventory.root, target)
-        findings.extend(render_findings)
-        findings.extend(route_write_findings("research-import-route-write", (_route_write(inventory.root, target.rel_path, rendered),), apply=False))
+        if target.adopt_existing:
+            rendered, render_findings, already_adopted = _render_research_adoption(inventory.root, target)
+            findings.extend(render_findings)
+            if not already_adopted:
+                findings.extend(
+                    route_write_findings(
+                        "research-import-adopt-existing-route-write",
+                        (_route_write(inventory.root, target.rel_path, rendered),),
+                        apply=False,
+                    )
+                )
+        else:
+            rendered, render_findings = _render_research_import(inventory.root, target)
+            findings.extend(render_findings)
+            findings.extend(route_write_findings("research-import-route-write", (_route_write(inventory.root, target.rel_path, rendered),), apply=False))
     if errors:
         findings.extend(_with_severity(errors, "warn"))
         findings.append(
@@ -321,6 +338,54 @@ def research_import_apply_findings(inventory: Inventory, request: ResearchImport
     if errors:
         return errors
     assert target is not None
+
+    if target.adopt_existing:
+        rendered, render_findings, already_adopted = _render_research_adoption(inventory.root, target)
+        if already_adopted:
+            return [
+                Finding("info", "research-import-apply", "research import apply started"),
+                _root_posture_finding(inventory),
+                *lifecycle_mutation_provenance_findings(inventory, "research-import-lifecycle-provenance"),
+                *_target_findings(target, apply=True),
+                *render_findings,
+                *_boundary_findings(),
+                Finding(
+                    "info",
+                    "research-import-validation-posture",
+                    "existing research artifact already has valid route-visible frontmatter; no file write was needed",
+                    target.rel_path,
+                ),
+            ]
+        write_evidence = _route_write(inventory.root, target.rel_path, rendered)
+        tmp_path = target.path.with_name(f".{target.path.name}.research-adopt.tmp")
+        backup_path = target.path.with_name(f".{target.path.name}.research-adopt.backup")
+        try:
+            cleanup_warnings = apply_file_transaction(
+                (AtomicFileWrite(target.path, tmp_path, rendered, backup_path),),
+                root=inventory.root,
+            )
+        except OSError as exc:
+            return [Finding("error", "research-import-refused", f"research adoption apply failed before all target writes completed: {exc}", target.rel_path)]
+
+        findings = [
+            Finding("info", "research-import-apply", "research import apply started"),
+            _root_posture_finding(inventory),
+            *lifecycle_mutation_provenance_findings(inventory, "research-import-lifecycle-provenance"),
+            *_target_findings(target, apply=True),
+            *render_findings,
+            Finding("info", "research-import-adopt-existing-written", "adopted existing research artifact", target.rel_path),
+            *route_write_findings("research-import-adopt-existing-route-write", (write_evidence,), apply=True),
+            *_boundary_findings(),
+            Finding(
+                "info",
+                "research-import-validation-posture",
+                "run check after apply to verify the adopted research artifact is route-visible; adopted research remains non-authority until promoted",
+                target.rel_path,
+            ),
+        ]
+        for warning in cleanup_warnings:
+            findings.append(Finding("warn", "research-import-backup-cleanup", warning, target.rel_path))
+        return findings
 
     rendered, render_findings = _render_research_import(inventory.root, target)
     write_evidence = _route_write(inventory.root, target.rel_path, rendered)
@@ -360,18 +425,20 @@ def _research_import_target(inventory: Inventory, request: ResearchImportRequest
     if not rel_path:
         return None
     text = request.text or _attachment_research_stub(request)
+    imported_text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
     return ResearchImportTarget(
-        title=request.title,
+        title=request.title or _title_from_research_rel(rel_path),
         text=text,
         text_source=request.text_source,
         rel_path=rel_path,
         path=inventory.root / rel_path,
-        topic=request.topic or request.title,
+        topic=request.topic or request.title or _title_from_research_rel(rel_path),
         source_label=request.source_label,
         related_prompt=request.related_prompt,
         input_path=request.input_path,
         source_attachment=request.source_attachment,
-        imported_text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        imported_text_hash=imported_text_hash,
+        adopt_existing=request.adopt_existing,
     )
 
 
@@ -409,11 +476,24 @@ def _research_import_preflight_errors(
     target: ResearchImportTarget | None,
 ) -> list[Finding]:
     errors: list[Finding] = []
-    if not request.title:
+    if request.adopt_existing and not request.target:
+        errors.append(Finding("error", "research-import-refused", "--adopt-existing requires an explicit --target under project/research/*.md"))
+    if request.adopt_existing and (request.text or request.source_attachment):
+        errors.append(
+            Finding(
+                "error",
+                "research-import-refused",
+                "--adopt-existing cannot be combined with --text, --text-file, or --from-attachment",
+                request.target or RESEARCH_DIR_REL,
+            )
+        )
+    if not request.adopt_existing and not request.title:
         errors.append(Finding("error", "research-import-refused", "--title is required and cannot be empty or whitespace-only"))
+    elif target is None and request.adopt_existing:
+        errors.append(Finding("error", "research-import-refused", "--adopt-existing requires a safe root-relative --target"))
     elif target is None:
         errors.append(Finding("error", "research-import-refused", "--title does not produce a safe non-empty ASCII target slug"))
-    if not request.text and not request.source_attachment:
+    if not request.adopt_existing and not request.text and not request.source_attachment:
         errors.append(Finding("error", "research-import-refused", "research text or --from-attachment is required and cannot be empty"))
     if request.target and _root_relative_path_conflict(request.target):
         errors.append(Finding("error", "research-import-refused", f"target {_root_relative_path_conflict(request.target)}", request.target))
@@ -475,9 +555,44 @@ def _research_import_preflight_errors(
                 errors.append(Finding("error", "research-import-refused", "target research artifact is a symlink; overwrite is refused", target.rel_path))
             elif not target.path.is_file():
                 errors.append(Finding("error", "research-import-refused", "target research artifact path exists but is not a regular file", target.rel_path))
+            elif target.adopt_existing:
+                errors.extend(_research_adoption_preflight_errors(target))
             else:
                 errors.append(Finding("error", "research-import-refused", "target research artifact already exists; choose a new --target", target.rel_path))
+        elif target.adopt_existing:
+            errors.append(Finding("error", "research-import-refused", "target research artifact must already exist for --adopt-existing", target.rel_path))
     return errors
+
+
+def _research_adoption_preflight_errors(target: ResearchImportTarget) -> list[Finding]:
+    try:
+        text = target.path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return [Finding("error", "research-import-refused", f"target research artifact is not valid UTF-8 text: {exc}", target.rel_path)]
+    except OSError as exc:
+        return [Finding("error", "research-import-refused", f"target research artifact is unreadable: {exc}", target.rel_path)]
+    frontmatter = parse_frontmatter(text)
+    if frontmatter.errors:
+        return [
+            Finding(
+                "error",
+                "research-import-refused",
+                "target research artifact frontmatter is malformed; repair or review it before adoption",
+                target.rel_path,
+            )
+        ]
+    if frontmatter.has_frontmatter:
+        status = str(frontmatter.data.get("status") or "").strip().casefold()
+        if status not in RESEARCH_ROUTE_STATUSES:
+            return [
+                Finding(
+                    "error",
+                    "research-import-refused",
+                    "target research artifact already has frontmatter but no recognized research status; repair manually before adoption",
+                    target.rel_path,
+                )
+            ]
+    return []
 
 
 def _source_attachment_preflight_errors(inventory: Inventory, rel_path: str) -> list[Finding]:
@@ -739,6 +854,61 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
         *_decision_packet_findings(target),
     ]
     return "\n".join(lines), findings
+
+
+def _render_research_adoption(root: Path, target: ResearchImportTarget) -> tuple[str, list[Finding], bool]:
+    text = target.path.read_text(encoding="utf-8")
+    pre_adoption_hash = hashlib.sha256(target.path.read_bytes()).hexdigest()
+    frontmatter = parse_frontmatter(text)
+    findings = [
+        Finding("info", "research-import-adopt-existing-source-hash", f"pre-adoption file sha256={pre_adoption_hash[:12]}", target.rel_path),
+        Finding("info", "research-import-non-authority", NON_AUTHORITY_NOTE, target.rel_path),
+    ]
+    if frontmatter.has_frontmatter:
+        findings.append(
+            Finding(
+                "info",
+                "research-import-adopt-existing-already-route-visible",
+                "existing research artifact already has valid route-visible frontmatter; no file write is needed",
+                target.rel_path,
+            )
+        )
+        return text, findings, True
+
+    today = date.today().isoformat()
+    source_hashes = (f"pre_adoption_file sha256={pre_adoption_hash}",)
+    metadata = [
+        "---",
+        'status: "imported"',
+        f'topic: "{_yaml_double_quoted_value(target.topic)}"',
+        f'title: "{_yaml_double_quoted_value(target.title)}"',
+        f'created: "{today}"',
+        f'last_reviewed: "{today}"',
+        'derived_from: "existing project/research artifact"',
+        'adoption_mode: "existing-target"',
+        "related_artifacts:",
+    ]
+    if target.related_prompt:
+        metadata.append(f'  - "{_yaml_double_quoted_value(target.related_prompt)}"')
+    else:
+        metadata.append('  - "none"')
+    metadata.extend(
+        (
+            "source_attachments: []",
+            "source_hashes:",
+            *(f'  - "{_yaml_double_quoted_value(entry)}"' for entry in source_hashes),
+            "---",
+        )
+    )
+    findings.append(
+        Finding(
+            "info",
+            "research-import-adopt-existing-metadata",
+            "would prepend route-visible research frontmatter while preserving the existing body",
+            target.rel_path,
+        )
+    )
+    return "\n".join(metadata) + "\n" + text, findings, False
 
 
 def _render_discovery_packet(root: Path, target: DiscoveryPacketTarget) -> tuple[str, list[Finding]]:
@@ -1135,6 +1305,13 @@ def _default_research_rel(title: str) -> str:
     if not slug or slug in _RESERVED_SLUGS:
         return ""
     return f"{RESEARCH_DIR_REL}/{date.today().isoformat()}-{slug}.md"
+
+
+def _title_from_research_rel(rel_path: str) -> str:
+    stem = Path(rel_path).stem
+    dated = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", stem)
+    words = [word for word in re.split(r"[-_]+", dated) if word]
+    return " ".join(word.capitalize() for word in words) or "Adopted Research"
 
 
 def _default_discovery_packet_rel(topic: str) -> str:
