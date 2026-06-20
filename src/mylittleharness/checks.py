@@ -107,7 +107,7 @@ from .root_boundary import (
     source_path_boundary_violation,
     windows_path_reference_reason,
 )
-from .safe_commands import shell_arg
+from .safe_commands import mlh_command, shell_arg
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
     deep_research_rubric_recovery_target_label,
@@ -1221,7 +1221,7 @@ SPEC_SUPERSESSION_TARGET_FIELDS = (
     "deprecation_path",
     "archived_to",
 )
-ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "attachments", "decisions", "incubation", "research", "roadmap", "stable-specs", "verification"}
+ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "attachments", "decisions", "incubation", "operator-prompts", "research", "roadmap", "stable-specs", "verification"}
 ROUTE_METADATA_STATUS_VALUES = {
     "accepted",
     "active",
@@ -1261,6 +1261,7 @@ ROUTE_METADATA_STATUS_HINTS_BY_ROUTE = {
     "attachments": ("imported", "archived", "stale"),
     "decisions": ("draft", "accepted", "superseded", "archived"),
     "incubation": ("incubating", "implemented", "rejected", "superseded", "archived", "stale"),
+    "operator-prompts": ("active", "archived", "superseded"),
     "research": ("imported", "distilled", "compared", "research-ready", "accepted", "superseded", "archived", "stale"),
     "roadmap": ("proposed", "accepted", "active", "blocked", "done", "deferred", "rejected", "superseded"),
     "stable-specs": ("draft", "accepted", "synced", "stale", "superseded", "archived"),
@@ -11423,13 +11424,33 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
                 or (inventory.root_kind == "live_operating_root" and lifecycle_markdown_requires_frontmatter(surface))
                 else "warn"
             )
-            findings.append(Finding(severity, "frontmatter-parse", error, surface.rel_path))
+            message = error
+            if surface.memory_route == "incubation" and _surface_looks_like_operator_prompt(surface):
+                message = (
+                    f"{error}; this file looks like an operator prompt artifact, not an incubation note; "
+                    f"next_safe_command={_operator_prompt_move_dry_run_command(surface.rel_path)}"
+                )
+            findings.append(Finding(severity, "frontmatter-parse", message, surface.rel_path))
         if inventory.root_kind != "live_operating_root":
             continue
         if not lifecycle_markdown_requires_frontmatter(surface) or surface.frontmatter.has_frontmatter:
             continue
         if surface.memory_route == "research":
             findings.append(Finding("error", "research-frontmatter", "research artifact has no frontmatter", surface.rel_path))
+        elif surface.memory_route == "incubation" and _surface_looks_like_operator_prompt(surface):
+            findings.append(
+                Finding(
+                    "error",
+                    "lifecycle-frontmatter",
+                    (
+                        "project/plan-incubation file has no frontmatter and looks like an operator prompt artifact, "
+                        "not an incubation note; move it through the reviewed prompt artifact route instead of adding fake "
+                        f"incubation metadata; next_safe_command={_operator_prompt_move_dry_run_command(surface.rel_path)}"
+                    ),
+                    surface.rel_path,
+                    route_id=surface.memory_route,
+                )
+            )
         else:
             findings.append(
                 Finding(
@@ -11445,6 +11466,37 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
                 )
             )
     return findings
+
+
+def _surface_looks_like_operator_prompt(surface: Surface) -> bool:
+    normalized = f"{surface.rel_path}\n{surface.content[:4000]}".casefold()
+    markers = (
+        "prompt",
+        "handoff",
+        "launch",
+        "operator",
+        "codex_delegation",
+        "continuation packet",
+        "start in the saved",
+        "do not restart",
+        "follow the packet",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _operator_prompt_move_dry_run_command(source_rel: str) -> str:
+    stem = Path(source_rel).stem.casefold()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", stem).strip(".-") or "operator-prompt"
+    target = f"project/operator-prompts/{slug}.md"
+    return mlh_command(
+        "memory-hygiene",
+        "--dry-run",
+        "--move-non-incubation-prompt",
+        "--source",
+        source_rel,
+        "--target",
+        target,
+    )
 
 
 def _lifecycle_markdown_requires_frontmatter(surface: Surface) -> bool:

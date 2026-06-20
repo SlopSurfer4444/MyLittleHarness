@@ -63,7 +63,13 @@ and previews the archive copies, source removals, `index.md` manifest, and
 optional exact link repairs. The matching `--apply` requires that token and
 refuses current/canonical sources, live consumers, path escapes, target
 collisions, and nonconforming prompt-like files that need a separate
-normalization route.
+normalization route. For reviewed launch, handoff, or continuation prompts
+that were accidentally placed under incubation, use `memory-hygiene --dry-run
+--move-non-incubation-prompt --source project/plan-incubation/<file>.md
+--target project/operator-prompts/<safe-slug>.md`; the matching `--apply`
+requires the reported `mhp-*` proposal token, creates the operator prompt
+artifact with route frontmatter, preserves the prompt body exactly, and removes
+only the reviewed incubation-path source.
 Protected worker-run receipt JSON maintenance uses
 `evidence --receipt-refresh --dry-run --target
 project/verification/worker-run-receipts/<id>.json`; the matching apply

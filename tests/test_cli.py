@@ -34095,6 +34095,49 @@ class CliTests(unittest.TestCase):
                 {finding["code"] for finding in extra_write_payload["findings"]},
             )
 
+    def test_hooks_pre_tool_routes_prompt_artifact_moves_through_memory_hygiene(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+        from mylittleharness.routes import classify_memory_route
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            source_rel = "project/" + "plan-incubation/launch-prompt.md"
+            target_rel = "project/" + "operator-prompts/launch-prompt.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("# Launch Prompt\n\nContinue from the packet.\n", encoding="utf-8")
+            self.assertEqual("operator-prompts", classify_memory_route(target_rel).route_id)
+
+            legal_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "mylittleharness --root . memory-hygiene --dry-run "
+                        f"--move-non-incubation-prompt --source {source_rel} --target {target_rel}"
+                    ),
+                }
+            )
+            direct_move_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"Move-Item {source_rel} {target_rel}",
+                }
+            )
+
+            legal_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], legal_input)
+            direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_move_input)
+
+            legal_codes = {finding["code"] for finding in legal_payload["findings"]}
+            self.assertFalse(legal_payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", legal_codes)
+            self.assertTrue(direct_payload["block"])
+            self.assertIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in direct_payload["findings"]},
+            )
+            self.assertIn("--move-non-incubation-prompt", direct_payload["system_message"])
+            self.assertIn(target_rel, direct_payload["system_message"])
+
     def test_hooks_pre_tool_blocks_nonroute_project_markdown_writes(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

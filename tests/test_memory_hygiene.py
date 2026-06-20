@@ -665,6 +665,147 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("source frontmatter is required", rendered)
             self.assertIn("prompt/reference normalization route", rendered)
 
+    def test_prompt_artifact_move_dry_run_reports_token_and_no_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/plan-incubation/launch-prompt.md"
+            source_text = "# Launch Prompt\n\nUse this exact prompt body.\n"
+            source.write_text(source_text, encoding="utf-8")
+            target_rel = "project/operator-prompts/launch-prompt.md"
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--move-non-incubation-prompt",
+                        "--source",
+                        "project/plan-incubation/launch-prompt.md",
+                        "--target",
+                        target_rel,
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("prompt-artifact-move-dry-run", rendered)
+            self.assertRegex(rendered, r"mhp-[a-f0-9]{16}")
+            self.assertIn(f"would create route {target_rel}", rendered)
+            self.assertIn("would delete route project/plan-incubation/launch-prompt.md", rendered)
+            self.assertIn("copy-ready apply command", rendered)
+
+    def test_prompt_artifact_move_apply_preserves_body_and_removes_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/launch-prompt.md"
+            target_rel = "project/operator-prompts/launch-prompt.md"
+            source = root / source_rel
+            source_text = "# Launch Prompt\n\nUse this exact prompt body.\n\n"
+            source.write_text(source_text, encoding="utf-8")
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--move-non-incubation-prompt",
+                        "--source",
+                        source_rel,
+                        "--target",
+                        target_rel,
+                    ]
+                )
+            self.assertEqual(dry_code, 0)
+            token_match = re.search(r"(mhp-[a-f0-9]{16})", dry_output.getvalue())
+            self.assertIsNotNone(token_match)
+            token = token_match.group(1)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--move-non-incubation-prompt",
+                        "--source",
+                        source_rel,
+                        "--target",
+                        target_rel,
+                        "--proposal-token",
+                        token,
+                    ]
+                )
+
+            self.assertEqual(apply_code, 0)
+            self.assertFalse(source.exists())
+            target_text = (root / target_rel).read_text(encoding="utf-8")
+            metadata = parse_frontmatter(target_text)
+            self.assertTrue(metadata.has_frontmatter)
+            self.assertEqual("active", metadata.data["status"])
+            self.assertEqual("operator-prompt", metadata.data["artifact_type"])
+            self.assertEqual(source_rel, metadata.data["source_route"])
+            self.assertEqual(token, metadata.data["proposal_token"])
+            self.assertTrue(target_text.endswith(source_text))
+            rendered = apply_output.getvalue()
+            self.assertIn("prompt-artifact-move-token-accepted", rendered)
+            self.assertIn("prompt-artifact-move-written", rendered)
+            self.assertIn("prompt-artifact-source-removed", rendered)
+
+    def test_prompt_artifact_move_refuses_valid_incubation_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_note(root, "launch-prompt", "Launch Prompt")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--move-non-incubation-prompt",
+                        "--source",
+                        source.relative_to(root).as_posix(),
+                        "--target",
+                        "project/operator-prompts/launch-prompt.md",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("recognized frontmatter", output.getvalue())
+            self.assertIn("use incubation lifecycle routes instead", output.getvalue())
+
+    def test_check_points_prompt_like_incubation_without_frontmatter_to_prompt_move_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/plan-incubation/launch-prompt.md").write_text(
+                "# Launch Prompt\n\nContinue from the saved packet.\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "validation"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertIn("operator prompt artifact", rendered)
+            self.assertIn("--move-non-incubation-prompt", rendered)
+            self.assertIn("project/operator-prompts/launch-prompt.md", rendered)
+
     def test_archive_list_apply_refuses_stale_token_when_source_becomes_live(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

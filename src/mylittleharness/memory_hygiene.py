@@ -31,6 +31,9 @@ DEFAULT_VERIFICATION_LEDGER_REL = f"{VERIFICATION_DIR_REL}/autonomous-mlh-swim-l
 VERIFICATION_LEDGER_CONTINUITY_MARKER = "<!-- mylittleharness-verification-ledger-continuity v1 -->"
 ARCHIVE_LIST_SCHEMA = "mylittleharness.incubation-archive-list.v1"
 ARCHIVE_LIST_TOKEN_SCHEMA = "mylittleharness.incubation-archive-list-token.v1"
+PROMPT_ARTIFACT_SCHEMA = "mylittleharness.operator-prompt.v1"
+PROMPT_ARTIFACT_TOKEN_SCHEMA = "mylittleharness.operator-prompt-move-token.v1"
+OPERATOR_PROMPTS_DIR_REL = "project/operator-prompts"
 ARCHIVE_LIST_INDEX_FILENAME = "index.md"
 ALLOWED_STATUS_VALUES = {"archived", "distilled", "implemented", "rejected"}
 TERMINAL_ROADMAP_STATUSES = {"done", "rejected", "superseded"}
@@ -124,6 +127,8 @@ class MemoryHygieneRequest:
     proposal_token: str = ""
     archive_list_file: str = ""
     archive_folder: str = ""
+    move_non_incubation_prompt: bool = False
+    target: str = ""
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,19 @@ class IncubationArchiveListPlan:
     index_text: str
 
 
+@dataclass(frozen=True)
+class PromptArtifactMovePlan:
+    source_rel: str
+    source_path: Path
+    target_rel: str
+    target_path: Path
+    source_text: str
+    source_hash: str
+    target_text: str
+    created: str
+    proposal_token: str
+
+
 def sync_roadmap_current_posture_section(text: str) -> str:
     lines = text.splitlines(keepends=True)
     bounds = _roadmap_h2_section_bounds(lines, ROADMAP_CURRENT_POSTURE_TITLE)
@@ -247,6 +265,8 @@ def make_memory_hygiene_request(
     proposal_token: str | None = None,
     archive_list_file: str | None = None,
     archive_folder: str | None = None,
+    move_non_incubation_prompt: bool = False,
+    target: str | None = None,
 ) -> MemoryHygieneRequest:
     source_rel = _normalize_rel(source)
     if rotate_ledger and not source_rel:
@@ -271,10 +291,15 @@ def make_memory_hygiene_request(
         proposal_token=str(proposal_token or "").strip().casefold(),
         archive_list_file=_normalize_rel(archive_list_file),
         archive_folder=_normalize_rel(archive_folder),
+        move_non_incubation_prompt=bool(move_non_incubation_prompt),
+        target=_normalize_rel(target),
     )
 
 
 def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if request.move_non_incubation_prompt:
+        return prompt_artifact_move_dry_run_findings(inventory, request)
+
     if _archive_list_mode(request):
         return incubation_archive_list_dry_run_findings(inventory, request)
 
@@ -329,6 +354,9 @@ def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygiene
 
 
 def memory_hygiene_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if request.move_non_incubation_prompt:
+        return prompt_artifact_move_apply_findings(inventory, request)
+
     if _archive_list_mode(request):
         return incubation_archive_list_apply_findings(inventory, request)
 
@@ -663,6 +691,430 @@ def incubation_archive_list_apply_findings(inventory: Inventory, request: Memory
         )
     )
     return findings
+
+
+def prompt_artifact_move_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    findings = [
+        Finding("info", "prompt-artifact-move-dry-run", "reviewed prompt artifact move proposal only; no files were written"),
+        _root_posture_finding(inventory),
+    ]
+    plan, errors = _prompt_artifact_move_plan(inventory, request)
+    if request.proposal_token:
+        errors.append(
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "--proposal-token is accepted only with --apply for prompt artifact movement",
+                request.source or None,
+            )
+        )
+    if plan:
+        findings.extend(_prompt_artifact_move_plan_findings(plan, apply=False))
+        findings.extend(route_write_findings("prompt-artifact-move-route-write", _prompt_artifact_move_route_writes(plan), apply=False))
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "prompt-artifact-move-validation-posture",
+                "dry-run refused before apply; fix refusal reasons, then rerun dry-run before moving a prompt artifact out of incubation space",
+                request.source or None,
+            )
+        )
+        return findings
+    assert plan is not None
+    findings.extend(_prompt_artifact_move_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "prompt-artifact-move-validation-posture",
+            "apply would create only the reviewed project/operator-prompts target and remove only the reviewed non-incubation prompt source; dry-run writes no files",
+            plan.target_rel,
+        )
+    )
+    return findings
+
+
+def prompt_artifact_move_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if not request.proposal_token:
+        return [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "--apply --move-non-incubation-prompt requires the mhp-* --proposal-token reported by the reviewed dry-run",
+                request.source or None,
+            )
+        ]
+    if not re.fullmatch(r"mhp-[0-9a-f]{16}", request.proposal_token):
+        return [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "--proposal-token must be the mhp-* token reported by memory-hygiene --dry-run --move-non-incubation-prompt",
+                request.source or None,
+            )
+        ]
+
+    plan, errors = _prompt_artifact_move_plan(inventory, request)
+    if errors:
+        return errors
+    assert plan is not None
+    if request.proposal_token != plan.proposal_token:
+        return [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                (
+                    "proposal token mismatch or stale prompt artifact review; "
+                    f"expected current token {plan.proposal_token}, received {request.proposal_token}; rerun memory-hygiene --dry-run --move-non-incubation-prompt"
+                ),
+                plan.source_rel,
+            )
+        ]
+
+    operations: list[AtomicFileWrite | AtomicFileDelete] = [
+        AtomicFileWrite(
+            plan.target_path,
+            plan.target_path.with_name(f".{plan.target_path.name}.prompt-artifact.tmp"),
+            plan.target_text,
+            plan.target_path.with_name(f".{plan.target_path.name}.prompt-artifact.backup"),
+        ),
+        AtomicFileDelete(
+            plan.source_path,
+            plan.source_path.with_name(f".{plan.source_path.name}.prompt-artifact.backup"),
+        ),
+    ]
+    try:
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                f"prompt artifact move failed before all target writes completed: {exc}",
+                plan.source_rel,
+            )
+        ]
+
+    findings = [
+        Finding("info", "prompt-artifact-move-apply", "reviewed prompt artifact move apply started"),
+        _root_posture_finding(inventory),
+        Finding(
+            "info",
+            "prompt-artifact-move-token-accepted",
+            (
+                f"accepted reviewed proposal token {request.proposal_token}; "
+                "token binds source hash, target path, destination route frontmatter, and exact prompt body preservation"
+            ),
+            plan.source_rel,
+        ),
+    ]
+    findings.extend(route_write_findings("prompt-artifact-move-route-write", _prompt_artifact_move_route_writes(plan), apply=True))
+    findings.append(Finding("info", "prompt-artifact-move-written", f"created operator prompt artifact at {plan.target_rel}", plan.target_rel))
+    findings.append(Finding("info", "prompt-artifact-source-removed", f"removed non-incubation prompt source {plan.source_rel}", plan.source_rel))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "prompt-artifact-move-backup-cleanup", warning, plan.target_rel))
+    findings.extend(_prompt_artifact_move_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "prompt-artifact-move-validation-posture",
+            "run check after apply to verify the destination route and remaining incubation warnings; prompt movement output is not lifecycle closeout approval",
+            plan.target_rel,
+        )
+    )
+    return findings
+
+
+def _prompt_artifact_move_plan(
+    inventory: Inventory,
+    request: MemoryHygieneRequest,
+) -> tuple[PromptArtifactMovePlan | None, list[Finding]]:
+    errors = _prompt_artifact_move_request_errors(inventory, request)
+    source_path = inventory.root / request.source if request.source else inventory.root
+    target_path = inventory.root / request.target if request.target else inventory.root
+    errors.extend(_prompt_artifact_source_errors(inventory, request.source, source_path))
+    errors.extend(_prompt_artifact_target_errors(inventory, request.target, target_path))
+    if errors:
+        return None, errors
+
+    try:
+        source_text = source_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding("error", "prompt-artifact-move-refused", f"source prompt could not be read: {exc}", request.source)]
+
+    frontmatter = parse_frontmatter(source_text)
+    if frontmatter.has_frontmatter:
+        return None, [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "source has recognized frontmatter and remains an incubation note; use incubation lifecycle routes instead of prompt artifact movement",
+                request.source,
+            )
+        ]
+    if frontmatter.errors:
+        return None, [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "source has malformed frontmatter; fix or review the metadata boundary before moving it as a prompt artifact",
+                request.source,
+            )
+        ]
+    if not source_text.strip():
+        return None, [Finding("error", "prompt-artifact-move-refused", "source prompt is empty after trimming", request.source)]
+    if not _looks_like_prompt_artifact(request.source, source_text):
+        return None, [
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "source does not look like a launch, handoff, or operator prompt artifact; leave it under incubation or use the owning route",
+                request.source,
+            )
+        ]
+
+    created = date.today().isoformat()
+    source_hash = _sha256_text(source_text)
+    target_text = _prompt_artifact_target_text(
+        source_rel=request.source,
+        source_hash=source_hash,
+        source_text=source_text,
+        created=created,
+        proposal_token="",
+    )
+    token = _prompt_artifact_move_token(
+        source_rel=request.source,
+        target_rel=request.target,
+        source_hash=source_hash,
+        target_text=target_text,
+        created=created,
+    )
+    target_text = _prompt_artifact_target_text(
+        source_rel=request.source,
+        source_hash=source_hash,
+        source_text=source_text,
+        created=created,
+        proposal_token=token,
+    )
+    return (
+        PromptArtifactMovePlan(
+            source_rel=request.source,
+            source_path=source_path,
+            target_rel=request.target,
+            target_path=target_path,
+            source_text=source_text,
+            source_hash=source_hash,
+            target_text=target_text,
+            created=created,
+            proposal_token=token,
+        ),
+        [],
+    )
+
+
+def _prompt_artifact_move_request_errors(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    errors: list[Finding] = []
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(Finding("error", "prompt-artifact-move-refused", "target is a product-source compatibility fixture; prompt artifact movement is refused", request.source or None))
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(Finding("error", "prompt-artifact-move-refused", "target is fallback/archive or generated-output evidence; prompt artifact movement is refused", request.source or None))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding("error", "prompt-artifact-move-refused", f"target root kind is {inventory.root_kind}; prompt artifact movement requires a live operating root"))
+    if (
+        request.scan
+        or request.promoted_to
+        or request.archive_to
+        or request.status
+        or request.repair_links
+        or request.archive_covered
+        or request.entry_coverage
+        or request.rotate_ledger
+        or request.source_hash
+        or request.archive_list_file
+        or request.archive_folder
+        or request.reason
+    ):
+        errors.append(
+            Finding(
+                "error",
+                "prompt-artifact-move-refused",
+                "--move-non-incubation-prompt cannot be combined with scan, lifecycle status, promotion/archive, link repair, ledger, archive-list, source-hash, or reason fields",
+                request.source or None,
+            )
+        )
+    if not request.source:
+        errors.append(Finding("error", "prompt-artifact-move-refused", "--source is required for prompt artifact movement"))
+    if not request.target:
+        errors.append(Finding("error", "prompt-artifact-move-refused", "--target is required for prompt artifact movement"))
+    return errors
+
+
+def _prompt_artifact_source_errors(inventory: Inventory, source_rel: str, source_path: Path) -> list[Finding]:
+    if not source_rel:
+        return []
+    errors: list[Finding] = []
+    if _rel_has_absolute_or_parent_parts(source_rel):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "--source must be a root-relative path without parent segments", source_rel))
+        return errors
+    if not source_rel.startswith(f"{INCUBATION_DIR_REL}/"):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt must be under project/plan-incubation/", source_rel))
+    if "/" in source_rel[len(f"{INCUBATION_DIR_REL}/") :]:
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt must be an immediate project/plan-incubation/*.md file", source_rel))
+    if not source_rel.endswith(".md"):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt must be a Markdown file", source_rel))
+    if _path_escapes_root(inventory.root, source_path):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt path escapes the target root", source_rel))
+    elif not source_path.exists():
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt does not exist", source_rel))
+    elif source_path.is_symlink():
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt is a symlink", source_rel))
+    elif not source_path.is_file():
+        errors.append(Finding("error", "prompt-artifact-move-refused", "source prompt is not a regular file", source_rel))
+    return errors
+
+
+def _prompt_artifact_target_errors(inventory: Inventory, target_rel: str, target_path: Path) -> list[Finding]:
+    if not target_rel:
+        return []
+    errors: list[Finding] = []
+    if _rel_has_absolute_or_parent_parts(target_rel):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "--target must be a root-relative path without parent segments", target_rel))
+        return errors
+    if not target_rel.startswith(f"{OPERATOR_PROMPTS_DIR_REL}/"):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "--target must be under project/operator-prompts/", target_rel))
+    suffix = target_rel[len(f"{OPERATOR_PROMPTS_DIR_REL}/") :]
+    if "/" in suffix:
+        errors.append(Finding("error", "prompt-artifact-move-refused", "--target must be an immediate project/operator-prompts/*.md file", target_rel))
+    if not target_rel.endswith(".md"):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "target prompt artifact must be a Markdown file", target_rel))
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*\.md", Path(target_rel).name):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "target basename must be a safe lowercase slug ending in .md", target_rel))
+    if _path_escapes_root(inventory.root, target_path):
+        errors.append(Finding("error", "prompt-artifact-move-refused", "target prompt artifact path escapes the target root", target_rel))
+        return errors
+    for parent in _parents_between(inventory.root, target_path.parent):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding("error", "prompt-artifact-move-refused", f"target directory contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding("error", "prompt-artifact-move-refused", f"target directory contains a non-directory segment: {rel}", rel))
+    if target_path.exists():
+        errors.append(Finding("error", "prompt-artifact-move-refused", "target prompt artifact already exists", target_rel))
+    return errors
+
+
+def _looks_like_prompt_artifact(source_rel: str, text: str) -> bool:
+    normalized = f"{source_rel}\n{text[:4000]}".casefold()
+    markers = (
+        "prompt",
+        "handoff",
+        "launch",
+        "operator",
+        "codex_delegation",
+        "continuation packet",
+        "start in the saved",
+        "do not restart",
+        "follow the packet",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _prompt_artifact_target_text(
+    *,
+    source_rel: str,
+    source_hash: str,
+    source_text: str,
+    created: str,
+    proposal_token: str,
+) -> str:
+    frontmatter = {
+        "schema": PROMPT_ARTIFACT_SCHEMA,
+        "status": "active",
+        "artifact_type": "operator-prompt",
+        "source_route": source_rel,
+        "source_sha256": source_hash,
+        "moved_by": "memory-hygiene --move-non-incubation-prompt",
+        "created": created,
+        "last_reviewed": created,
+    }
+    if proposal_token:
+        frontmatter["proposal_token"] = proposal_token
+    return render_prompt_artifact_frontmatter(frontmatter) + source_text
+
+
+def render_prompt_artifact_frontmatter(fields: dict[str, str]) -> str:
+    body = "".join(f'{key}: "{_yaml_double_quoted_value(value)}"\n' for key, value in fields.items())
+    return f"---\n{body}---\n\n"
+
+
+def _prompt_artifact_move_token(
+    *,
+    source_rel: str,
+    target_rel: str,
+    source_hash: str,
+    target_text: str,
+    created: str,
+) -> str:
+    payload = {
+        "schema": PROMPT_ARTIFACT_TOKEN_SCHEMA,
+        "route_class": "operator-prompt-move",
+        "source": source_rel,
+        "target": target_rel,
+        "source_hash": source_hash,
+        "target_hash": _sha256_text(target_text),
+        "created": created,
+        "boundary": "token authorizes only exact current source-to-target prompt artifact movement",
+    }
+    return "mhp-" + _stable_digest(payload)[:16]
+
+
+def _prompt_artifact_move_plan_findings(plan: PromptArtifactMovePlan, *, apply: bool) -> list[Finding]:
+    prefix = "" if apply else "would "
+    return [
+        Finding("info", "prompt-artifact-move-source", f"{prefix}move non-incubation prompt source {plan.source_rel}", plan.source_rel),
+        Finding("info", "prompt-artifact-move-target", f"{prefix}create operator prompt artifact {plan.target_rel}", plan.target_rel),
+        Finding("info", "prompt-artifact-move-source-hash", f"source prompt sha256: {plan.source_hash}", plan.source_rel),
+        Finding("info", "prompt-artifact-move-token", f"reviewed prompt artifact proposal token: {plan.proposal_token}", plan.source_rel),
+        Finding("info", "prompt-artifact-move-token-command", f"copy-ready apply command: {_prompt_artifact_move_apply_command(plan)}", plan.source_rel),
+    ]
+
+
+def _prompt_artifact_move_route_writes(plan: PromptArtifactMovePlan) -> tuple[RouteWriteEvidence, ...]:
+    return (
+        RouteWriteEvidence(plan.target_rel, None, plan.target_text),
+        RouteWriteEvidence(plan.source_rel, plan.source_text, None),
+    )
+
+
+def _prompt_artifact_move_boundary_findings() -> list[Finding]:
+    return [
+        rails_not_cognition_boundary_finding(OPERATOR_PROMPTS_DIR_REL),
+        Finding(
+            "info",
+            "prompt-artifact-move-boundary",
+            "prompt artifact movement writes only one reviewed project/operator-prompts/*.md destination and removes one reviewed non-incubation prompt source from project/plan-incubation/*.md",
+        ),
+        Finding(
+            "info",
+            "prompt-artifact-move-authority",
+            "prompt artifact movement is operating-memory hygiene only; it cannot approve incubation validation weakening, prompt rewriting, closeout, roadmap status, staging, commit, rollback, or future lifecycle decisions",
+        ),
+    ]
+
+
+def _prompt_artifact_move_apply_command(plan: PromptArtifactMovePlan) -> str:
+    return mlh_command(
+        "memory-hygiene",
+        "--apply",
+        "--move-non-incubation-prompt",
+        "--source",
+        plan.source_rel,
+        "--target",
+        plan.target_rel,
+        "--proposal-token",
+        plan.proposal_token,
+    )
 
 
 def verification_ledger_rotate_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:

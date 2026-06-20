@@ -553,6 +553,8 @@ def build_parser() -> argparse.ArgumentParser:
     memory_hygiene.add_argument("--archive-to", dest="archive_to", help="Explicit root-relative archive target under project/archive/reference/research or incubation.")
     memory_hygiene.add_argument("--archive-list-file", dest="archive_list_file", help="Root-relative reviewed path-list file of project/plan-incubation/*.md sources to archive.")
     memory_hygiene.add_argument("--archive-folder", dest="archive_folder", help="Root-relative target folder under project/archive/reference/ for reviewed archive-list movement; index.md is written there.")
+    memory_hygiene.add_argument("--move-non-incubation-prompt", action="store_true", help="Move one reviewed prompt-like non-incubation Markdown file from project/plan-incubation/*.md to project/operator-prompts/*.md.")
+    memory_hygiene.add_argument("--target", help="Root-relative project/operator-prompts/*.md target for --move-non-incubation-prompt.")
     memory_hygiene.add_argument("--repair-links", action="store_true", help="Repair exact root-relative source path references to the archive path.")
     memory_hygiene.add_argument("--scan", action="store_true", help="Read-only relationship hygiene and incubation cleanup advisor scan; valid with --dry-run.")
     memory_hygiene.add_argument("--archive-covered", action="store_true", help="For incubation notes, derive an archive target and require terminal Entry Coverage before archive.")

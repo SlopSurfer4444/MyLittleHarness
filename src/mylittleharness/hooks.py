@@ -343,6 +343,7 @@ MLH_MUTATION_COMMANDS = (
 )
 LIFECYCLE_MARKDOWN_PREFIXES = (
     "project/plan-incubation/",
+    "project/operator-prompts/",
     "project/research/",
     "project/verification/",
     "project/decisions/",
@@ -366,6 +367,7 @@ EDITABLE_ROUTE_PATCH_IDS = (
     "archive",
     "decisions",
     "incubation",
+    "operator-prompts",
     "research",
     "stable-specs",
     "verification",
@@ -2033,7 +2035,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-block-nonroute-project-markdown-write",
                 (
                     "blocked project Markdown write outside an MLH-visible route; use intake or an owned route such as "
-                    "project/adrs, project/decisions, project/research, project/plan-incubation, or project/verification "
+                    "project/adrs, project/decisions, project/research, project/plan-incubation, project/operator-prompts, or project/verification "
                     "for durable knowledge; next_safe_command=mylittleharness --root <root> intake --dry-run --text-file -"
                 ),
                 nonroute_markdown,
@@ -3003,13 +3005,14 @@ def _path_policy_findings(
                 )
             )
         elif _is_lifecycle_markdown_path(rel):
+            next_safe = _hook_lifecycle_markdown_path_next_safe_command(inventory, rel)
             findings.append(
                 Finding(
                     severity,
                     "hooks-policy-block-lifecycle-markdown-path",
                     (
                         "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence "
-                        f"must stay intact; next_safe_command={_hook_route_next_safe_command(inventory, rel)}"
+                        f"must stay intact; next_safe_command={next_safe}"
                     ),
                     rel,
                 )
@@ -5306,6 +5309,27 @@ def _hook_scope_diagnostic_message(allowed_scope: list[str], blocked_scope: list
 
 def _hook_lifecycle_markdown_shortcut_next_safe_command(inventory: Inventory, path: str, command: str) -> str:
     rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
+    if _looks_like_incubation_prompt_move_shortcut(inventory, rel, command):
+        return mlh_command(
+            "memory-hygiene",
+            "--dry-run",
+            "--move-non-incubation-prompt",
+            "--source",
+            rel,
+            "--target",
+            _operator_prompt_target_for_source(rel),
+        )
+    prompt_move_source = _incubation_prompt_move_source_from_command(inventory, command)
+    if prompt_move_source is not None:
+        return mlh_command(
+            "memory-hygiene",
+            "--dry-run",
+            "--move-non-incubation-prompt",
+            "--source",
+            prompt_move_source,
+            "--target",
+            _operator_prompt_target_for_source(prompt_move_source),
+        )
     if _looks_like_incubation_archive_maintenance_shortcut(rel, command):
         return mlh_command(
             "memory-hygiene",
@@ -5321,11 +5345,90 @@ def _hook_lifecycle_markdown_shortcut_next_safe_command(inventory: Inventory, pa
     return _hook_route_next_safe_command(inventory, path)
 
 
+def _hook_lifecycle_markdown_path_next_safe_command(inventory: Inventory, path: str) -> str:
+    rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
+    if _looks_like_incubation_prompt_source(inventory, rel):
+        return mlh_command(
+            "memory-hygiene",
+            "--dry-run",
+            "--move-non-incubation-prompt",
+            "--source",
+            rel,
+            "--target",
+            _operator_prompt_target_for_source(rel),
+        )
+    return _hook_route_next_safe_command(inventory, path)
+
+
+def _incubation_prompt_move_source_from_command(inventory: Inventory, command: str) -> str | None:
+    normalized_command = command.casefold()
+    if not any(marker in normalized_command for marker in ("move-item", "mv ", "copy-item", "cp ")):
+        return None
+    for candidate in _extract_paths(command):
+        rel = _hook_route_rel_path(inventory, candidate) or _normalize_hook_path(candidate)
+        if _looks_like_incubation_prompt_move_shortcut(inventory, rel, command):
+            return rel
+    return None
+
+
 def _looks_like_incubation_archive_maintenance_shortcut(rel: str, command: str) -> bool:
     if not rel.startswith("project/plan-incubation/"):
         return False
     normalized = command.casefold()
     return any(marker in normalized for marker in ("remove-item", "move-item", "rm ", "mv ", "del ", "archive"))
+
+
+def _looks_like_incubation_prompt_move_shortcut(inventory: Inventory, rel: str, command: str) -> bool:
+    if not rel.startswith("project/plan-incubation/") or not rel.endswith(".md"):
+        return False
+    normalized_command = command.casefold()
+    if not any(marker in normalized_command for marker in ("move-item", "mv ", "copy-item", "cp ")):
+        return False
+    return _looks_like_incubation_prompt_source(inventory, rel)
+
+
+def _looks_like_incubation_prompt_source(inventory: Inventory, rel: str) -> bool:
+    if not rel.startswith("project/plan-incubation/") or not rel.endswith(".md"):
+        return False
+    path = _hook_route_file_path(inventory, rel)
+    if path is None:
+        return _operator_prompt_source_name_signal(rel)
+    try:
+        if not path.is_file() or path.is_symlink():
+            return False
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return _operator_prompt_source_name_signal(rel)
+    return _operator_prompt_source_name_signal(rel) or _operator_prompt_text_signal(text)
+
+
+def _operator_prompt_source_name_signal(rel: str) -> bool:
+    name = Path(rel).name.casefold()
+    return any(marker in name for marker in ("prompt", "handoff", "launch", "operator"))
+
+
+def _operator_prompt_text_signal(text: str) -> bool:
+    normalized = text[:4000].casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "prompt",
+            "handoff",
+            "launch",
+            "operator",
+            "codex_delegation",
+            "continuation packet",
+            "start in the saved",
+            "do not restart",
+            "follow the packet",
+        )
+    )
+
+
+def _operator_prompt_target_for_source(rel: str) -> str:
+    stem = Path(rel).stem.casefold()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", stem).strip(".-") or "operator-prompt"
+    return f"project/operator-prompts/{slug}.md"
 
 
 def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
@@ -5373,6 +5476,16 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
         return mlh_command("plan", "--dry-run", "--roadmap-item", "<id>")
     if route_id == "incubation":
         return mlh_command("incubate", "--dry-run", "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--note-file", "-")
+    if route_id == "operator-prompts":
+        return mlh_command(
+            "memory-hygiene",
+            "--dry-run",
+            "--move-non-incubation-prompt",
+            "--source",
+            "project/plan-incubation/<file>.md",
+            "--target",
+            rel,
+        )
     if route_id == "research":
         return mlh_command("research-import", "--dry-run", "--title", '"<title>"', "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--text-file", "-")
     if _is_temporary_roadmap_manifest_path(rel):

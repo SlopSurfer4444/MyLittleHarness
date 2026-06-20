@@ -1241,6 +1241,8 @@ def main(argv: list[str] | None = None) -> int:
             args.proposal_token,
             args.archive_list_file,
             args.archive_folder,
+            args.move_non_incubation_prompt,
+            args.target,
         )
         report_name = "memory-hygiene --apply" if args.apply else "memory-hygiene --dry-run"
         if args.scan:
@@ -1249,6 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
             report_name += " --rotate-ledger"
         if args.archive_list_file or args.archive_folder:
             report_name += " --archive-list"
+        if args.move_non_incubation_prompt:
+            report_name += " --move-non-incubation-prompt"
         findings = memory_hygiene_apply_findings(inventory, request) if args.apply else memory_hygiene_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
@@ -3307,11 +3311,17 @@ def _suggestions(command: str, findings) -> list[str]:
         return ["transition apply completed the explicitly reviewed writeback/plan sequence without VCS side effects."]
     if command == "memory-hygiene":
         if any(finding.severity == "error" for finding in findings):
+            if any(finding.code == "prompt-artifact-move-refused" for finding in findings):
+                return ["prompt artifact movement was refused before the source or target prompt files were changed."]
             if any(finding.code == "verification-ledger-rotate-refused" for finding in findings):
                 return ["verification ledger rotation was refused before active ledger or archive targets were changed."]
             if any(finding.code == "incubation-archive-list-refused" for finding in findings):
                 return ["incubation archive-list maintenance was refused before protected incubation sources, archive index, or link targets were changed."]
             return ["memory-hygiene apply was refused before lifecycle source, archive, or link targets were changed."]
+        if any(finding.code == "prompt-artifact-move-dry-run" for finding in findings):
+            return ["prompt artifact movement dry-run reported the reviewed source, operator prompt target, proposal token, and exact route writes without writing files."]
+        if any(finding.code == "prompt-artifact-move-apply" for finding in findings):
+            return ["prompt artifact movement apply created the reviewed operator prompt artifact and removed the non-incubation source; lifecycle decisions remain explicit."]
         if any(finding.code == "incubation-archive-list-dry-run" for finding in findings):
             return ["incubation archive-list dry-run reported reviewed source moves, manifest evidence, proposal token, and optional exact link repairs without writing files."]
         if any(finding.code == "incubation-archive-list-apply" for finding in findings):

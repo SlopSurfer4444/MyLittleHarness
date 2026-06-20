@@ -13,6 +13,7 @@ LIFECYCLE_MARKDOWN_FRONTMATTER_REQUIRED_ROUTES = frozenset(
         "archive",
         "decisions",
         "incubation",
+        "operator-prompts",
         "research",
         "roadmap",
         "stable-specs",
@@ -103,6 +104,8 @@ def lifecycle_markdown_frontmatter_fields_for_route(
 
     if route_id == "incubation":
         fields.update({"topic": title, "status": "incubating"})
+    elif route_id == "operator-prompts":
+        fields.update({"title": title, "status": "active", "artifact_type": "operator-prompt"})
     elif route_id == "research":
         fields.update({"title": title, "status": "imported"})
     elif route_id == "verification":

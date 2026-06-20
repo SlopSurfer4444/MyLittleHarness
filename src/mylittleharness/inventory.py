@@ -255,6 +255,7 @@ def load_inventory(root: Path | str) -> Inventory:
     _add_optional_glob(root_path, surfaces, "project/adrs/*.md", "adr")
     _add_optional_glob(root_path, surfaces, "project/decisions/*.md", "decision")
     _add_optional_glob(root_path, surfaces, "project/plan-incubation/*.md", "incubation")
+    _add_optional_glob(root_path, surfaces, "project/operator-prompts/*.md", "operator-prompt")
     _add_optional_glob(root_path, surfaces, "project/research/*.md", "research")
     _add_optional_glob(root_path, surfaces, "project/attachments/**/artifact.md", "attachment")
     _add_optional_glob(root_path, surfaces, "project/verification/*.md", "verification")
