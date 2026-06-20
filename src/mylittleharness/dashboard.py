@@ -21,7 +21,11 @@ from .projection_artifacts import (
     quick_projection_cache_posture_findings,
 )
 from .projection_index import inspect_projection_index
-from .roadmap import roadmap_items_for_diagnostics
+from .roadmap import (
+    roadmap_items_for_diagnostics,
+    roadmap_portfolio_completion_findings,
+    roadmap_portfolio_status,
+)
 from .reporting import add_compact_summary_skipped, command_action_report_dict, compact_summary_for_report
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .safe_commands import safe_item_id
@@ -283,6 +287,7 @@ def _roadmap_findings(inventory: Inventory) -> list[Finding]:
     findings = [*parse_findings]
     findings.append(Finding("info", "dashboard-roadmap", f"roadmap status counts: {details}", "project/roadmap.md"))
     findings.append(Finding("info", "dashboard-roadmap-queue", f"active/accepted queue: {queue_detail}", "project/roadmap.md"))
+    findings.extend(roadmap_portfolio_completion_findings(inventory))
     findings.append(Finding("info", "dashboard-roadmap-authority", "roadmap rows are sequencing evidence only and cannot open plans or mark work done from the dashboard", "project/roadmap.md"))
     return findings
 
@@ -579,6 +584,7 @@ def _roadmap_payload(inventory: Inventory) -> dict[str, object]:
         "item_count": len(items),
         "status_counts": dict(sorted(_roadmap_counts(items).items())),
         "active_or_accepted_queue": _roadmap_queue(items)[:10],
+        "portfolio": roadmap_portfolio_status(inventory).to_dict(),
         "parse_findings": [finding.to_dict() for finding in parse_findings],
     }
 

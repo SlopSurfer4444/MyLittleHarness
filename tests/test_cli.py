@@ -26862,6 +26862,146 @@ class CliTests(unittest.TestCase):
             self.assertIn("next_safe_command=mylittleharness --root <root>", rendered)
             self.assertIn("roadmap-acceptance-readiness-boundary", rendered)
 
+    def test_check_reports_portfolio_completion_blocker_for_dependency_ready_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/plan-incubation").mkdir(parents=True, exist_ok=True)
+            (root / "project/plan-incubation/ready-note.md").write_text(
+                "---\n"
+                'status: "implemented"\n'
+                "---\n"
+                "# Ready Note\n\n[MLH-Fix-Candidate] Ready for a bounded implementation slice.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Ready Portfolio Item\n\n"
+                "- `id`: `ready-portfolio-item`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `70`\n"
+                "- `execution_slice`: `portfolio-drain`\n"
+                "- `source_incubation`: `project/plan-incubation/ready-note.md`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`\n"
+                "- `verification_summary`: `Focused portfolio status regression passes.`\n"
+                "- `docs_decision`: `not-needed`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap-portfolio-status", rendered)
+            self.assertIn("dependency_ready=1", rendered)
+            self.assertIn("roadmap-portfolio-completion-blocker", rendered)
+            self.assertIn("ready-portfolio-item", rendered)
+            self.assertIn("plan --dry-run --roadmap-item ready-portfolio-item", rendered)
+            self.assertIn("roadmap-portfolio-boundary", rendered)
+
+            json_output = io.StringIO()
+            with redirect_stdout(json_output):
+                json_code = main(["--root", str(root), "check", "--json"])
+
+            payload = json.loads(json_output.getvalue())
+            portfolio_actions = [
+                action
+                for action in payload["command_actions"]
+                if action["source_code"] == "roadmap-portfolio-completion-blocker"
+            ]
+            self.assertEqual(json_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertEqual(1, len(portfolio_actions))
+            self.assertEqual(
+                "mylittleharness --root <root> plan --dry-run --roadmap-item ready-portfolio-item",
+                portfolio_actions[0]["command"],
+            )
+            self.assertNotIn("ready-portfolio-item)", portfolio_actions[0]["command"])
+
+    def test_dashboard_json_reports_portfolio_dependency_ready_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/plan-incubation").mkdir(parents=True, exist_ok=True)
+            (root / "project/plan-incubation/ready-note.md").write_text(
+                "---\n"
+                'status: "implemented"\n'
+                "---\n"
+                "# Ready Note\n\n[MLH-Fix-Candidate] Ready for a bounded implementation slice.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Ready Portfolio Item\n\n"
+                "- `id`: `ready-portfolio-item`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `70`\n"
+                "- `execution_slice`: `portfolio-drain`\n"
+                "- `source_incubation`: `project/plan-incubation/ready-note.md`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/roadmap.py\"]`\n"
+                "- `verification_summary`: `Focused portfolio status regression passes.`\n"
+                "- `docs_decision`: `not-needed`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "dashboard", "--inspect", "--json"])
+
+            payload = json.loads(output.getvalue())
+            portfolio = payload["roadmap"]["portfolio"]
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse(portfolio["complete"])
+            self.assertEqual(1, portfolio["dependency_ready_count"])
+            self.assertEqual("ready-portfolio-item", portfolio["dependency_ready_items"][0]["item_id"])
+            self.assertEqual("ready-to-plan", portfolio["dependency_ready_items"][0]["readiness"])
+            self.assertIn(
+                "plan --dry-run --roadmap-item ready-portfolio-item",
+                portfolio["dependency_ready_items"][0]["next_safe_command"],
+            )
+
+    def test_dashboard_json_does_not_mark_malformed_roadmap_portfolio_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Incomplete Frontmatter\n\n"
+                "- `id`: `incomplete-frontmatter`\n"
+                "- `status`: `accepted`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "dashboard", "--inspect", "--json"])
+
+            payload = json.loads(output.getvalue())
+            portfolio = payload["roadmap"]["portfolio"]
+            self.assertEqual(code, 1)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse(portfolio["complete"])
+            self.assertEqual(0, portfolio["queued_count"])
+            self.assertEqual("roadmap-refused", portfolio["parse_findings"][0]["code"])
+            self.assertIn("frontmatter is malformed", portfolio["parse_findings"][0]["message"])
+
     def test_roadmap_and_dashboard_sanitize_invalid_item_ids_in_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

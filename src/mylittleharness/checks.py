@@ -83,6 +83,7 @@ from .roadmap import (
     roadmap_compacted_dependency_archive_evidence_findings,
     roadmap_done_docs_archive_evidence_findings,
     roadmap_human_review_gate_findings,
+    roadmap_portfolio_completion_findings,
     roadmap_related_specs_evidence_findings,
     roadmap_source_incubation_evidence_findings,
     roadmap_terminal_related_plan_findings,
@@ -2078,6 +2079,7 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(roadmap_compacted_dependency_archive_evidence_findings(inventory))
     findings.extend(roadmap_done_docs_archive_evidence_findings(inventory))
     findings.extend(roadmap_acceptance_readiness_findings(inventory))
+    findings.extend(roadmap_portfolio_completion_findings(inventory))
     findings.extend(_target_artifact_ownership_findings(inventory))
     findings.extend(_verification_ledger_status_findings(inventory))
     findings.extend(_bug_hunt_traceability_findings(inventory))

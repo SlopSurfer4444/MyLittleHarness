@@ -295,6 +295,56 @@ class RoadmapItem:
 
 
 @dataclass(frozen=True)
+class RoadmapPortfolioItem:
+    item_id: str
+    status: str
+    execution_slice: str
+    readiness: str
+    blockers: tuple[str, ...]
+    next_safe_command: str
+    order: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "item_id": self.item_id,
+            "status": self.status,
+            "execution_slice": self.execution_slice,
+            "readiness": self.readiness,
+            "blockers": list(self.blockers),
+            "next_safe_command": self.next_safe_command,
+            "order": self.order,
+        }
+
+
+@dataclass(frozen=True)
+class RoadmapPortfolioStatus:
+    item_count: int
+    queued_items: tuple[RoadmapPortfolioItem, ...]
+    active_items: tuple[RoadmapPortfolioItem, ...]
+    dependency_ready_items: tuple[RoadmapPortfolioItem, ...]
+    blocked_items: tuple[RoadmapPortfolioItem, ...]
+    parse_findings: tuple[Finding, ...]
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.queued_items and not self.parse_findings
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "item_count": self.item_count,
+            "queued_count": len(self.queued_items),
+            "active_count": len(self.active_items),
+            "dependency_ready_count": len(self.dependency_ready_items),
+            "blocked_count": len(self.blocked_items),
+            "complete": self.is_complete,
+            "queued_items": [item.to_dict() for item in self.queued_items],
+            "dependency_ready_items": [item.to_dict() for item in self.dependency_ready_items],
+            "blocked_items": [item.to_dict() for item in self.blocked_items],
+            "parse_findings": [finding.to_dict() for finding in self.parse_findings],
+        }
+
+
+@dataclass(frozen=True)
 class ArchivedHistoryEntry:
     item_id: str
     archived_plan: str
@@ -1850,6 +1900,137 @@ def roadmap_acceptance_readiness_findings(
     except OSError as exc:
         return [Finding("warn", "roadmap-readiness-read", f"project/roadmap.md could not be read for readiness diagnostics: {exc}", ROADMAP_REL)]
     return _roadmap_acceptance_readiness_findings_from_text(inventory, text, item_ids=item_ids)
+
+
+def roadmap_portfolio_status(inventory: Inventory) -> RoadmapPortfolioStatus:
+    if inventory.root_kind != "live_operating_root":
+        return RoadmapPortfolioStatus(0, (), (), (), (), ())
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return RoadmapPortfolioStatus(0, (), (), (), (), ())
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return RoadmapPortfolioStatus(
+            0,
+            (),
+            (),
+            (),
+            (),
+            (Finding("warn", "roadmap-portfolio-read", f"project/roadmap.md could not be read for portfolio diagnostics: {exc}", ROADMAP_REL),),
+        )
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return RoadmapPortfolioStatus(0, (), (), (), (), tuple(parse_result[1]))
+    _items_start, _items_end, items = parse_result[0]
+    archived_history = _archived_history_item_plan_map(text)
+    active_ids = set(active_plan_roadmap_item_ids(inventory))
+
+    queued: list[RoadmapPortfolioItem] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (_order_sort_key(row[1]), row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if status not in {"accepted", "active"}:
+            continue
+        blockers = _roadmap_readiness_blockers(inventory, item_id, item, items, archived_history, active_ids)
+        readiness, next_safe_command = _roadmap_readiness_state(status, item_id, blockers, active_ids)
+        order_key = _order_sort_key(item)
+        order_value = order_key[1] if isinstance(order_key[1], int) else 999999
+        queued.append(
+            RoadmapPortfolioItem(
+                item_id=item_id,
+                status=status or "unspecified",
+                execution_slice=_normalized_item_id(item.fields.get("execution_slice")) or item_id,
+                readiness=readiness,
+                blockers=blockers,
+                next_safe_command=next_safe_command,
+                order=order_value,
+            )
+        )
+
+    active = tuple(item for item in queued if item.status == "active")
+    dependency_ready = tuple(item for item in queued if item.readiness == "ready-to-plan")
+    blocked = tuple(item for item in queued if item.readiness not in {"ready-to-plan", "active-plan-open"})
+    return RoadmapPortfolioStatus(
+        item_count=len(items),
+        queued_items=tuple(queued),
+        active_items=active,
+        dependency_ready_items=dependency_ready,
+        blocked_items=blocked,
+        parse_findings=(),
+    )
+
+
+def roadmap_portfolio_completion_findings(inventory: Inventory) -> list[Finding]:
+    status = roadmap_portfolio_status(inventory)
+    findings = list(status.parse_findings)
+    if inventory.root_kind != "live_operating_root" or not status.item_count:
+        return findings
+
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-portfolio-status",
+            (
+                f"queued={len(status.queued_items)}; active={len(status.active_items)}; "
+                f"dependency_ready={len(status.dependency_ready_items)}; blocked={len(status.blocked_items)}; "
+                f"complete={str(status.is_complete).lower()}"
+            ),
+            ROADMAP_REL,
+        )
+    )
+    if status.dependency_ready_items:
+        ready_detail = "; ".join(
+            f"{item.item_id} ({item.execution_slice})"
+            for item in status.dependency_ready_items[:5]
+        )
+        next_safe = status.dependency_ready_items[0].next_safe_command
+        findings.append(
+            Finding(
+                "warn",
+                "roadmap-portfolio-completion-blocker",
+                (
+                    "dependency-ready accepted roadmap item(s) remain, so portfolio completion claims must stay provisional: "
+                    f"{ready_detail}; next_safe_command={next_safe}"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    elif status.queued_items:
+        queued_detail = "; ".join(f"{item.item_id} ({item.readiness})" for item in status.queued_items[:5])
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-portfolio-completion-blocker",
+                (
+                    "roadmap queue remains, so portfolio completion is not claimable until accepted/active work is resolved: "
+                    f"{queued_detail}"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-portfolio-complete",
+                "no active or accepted roadmap items remain in the portfolio queue",
+                ROADMAP_REL,
+            )
+        )
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-portfolio-boundary",
+            (
+                "portfolio status is read-only roadmap evidence; it cannot control external goal tools, approve lifecycle, "
+                "archive, stage, commit, push, or force implementation order"
+            ),
+            ROADMAP_REL,
+        )
+    )
+    return findings
 
 
 def active_plan_roadmap_item_ids(inventory: Inventory) -> tuple[str, ...]:

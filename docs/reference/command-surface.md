@@ -135,6 +135,19 @@ count, and explicit authority flags. It keeps warnings visible, does not change
 exit codes, and cannot approve lifecycle movement, archive, roadmap status, Git
 state, release, provider routing, or cache truth.
 
+`check` and `dashboard --inspect` also surface roadmap portfolio status. The
+report names queued active/accepted items, dependency-ready accepted items,
+blocked items, and the next safe `plan --dry-run --roadmap-item <id>` command
+when an item can be opened. `dashboard --inspect --json` exposes the same
+contract under `roadmap.portfolio`, including `complete`,
+`dependency_ready_count`, `queued_items`, `dependency_ready_items`,
+`blocked_items`, and `parse_findings`. `complete` is false whenever the roadmap
+cannot be parsed or read, even if no queue rows were recovered. Portfolio status
+is read-only roadmap evidence: it can warn that completion claims must stay
+provisional while dependency-ready work remains, but it cannot control external
+goal tools, approve lifecycle movement, archive, stage, commit, push, or force
+implementation order.
+
 Coordination identity diagnostics keep route-id validation strict. Active work
 claims and newly created handoffs that cite command names such as `docs`,
 `memory-hygiene`, `check`, or `evidence` still warn as unknown route ids.
