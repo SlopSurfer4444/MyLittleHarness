@@ -639,7 +639,7 @@ def _conductor_authority_findings() -> list[Finding]:
     return [
         Finding("info", "task-session-conductor-authority-worker-launch", "worker_launch=false; no worker process, provider call, shell, or queue consumer is started"),
         Finding("info", "task-session-conductor-authority-lifecycle", "lifecycle, roadmap, writeback, archive, Git, release, and provider-routing approvals remain false"),
-        Finding("info", "task-session-conductor-authority-completion-claims", "external Linear/Symphony completion claims are report-only; repo-visible completion evidence remains required and cannot approve closeout"),
+        Finding("info", "task-session-conductor-authority-completion-claims", "external tracker/orchestrator completion claims are report-only; repo-visible completion evidence remains required and cannot approve closeout"),
         Finding("info", "task-session-conductor-authority-route-proposals", "route proposals are evidence only and must be reviewed through explicit dry-run/apply rails before execution"),
     ]
 
@@ -663,7 +663,7 @@ def _provider_launcher_payload(inventory: Inventory, state: dict[str, object]) -
         f"--session-id {session_id}-provider-runtime "
         f"--task-id {task_id} "
         "--objective \"Record secret-safe provider runtime config readiness\" "
-        "--runtime-owner symphony "
+        "--runtime-owner optional-orchestrator "
         "--runtime-backend openai-sdk "
         "--provider-ref env:OPENAI_API_KEY "
         "--read-context project/implementation-plan.md "
@@ -685,7 +685,7 @@ def _provider_launcher_payload(inventory: Inventory, state: dict[str, object]) -
         "stores_secret_material": False,
         "secret_values_recorded": False,
         "required_env": [dict(row) for row in required_env],
-        "runtime_owner": "symphony",
+        "runtime_owner": "optional-orchestrator",
         "runtime_backend": "openai-sdk",
         "provider_refs": ["env:OPENAI_API_KEY"],
         "provider_routing_authority": False,

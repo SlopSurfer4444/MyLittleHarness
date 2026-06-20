@@ -68,7 +68,7 @@ SYMPHONY_QUEUE_TERMINAL_STATES = {
 }
 DISPATCHER_LAUNCH_REQUIRED_MESSAGE = (
     "dispatcher cannot start work without a repo-visible handoff packet, compatible active claim, "
-    "planned agent-run evidence path, and ready Symphony queue item with terminal upstream blockers"
+    "planned agent-run evidence path, and ready optional-orchestrator queue item with terminal upstream blockers"
 )
 
 
@@ -523,17 +523,17 @@ def _dispatcher_queue_findings(root: Path, data: dict[str, object], rel_path: st
             Finding(
                 "warn",
                 f"{code_prefix}-queue-missing",
-                f"no Symphony queue item directory exists at {SYMPHONY_QUEUE_DIR_REL}; dispatch preflight requires repo-visible queue readiness",
+                f"no optional-orchestrator queue item directory exists at {SYMPHONY_QUEUE_DIR_REL}; dispatch preflight requires repo-visible queue readiness",
                 rel_path,
             )
         )
-        return findings, ["no ready Symphony queue item is repo-visible"]
+        return findings, ["no ready optional-orchestrator queue item is repo-visible"]
 
     records, warnings = _dispatcher_queue_records(root, code_prefix)
     findings.extend(warnings)
     if not records:
-        findings.append(Finding("warn", f"{code_prefix}-queue-missing", "no readable Symphony queue item records were found", rel_path))
-        return findings, ["no readable Symphony queue item is repo-visible"]
+        findings.append(Finding("warn", f"{code_prefix}-queue-missing", "no readable optional-orchestrator queue item records were found", rel_path))
+        return findings, ["no readable optional-orchestrator queue item is repo-visible"]
 
     current_by_key = _dispatcher_queue_current_item_index(records)
     matches = _dispatcher_queue_matching_records(records, rel_path, data)
@@ -542,11 +542,11 @@ def _dispatcher_queue_findings(root: Path, data: dict[str, object], rel_path: st
             Finding(
                 "warn",
                 f"{code_prefix}-queue-unmatched",
-                "no Symphony queue item references this handoff/claim/agent-run contract; dispatch preflight remains refused",
+                "no optional-orchestrator queue item references this handoff/claim/agent-run contract; dispatch preflight remains refused",
                 rel_path,
             )
         )
-        return findings, ["no Symphony queue item matches the handoff contract"]
+        return findings, ["no optional-orchestrator queue item matches the handoff contract"]
 
     ready_count = 0
     for queue_rel, queue_data in matches:
@@ -574,7 +574,7 @@ def _dispatcher_queue_findings(root: Path, data: dict[str, object], rel_path: st
 
     if ready_count:
         return findings, []
-    return findings, blockers or ["no matched Symphony queue item passed readiness"]
+    return findings, blockers or ["no matched optional-orchestrator queue item passed readiness"]
 
 
 def _dispatcher_queue_records(root: Path, code_prefix: str) -> tuple[list[tuple[str, dict[str, object]]], list[Finding]]:
@@ -877,7 +877,7 @@ def _dispatcher_boundary_findings(code_prefix: str) -> list[Finding]:
         Finding(
             "info",
             f"{code_prefix}-completion-claim-policy",
-            "external completion claims must cite repo-visible handoff/claim/agent-run evidence; Linear/Symphony status alone is not launch or closeout evidence",
+            "external completion claims must cite repo-visible handoff/claim/agent-run evidence; external tracker/orchestrator status alone is not launch or closeout evidence",
             HANDOFF_PACKETS_DIR_REL,
         ),
     ]

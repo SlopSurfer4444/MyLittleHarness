@@ -180,7 +180,7 @@ Root-load failures and parser usage failures remain exit `2`.
 
 It must not install hooks, create CI/GitHub workflows, use network calls, write generated preflight reports, block by itself, repair files, archive, commit, change target roots, create lifecycle state, or store accepted decisions.
 
-`preflight --orchestrator-workspace <path>` is a read-only workspace-preflight variant for external launchers. It reports whether the proposed disposable worker workspace is outside the live operating root and configured product source root, whether local Git/MyLittleHarness tooling is discoverable, and which first safe shell commands an orchestrator should run for repo-visible MLH posture. It must not create the workspace, clone repositories, mutate Git, install dependencies, start workers, approve Linear/Symphony issue-board state, or convert an orchestrator status into MLH closeout.
+`preflight --orchestrator-workspace <path>` is a read-only workspace-preflight variant for external launchers. It reports whether the proposed disposable worker workspace is outside the live operating root and configured product source root, whether local Git/MyLittleHarness tooling is discoverable, and which first safe shell commands an orchestrator should run for repo-visible MLH posture. It must not create the workspace, clone repositories, mutate Git, install dependencies, start workers, approve external tracker/orchestrator state, or convert an orchestrator status into MLH closeout.
 
 ## Implemented Hook Shim And Doctor Slice
 

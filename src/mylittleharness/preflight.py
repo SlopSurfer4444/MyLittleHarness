@@ -91,7 +91,7 @@ def orchestrator_workspace_preflight_sections(
                 Finding(
                     "info",
                     "orchestrator-preflight-no-authority",
-                    "passing this preflight cannot approve worker launch, lifecycle movement, roadmap status, source edits, staging, commit, push, release, or Linear/Symphony completion claims",
+                    "passing this preflight cannot approve worker launch, lifecycle movement, roadmap status, source edits, staging, commit, push, release, or external tracker/orchestrator completion claims",
                 )
             ],
         ),
@@ -247,7 +247,7 @@ def _orchestrator_command_findings(workspace: Path) -> list[Finding]:
         Finding("info", "orchestrator-preflight-command", f"shell preflight: cd {root_literal}"),
         Finding("info", "orchestrator-preflight-command", "git preflight: git status --short --branch"),
         Finding("info", "orchestrator-preflight-command", "MLH preflight after scaffold/clone: mylittleharness --root <disposable-root> check"),
-        Finding("info", "orchestrator-preflight-completion-policy", "external orchestrator completion claims must cite repo-visible handoff/claim/agent-run evidence; Linear/Symphony status alone is not MLH closeout"),
+        Finding("info", "orchestrator-preflight-completion-policy", "external orchestrator completion claims must cite repo-visible handoff/claim/agent-run evidence; external tracker/orchestrator status alone is not MLH closeout"),
     ]
 
 

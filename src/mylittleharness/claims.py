@@ -836,7 +836,7 @@ def _completion_policy_findings(request: WorkClaimRequest) -> list[Finding]:
             "work-claim-completion-policy",
             (
                 "work claim release records reviewed evidence only; completion_policy=repo-visible-evidence-only; "
-                "required_routes=claim,handoff,evidence; external Linear/Symphony done state is report-only and does not approve MLH closeout"
+                "required_routes=claim,handoff,evidence; external tracker/orchestrator done state is report-only and does not approve MLH closeout"
             ),
             source,
         )

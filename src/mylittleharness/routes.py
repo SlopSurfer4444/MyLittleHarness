@@ -163,8 +163,8 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
     MemoryRoute(
         "symphony-queue",
         "project/symphony/queue/*.json",
-        "repo-visible Symphony queue snapshots; dependency state resolves from current item files",
-        "during Symphony queue dispatch or review",
+        "repo-visible optional-orchestrator queue snapshots; dependency state resolves from current item files",
+        "during optional orchestrator dispatch or review",
         "coordination advisory",
     ),
     MemoryRoute(

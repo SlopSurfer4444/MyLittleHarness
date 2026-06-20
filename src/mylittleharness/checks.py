@@ -1887,7 +1887,7 @@ def symphony_queue_dependency_findings(inventory: Inventory, code_prefix: str = 
             "info",
             f"{code_prefix}-read-only",
             (
-                "Symphony queue dependency diagnostics are read-only; queue JSON files remain repo-visible "
+                "Optional-orchestrator queue dependency diagnostics are read-only; queue JSON files remain repo-visible "
                 "coordination evidence and this report writes no dispatcher, lifecycle, generated cache, or Git state"
             ),
             SYMPHONY_QUEUE_DIR_REL,
@@ -13496,7 +13496,7 @@ def external_orchestrator_shell_preflight_findings(
             "orchestrator-completion-claim-policy",
             (
                 "external orchestrator completion claims require repo-visible handoff, work-claim, and agent-run evidence; "
-                "Linear/Symphony status, comments, or runtime memory alone are refused as MLH closeout or done-state proof"
+                "external tracker/orchestrator status, comments, or runtime memory alone are refused as MLH closeout or done-state proof"
             ),
             WORKSPACE_PREVIEW_SOURCE,
         )

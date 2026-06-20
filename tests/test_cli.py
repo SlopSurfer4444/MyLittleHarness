@@ -11894,7 +11894,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("no repo-visible handoff packet is launchable", empty_rendered)
             self.assertIn("compatible active claim", empty_rendered)
             self.assertIn("dispatcher-launch-completion-claim-policy", empty_rendered)
-            self.assertIn("Linear/Symphony status alone is not launch or closeout evidence", empty_rendered)
+            self.assertIn("external tracker/orchestrator status alone is not launch or closeout evidence", empty_rendered)
 
             claim_dir = root / "project/verification/work-claims"
             handoff_dir = root / "project/verification/handoffs"
@@ -39180,7 +39180,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("orchestrator-preflight-live-root-excluded", rendered)
             self.assertIn(f"shell preflight: cd '{disposable}'", rendered)
             self.assertIn("git preflight", rendered)
-            self.assertIn("Linear/Symphony status alone is not MLH closeout", rendered)
+            self.assertIn("external tracker/orchestrator status alone is not MLH closeout", rendered)
 
             live_output = io.StringIO()
             with redirect_stdout(live_output):
