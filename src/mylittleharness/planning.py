@@ -88,6 +88,7 @@ class PlanRequest:
     update_active: bool = False
     roadmap_item: str = ""
     only_requested_item: bool = False
+    target_artifacts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,7 @@ def make_plan_request(
     update_active: bool = False,
     roadmap_item: str | None = None,
     only_requested_item: bool = False,
+    target_artifacts: tuple[str, ...] | list[str] | None = None,
 ) -> PlanRequest:
     return PlanRequest(
         title=_normalized_text(title),
@@ -154,6 +156,7 @@ def make_plan_request(
         update_active=update_active,
         roadmap_item=_normalized_item_id(roadmap_item),
         only_requested_item=only_requested_item,
+        target_artifacts=_normalized_target_artifacts(target_artifacts),
     )
 
 
@@ -219,6 +222,7 @@ def render_implementation_plan(
     if request.task:
         task_section = f"\n## Explicit Task Input\n\n{request.task.rstrip()}\n"
     slice_section = _slice_contract_section(slice_contract)
+    target_section = _explicit_target_scope_section(request, slice_contract)
     interrupt_section = _scoped_interrupt_contract_section(request, slice_contract)
     synthesis_section = _plan_synthesis_section(synthesis_report, slice_contract, verification_profile)
     roadmap_authority_input = "- `project/roadmap.md`\n" if request.roadmap_item else ""
@@ -242,6 +246,7 @@ def render_implementation_plan(
         f"{objective.rstrip()}\n"
         f"{task_section}"
         f"{slice_section}"
+        f"{target_section}"
         f"{interrupt_section}"
         f"{synthesis_section}"
         "\n## Authority Inputs\n\n"
@@ -425,6 +430,8 @@ def _slice_frontmatter(
             lines.append(f'work_intent: "{SCOPED_INTERRUPT_WORK_INTENT}"\n')
             lines.append(f'roadmap_status_policy: "{SCOPED_INTERRUPT_ROADMAP_STATUS_POLICY}"\n')
             lines.append("return_to_roadmap_required: true\n")
+        if request.target_artifacts:
+            lines.append(_yaml_frontmatter_list("target_artifacts", request.target_artifacts))
         if request.roadmap_item:
             lines.append(f'related_roadmap_item: "{_yaml_double_quoted_value(request.roadmap_item)}"\n')
         if source_incubation:
@@ -531,6 +538,20 @@ def _slice_contract_section(slice_contract: RoadmapSliceContract | None) -> str:
     )
 
 
+def _explicit_target_scope_section(
+    request: PlanRequest,
+    slice_contract: RoadmapSliceContract | None,
+) -> str:
+    if slice_contract is not None or not request.target_artifacts:
+        return ""
+    artifacts = ", ".join(f"`{item}`" for item in request.target_artifacts)
+    return (
+        "\n## Target Scope\n\n"
+        f"- target_artifacts: {artifacts}\n"
+        "- scope_boundary: explicit CLI target_artifacts scope only this active plan; they do not mutate roadmap metadata or approve product changes outside phase write_scope.\n"
+    )
+
+
 def _scoped_interrupt_contract_section(request: PlanRequest, slice_contract: RoadmapSliceContract | None) -> str:
     if not _is_scoped_interrupt_context(request, slice_contract):
         return ""
@@ -610,6 +631,8 @@ def _generated_phases(
     manifest_rel: str = LEGACY_WORKFLOW_MANIFEST_REL,
 ) -> tuple[GeneratedPlanPhase, ...]:
     if report is None:
+        if request and request.target_artifacts:
+            return _explicit_target_generated_phases(request, verification_profile, manifest_rel=manifest_rel)
         if _is_scoped_interrupt_context(request, slice_contract):
             return _scoped_interrupt_generated_phases(request, slice_contract, report, verification_profile, manifest_rel=manifest_rel)
         return (_default_generated_phase(),)
@@ -793,6 +816,38 @@ def _scoped_interrupt_generated_phases(
         refusal_or_escalation="stop if closeout, archive, roadmap promotion/status movement, or docs/API impact is uncertain.",
     )
     return (phase_1, phase_2)
+
+
+def _explicit_target_generated_phases(
+    request: PlanRequest,
+    verification_profile: VerificationGateProfile | None = None,
+    *,
+    manifest_rel: str = LEGACY_WORKFLOW_MANIFEST_REL,
+) -> tuple[GeneratedPlanPhase, ...]:
+    targets = tuple(request.target_artifacts)
+    groups = _artifact_groups(targets)
+    source_scope = groups["source"] or groups["other"] or groups["docs"] or targets
+    test_scope = groups["tests"]
+    phase_1_scope = tuple(_dedupe_nonempty((*source_scope, *test_scope))) if test_scope else source_scope
+    return (
+        GeneratedPlanPhase(
+            phase_id=DEFAULT_ACTIVE_PHASE,
+            status=DEFAULT_PHASE_STATUS,
+            objective="Implement the requested change inside the explicit CLI target scope.",
+            dependencies=(),
+            write_scope=phase_1_scope,
+            read_context=("AGENTS.md", manifest_rel, "project/project-state.md"),
+            invariants=(
+                "explicit CLI target_artifacts define this active plan write scope; they do not mutate "
+                "roadmap metadata or approve product changes outside phase write_scope"
+            ),
+            implementation_contract="deliver the requested behavior without broadening prose into hidden write permission.",
+            verification_gates=_focused_verification_gate(test_scope, verification_profile),
+            docs_decision_rule="keep `docs_decision` as `uncertain` until docs/spec/package impact is proven.",
+            state_transfer="record changed contracts, source assumptions, verification evidence, residual risk, carry-forward, and a plain-language work result capsule.",
+            refusal_or_escalation="stop before unsafe roots, destructive recovery, hidden infrastructure, unclear ownership, or edits outside this explicit write_scope.",
+        ),
+    )
 
 
 def _non_implementation_generated_phases(
@@ -1210,9 +1265,15 @@ def _repo_verification_gate_profile(
     report: RoadmapSynthesisReport | None,
     slice_contract: RoadmapSliceContract | None,
 ) -> VerificationGateProfile | None:
-    if report is None and slice_contract is None:
+    target_artifacts = tuple(
+        report.target_artifacts
+        if report
+        else slice_contract.target_artifacts
+        if slice_contract
+        else request.target_artifacts
+    )
+    if not target_artifacts and report is None and slice_contract is None:
         return None
-    target_artifacts = tuple(report.target_artifacts if report else slice_contract.target_artifacts if slice_contract else ())
     verification_summary = ""
     if request.roadmap_item:
         verification_summary = _normalized_note(roadmap_item_fields(inventory, request.roadmap_item).get("verification_summary"))
@@ -1671,6 +1732,7 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
         )
     )
     findings.extend(_plan_input_resolution_findings(resolution, apply=False))
+    findings.extend(_plan_explicit_target_artifact_findings(request, apply=False))
     if roadmap_plans:
         findings.extend(_plan_roadmap_findings(roadmap_plans, apply=False))
         slice_contract = _plan_slice_contract(inventory, request)
@@ -1870,6 +1932,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         Finding("info", "plan-validation-posture", "run check after apply to verify lifecycle state, active-plan validation, and compact operating memory posture"),
     ]
     findings.extend(_plan_input_resolution_findings(resolution, apply=True))
+    findings.extend(_plan_explicit_target_artifact_findings(request, apply=True))
     findings.extend(roadmap_evidence_findings)
     if roadmap_plans:
         findings.extend(_plan_roadmap_findings(roadmap_plans, apply=True))
@@ -2450,6 +2513,7 @@ def _existing_plan_text(inventory: Inventory) -> str | None:
 
 def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[Finding]:
     errors: list[Finding] = []
+    errors.extend(_explicit_target_artifact_input_errors(request))
     if request.roadmap_item:
         archived_plan = roadmap_compacted_item_archived_plan(inventory, request.roadmap_item)
         if archived_plan:
@@ -2477,7 +2541,8 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
         errors.append(Finding("error", "plan-refused", "--only-requested-item requires --roadmap-item"))
     if request.roadmap_item:
         next_safe_command = roadmap_plan_scope_next_safe_command(request.roadmap_item)
-        for blocker in roadmap_plan_scope_blockers(inventory, request.roadmap_item):
+        effective_fields = _plan_effective_roadmap_fields(inventory, request, request.roadmap_item)
+        for blocker in roadmap_plan_scope_blockers(inventory, request.roadmap_item, effective_fields):
             errors.append(
                 Finding(
                     "error",
@@ -2487,7 +2552,7 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
                 )
             )
         promotion_next_safe_command = roadmap_plan_deliverable_class_next_safe_command(request.roadmap_item)
-        for blocker in roadmap_plan_deliverable_class_blockers(inventory, request.roadmap_item):
+        for blocker in roadmap_plan_deliverable_class_blockers(inventory, request.roadmap_item, effective_fields):
             errors.append(
                 Finding(
                     "error",
@@ -2513,6 +2578,20 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
                     "plan-roadmap-source-evidence-refused",
                     f"{blocker}; next_safe_command=mylittleharness --root <root> check",
                     ROADMAP_REL,
+                )
+            )
+    elif not request.target_artifacts:
+        suggested_targets = _request_text_target_artifact_suggestions(request)
+        if suggested_targets:
+            errors.append(
+                Finding(
+                    "error",
+                    "plan-target-artifacts-refused",
+                    (
+                        "explicit plan input names target-like artifact(s) but no reviewed "
+                        f"--target-artifact scope was supplied; rerun with {_plan_target_artifact_args(suggested_targets)}"
+                    ),
+                    DEFAULT_PLAN_REL,
                 )
             )
 
@@ -2574,6 +2653,48 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
         elif request.update_active:
             errors.append(Finding("error", "plan-refused", "--update-active requires plan_status active and an existing active plan", state.rel_path))
     return errors
+
+
+def _plan_effective_roadmap_fields(inventory: Inventory, request: PlanRequest, item_id: str) -> dict[str, object]:
+    fields = dict(roadmap_item_fields(inventory, item_id))
+    if request.target_artifacts:
+        fields["target_artifacts"] = tuple(_dedupe_nonempty((*_field_list(fields.get("target_artifacts")), *request.target_artifacts)))
+    return fields
+
+
+def _explicit_target_artifact_input_errors(request: PlanRequest) -> list[Finding]:
+    errors: list[Finding] = []
+    for target in request.target_artifacts:
+        normalized = _normalize_rel(target)
+        lower = normalized.casefold()
+        if (
+            not normalized
+            or "://" in lower
+            or ":" in normalized
+            or lower.startswith("..")
+            or "/../" in lower
+            or "<" in normalized
+            or ">" in normalized
+            or lower.startswith("declare exact")
+        ):
+            errors.append(
+                Finding(
+                    "error",
+                    "plan-target-artifacts-refused",
+                    f"--target-artifact requires a concrete root-relative artifact path; got {target!r}",
+                    DEFAULT_PLAN_REL,
+                )
+            )
+    return errors
+
+
+def _request_text_target_artifact_suggestions(request: PlanRequest) -> tuple[str, ...]:
+    text = " ".join(part for part in (request.title, request.objective, request.task) if part)
+    return tuple(_target_artifacts_from_source_context(text))
+
+
+def _plan_target_artifact_args(targets: tuple[str, ...]) -> str:
+    return " ".join(f"--target-artifact {shell_arg(target)}" for target in targets)
 
 
 def _plan_current_action_eligibility_errors(inventory: Inventory, request: PlanRequest) -> list[Finding]:
@@ -2848,7 +2969,7 @@ def _plan_slice_contract(inventory: Inventory, request: PlanRequest) -> RoadmapS
     domain_context = _roadmap_domain_context(contract.domain_context, source_excerpt, fields) if contract else ""
     if contract is None:
         return None
-    target_artifacts = _plan_target_artifacts(fields, source_excerpt, contract.target_artifacts)
+    target_artifacts = _plan_target_artifacts(fields, source_excerpt, contract.target_artifacts, request.target_artifacts)
     if not request.only_requested_item:
         return replace(contract, domain_context=domain_context, target_artifacts=target_artifacts)
     return RoadmapSliceContract(
@@ -3243,13 +3364,17 @@ def _plan_target_artifacts(
     fields: dict[str, object],
     source_excerpt: str,
     contract_target_artifacts: tuple[str, ...],
+    request_target_artifacts: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     explicit = tuple(_dedupe_nonempty(_field_list(fields.get("target_artifacts"))))
     source_couplings = _source_context_target_artifact_couplings(source_excerpt)
+    request_targets = tuple(_dedupe_nonempty(request_target_artifacts))
     if explicit:
-        return tuple(_dedupe_nonempty((*explicit, *source_couplings)))
+        return tuple(_dedupe_nonempty((*explicit, *request_targets, *source_couplings)))
     if contract_target_artifacts:
-        return tuple(_dedupe_nonempty((*contract_target_artifacts, *source_couplings)))
+        return tuple(_dedupe_nonempty((*contract_target_artifacts, *request_targets, *source_couplings)))
+    if request_targets:
+        return tuple(_dedupe_nonempty((*request_targets, *source_couplings)))
     return tuple(_dedupe_nonempty((*_target_artifacts_from_source_context(source_excerpt), *source_couplings)))
 
 
@@ -3478,6 +3603,24 @@ def _plan_only_requested_item_finding(request: PlanRequest, apply: bool) -> Find
         f"{prefix}limit roadmap relationship and active-plan slice frontmatter to requested item {request.roadmap_item!r}",
         DEFAULT_PLAN_REL,
     )
+
+
+def _plan_explicit_target_artifact_findings(request: PlanRequest, apply: bool) -> list[Finding]:
+    if not request.target_artifacts:
+        return []
+    prefix = "" if apply else "would "
+    return [
+        Finding(
+            "info",
+            "plan-explicit-target-artifacts",
+            (
+                f"{prefix}record explicit CLI target_artifacts for this active plan only: "
+                f"{', '.join(request.target_artifacts)}; roadmap metadata is not mutated and product changes "
+                "remain bounded to phase write_scope"
+            ),
+            DEFAULT_PLAN_REL,
+        )
+    ]
 
 
 def _plan_slice_contract_findings(contract: RoadmapSliceContract, apply: bool) -> list[Finding]:
@@ -3748,6 +3891,10 @@ def _parents_between(root: Path, path: Path) -> list[Path]:
 
 def _normalize_rel(value: str) -> str:
     return value.replace("\\", "/").strip("/")
+
+
+def _normalized_target_artifacts(values: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    return tuple(_dedupe_nonempty(_normalize_rel(str(value or "").strip()) for value in values or ()))
 
 
 def _safe_slug(value: str) -> str:

@@ -421,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--update-active", action="store_true", help="Replace the current default active plan when project-state already has plan_status active.")
     plan.add_argument("--roadmap-item", dest="roadmap_item", help="Optional existing roadmap item id to link to the active plan.")
     plan.add_argument("--only-requested-item", action="store_true", help="Limit roadmap sync and slice frontmatter to only --roadmap-item.")
+    plan.add_argument("--target-artifact", dest="target_artifacts", action="append", default=[], help="Concrete root-relative target artifact to scope the generated active plan. May be repeated and does not mutate roadmap metadata.")
     plan_cancel = subparsers.add_parser(
         "plan-cancel",
         help=argparse.SUPPRESS,

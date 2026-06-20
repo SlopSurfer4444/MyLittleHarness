@@ -1070,7 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "plan":
-        request = make_plan_request(args.title, args.objective, args.task, args.update_active, args.roadmap_item, args.only_requested_item)
+        request = make_plan_request(args.title, args.objective, args.task, args.update_active, args.roadmap_item, args.only_requested_item, args.target_artifacts)
         report_name = "plan --apply" if args.apply else "plan --dry-run"
         findings = plan_apply_findings(inventory, request) if args.apply else plan_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)

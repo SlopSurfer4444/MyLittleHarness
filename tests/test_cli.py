@@ -21745,6 +21745,120 @@ class CliTests(unittest.TestCase):
             self.assertIn("plan-target-artifacts-refused", rendered)
             self.assertIn("next_safe_command=mylittleharness --root <root> roadmap --dry-run", rendered)
 
+    def test_plan_apply_uses_explicit_target_artifacts_for_roadmap_scope_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_meta_feedback_scope_gap_roadmap(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "meta-feedback-scope-gap",
+                        "--target-artifact",
+                        "src/mylittleharness/planning.py",
+                        "--target-artifact",
+                        "tests/test_cli.py",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-explicit-target-artifacts", rendered)
+            self.assertIn("plan-target-artifact-ownership", rendered)
+
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('  - "src/mylittleharness/planning.py"', plan_text)
+            self.assertIn('  - "tests/test_cli.py"', plan_text)
+            self.assertIn("- write_scope: `src/mylittleharness/planning.py`, `tests/test_cli.py`", plan_text)
+
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            self.assertIn("- `target_artifacts`: `[]`", roadmap_text)
+
+    def test_plan_apply_refuses_task_named_target_without_explicit_target_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                dry_run_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--dry-run",
+                        "--title",
+                        "Direct Scope",
+                        "--objective",
+                        "Change src/mylittleharness/planning.py safely.",
+                    ]
+                )
+
+            dry_run_rendered = dry_run_output.getvalue()
+            self.assertEqual(dry_run_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("plan-target-artifacts-refused", dry_run_rendered)
+            self.assertIn("--target-artifact src/mylittleharness/planning.py", dry_run_rendered)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Direct Scope",
+                        "--objective",
+                        "Change src/mylittleharness/planning.py safely.",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("plan-target-artifacts-refused", rendered)
+            self.assertIn("--target-artifact src/mylittleharness/planning.py", rendered)
+
+    def test_plan_apply_materializes_direct_explicit_target_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Direct Scope",
+                        "--objective",
+                        "Change planning with an explicit reviewed scope.",
+                        "--target-artifact",
+                        "src/mylittleharness/planning.py",
+                        "--target-artifact",
+                        "tests/test_cli.py",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-explicit-target-artifacts", rendered)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn("## Target Scope", plan_text)
+            self.assertIn('target_artifacts:\n  - "src/mylittleharness/planning.py"\n  - "tests/test_cli.py"', plan_text)
+            self.assertIn("- write_scope: `src/mylittleharness/planning.py`, `tests/test_cli.py`", plan_text)
+
     def test_plan_apply_retargets_terminal_roadmap_related_plan_before_reusing_active_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp))
