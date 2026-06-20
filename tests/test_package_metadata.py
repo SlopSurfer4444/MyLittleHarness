@@ -38,7 +38,7 @@ EXTERNAL_AUDIT_SAFETY_FAILURE_COVERAGE_MATRIX = {
     },
     "attach late failures": {
         "tests/test_cli.py": (
-            "test_attach_apply_reports_recovery_when_codex_hook_adapter_fails_after_scaffold_writes",
+            "test_attach_apply_does_not_call_codex_hook_adapter_by_default",
             "test_attach_apply_reports_recovery_when_projection_build_fails_after_scaffold_writes",
         ),
     },
@@ -368,6 +368,17 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("mylittleharness.cli:main", package_surface)
         self.assertNotIn("Codex", package_surface)
         self.assertNotIn(".codex", package_surface)
+        self.assertLessEqual(len(project["description"]), 160)
+        description_lower = project["description"].lower()
+        for forbidden in (
+            "hidden",
+            "route metadata",
+            "source-incubation",
+            "writeback",
+            "roadmap slice",
+            "command inventory",
+        ):
+            self.assertNotIn(forbidden, description_lower)
         for doc in (readme, docs_readme, security):
             self.assertIn(
                 "Public GitHub golden path: source, docs, tests, package metadata, and CI evidence.",
@@ -472,12 +483,12 @@ class PackageMetadataTests(unittest.TestCase):
 
         for expected in (
             "## First-Run Operator Path",
-            "python -m mylittleharness --root $ProductRoot bootstrap --package-smoke",
-            "python -m mylittleharness --root $TargetRoot init --dry-run",
-            "python -m mylittleharness --root $TargetRoot check",
-            "python -m mylittleharness --root $TargetRoot migrate --dry-run",
-            "python -m mylittleharness --root $TargetRoot repair --dry-run",
-            "python -m mylittleharness --root $TargetRoot detach --dry-run",
+            'python -m mylittleharness --root "$ProductRoot" bootstrap --package-smoke',
+            'python -m mylittleharness --root "$TargetRoot" init --dry-run',
+            'python -m mylittleharness --root "$TargetRoot" check',
+            'python -m mylittleharness --root "$TargetRoot" migrate --dry-run',
+            'python -m mylittleharness --root "$TargetRoot" repair --dry-run',
+            'python -m mylittleharness --root "$TargetRoot" detach --dry-run',
             "Apply modes stay explicit and target-bound",
             "they are not required first-contact steps",
         ):
@@ -768,8 +779,8 @@ class PackageMetadataTests(unittest.TestCase):
         ):
             self.assertIn(expected, adapter)
         for expected in (
-            "No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, adapters, MCP, GitHub, caches, logs, reports, local databases, package archives, or workflow execution surfaces.",
-            "The only init/attach hook mutation is the project-local Codex native hook adapter in eligible live roots",
+            "No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, adapters, MCP, GitHub, caches, logs, reports, local databases, package archives, client-specific hook adapters, or workflow execution surfaces.",
+            "Optional project-local Codex native hook mutation belongs to `hooks adapter --client codex --dry-run|--apply --scope project`",
             "No background daemon, scheduler, queue, or dashboard.",
             "`mlhd status` is the read-only local control-plane inspection surface",
             "`mlhd start`, `mlhd stop`, `mlhd run-once`, `mlhd install`, and `mlhd uninstall` require exactly one of `--dry-run` or `--apply`",
@@ -1152,7 +1163,7 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn(expected, projection_spec)
         self.assertNotIn("accepts only an empty-object tool argument shape", cli_spec)
 
-    def test_codex_hooks_docs_keep_default_project_local_adapter_outside_correctness_path(self) -> None:
+    def test_codex_hooks_docs_keep_project_local_adapter_opt_in_outside_correctness_path(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
@@ -1168,10 +1179,10 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn("not correctness prerequisites", doc)
         self.assertIn("Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest", readme)
         self.assertIn("Successful `init --apply` and compatibility `attach --apply` create the neutral `.mylittleharness/project-workflow.toml` manifest", docs_readme)
-        self.assertIn("init --apply` and compatibility `attach --apply` create or refresh project-local Codex native hooks by default", cli_spec)
+        self.assertIn("init --apply` and compatibility `attach --apply` leave project-local Codex native hooks unchanged by default", cli_spec)
         self.assertIn("Those hooks are optional non-authoritative sensors, not correctness prerequisites", cli_spec)
         self.assertIn("cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions", cli_spec)
-        self.assertIn("Fresh init/attach installs or refreshes the project-local Codex hook adapter by default", product_boundary)
+        self.assertIn("Fresh init/attach leaves project-local Codex hook files unchanged by default", product_boundary)
         self.assertIn("not correctness prerequisites", product_boundary)
         self.assertIn("Codex Trust remains client-owned", cli_spec)
         self.assertIn("user-global Codex config remains explicit", product_boundary)
@@ -1290,39 +1301,18 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn(expected, cli_spec)
 
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertIn("cold archived-plan/reference retrieval", pyproject["project"]["description"])
-        self.assertIn("route metadata", pyproject["project"]["description"])
-        self.assertIn("roadmap routes", pyproject["project"]["description"])
-        self.assertIn("hidden intake route advisor", pyproject["project"]["description"])
-        self.assertIn("hidden incubate same-topic note rail", pyproject["project"]["description"])
-        self.assertIn("hidden deterministic plan synthesis rail", pyproject["project"]["description"])
-        self.assertIn("roadmap slice frontmatter", pyproject["project"]["description"])
-        self.assertIn("bounded plan-synthesis rationale", pyproject["project"]["description"])
-        self.assertIn("target-artifact pressure reporting", pyproject["project"]["description"])
-        self.assertIn("docs write-scope impact reporting", pyproject["project"]["description"])
-        self.assertIn("current-phase-only execution metadata", pyproject["project"]["description"])
-        self.assertIn("explicit ready-for-closeout boundary", pyproject["project"]["description"])
-        self.assertIn("explicit auto_continue stop-condition diagnostics", pyproject["project"]["description"])
-        self.assertIn("hidden memory lifecycle hygiene rail", pyproject["project"]["description"])
-        self.assertIn("hidden bounded roadmap item mutation rail", pyproject["project"]["description"])
-        self.assertIn("advisory execution-slice fields", pyproject["project"]["description"])
-        self.assertIn("relationship hygiene scan diagnostics", pyproject["project"]["description"])
-        self.assertIn("product-target artifact status", pyproject["project"]["description"])
-        self.assertIn("coverage-aware incubation auto-archive", pyproject["project"]["description"])
-        self.assertIn("text audit and entry coverage suggestions", pyproject["project"]["description"])
-        self.assertIn("reciprocal source-incubation metadata", pyproject["project"]["description"])
-        self.assertIn("non-owning source-incubation reuse provenance", pyproject["project"]["description"])
-        self.assertIn("relationship frontmatter block recovery", pyproject["project"]["description"])
-        self.assertIn("hidden plan/writeback roadmap relationship sync", pyproject["project"]["description"])
-        self.assertIn("project-state closeout authority fallback", pyproject["project"]["description"])
-        self.assertIn("product_source_root writeback", pyproject["project"]["description"])
-        self.assertIn("fix-candidate tagging", pyproject["project"]["description"])
-        self.assertIn("archive-covered Entry Coverage transactions", pyproject["project"]["description"])
-        self.assertIn("plan-identity carry/replace guardrail", pyproject["project"]["description"])
-        self.assertIn("post-writeback and compact-only whole-state compaction", pyproject["project"]["description"])
-        self.assertIn("optional proof/evidence and agent run evidence route records", pyproject["project"]["description"])
-        self.assertIn("report-only grain diagnostics and archived-plan calibration samples", pyproject["project"]["description"])
-        self.assertIn("hidden deterministic command intent suggestions", pyproject["project"]["description"])
+        description = pyproject["project"]["description"]
+        self.assertIn("Repo-visible workflow safety utility", description)
+        self.assertIn("target repositories", description)
+        self.assertLessEqual(len(description), 160)
+        for forbidden in (
+            "cold archived-plan/reference retrieval",
+            "route metadata",
+            "hidden intake route advisor",
+            "roadmap slice frontmatter",
+            "command intent suggestions",
+        ):
+            self.assertNotIn(forbidden, description)
 
     def test_phase_execution_policy_docs_are_current_phase_only(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -1398,7 +1388,10 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("Entry Coverage", capability_roadmap)
         self.assertIn("Route output is advisory only", readme)
         self.assertIn("optional `project/verification/*.md` proof/evidence records", readme)
-        self.assertIn("decision, ADR, and roadmap routes", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn(
+            "Repo-visible workflow safety utility",
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+        )
 
     def test_route_metadata_diagnostics_docs_are_read_only(self) -> None:
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")

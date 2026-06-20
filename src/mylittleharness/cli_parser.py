@@ -630,7 +630,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--to-root",
         dest="to_root",
         help=(
-            "Destination central MyLittleHarness-dev live operating root for the canonical incubation note and "
+            "Destination central MLH product-feedback live operating root for the canonical incubation note and "
             f"cluster metadata. Defaults to ${META_FEEDBACK_ROOT_ENV_VAR} when set, otherwise --root."
         ),
     )

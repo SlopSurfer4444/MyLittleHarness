@@ -402,7 +402,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         ("meta feedback", "fix candidate", "rough edge", "agent friction", "route discovery", "mlh debt"),
         "mylittleharness --root <mlh-dev-root> meta-feedback --dry-run --from-root <observed-root> --topic \"<topic>\" --note \"<note>\"",
         ("mylittleharness --root <mlh-dev-root> meta-feedback --apply --from-root <observed-root> --topic \"<topic>\" --note \"<note>\"",),
-        "central MLH operating root for product debt; observed root is provenance only",
+        "configured central MLH product-feedback root for product debt; observed root is provenance only",
         "meta-feedback records operating memory only; roadmap promotion stays an explicit roadmap command and cannot approve release removal, lifecycle movement, archive, staging, commit, or next-plan opening",
     ),
     CommandIntent(

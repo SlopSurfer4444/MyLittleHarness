@@ -2,14 +2,14 @@
 
 Prepared: 2026-05-24
 
-Durable source-grounded preparation artifact for an external independent audit of the MyLittleHarness product repository: `C:\AIDev\MyLittleHarness`.
+Durable source-grounded preparation artifact for an external independent audit of a MyLittleHarness product repository checkout.
 
 This file is meant for a future ChatGPT Pro Agent without access to the chat that produced it.
 
 ## Scope Rules
 
-- Audit only the product repository `C:\AIDev\MyLittleHarness`.
-- Do not inventory or analyze `MyLittleHarness-dev`, operating-root/dev folders, local workspace repos, runtime caches, generated local state, or sibling repositories.
+- Audit only the product repository checkout.
+- Do not inventory or analyze private development or operating roots, local workspace repos, runtime caches, generated local state, or sibling repositories.
 - Product-file references to an operating root/dev root are product-model context only; do not follow those paths.
 - Exclude meta-feedback as a standalone audit topic. Do not audit the meta-feedback route, capture flow, env routing, tests, docs, prompts, or developer-local feedback workflow as separate audit blocks. Incidental references may be noted only as excluded context.
 - This artifact maps audit surfaces and questions; it is not a correctness verdict.
@@ -261,10 +261,10 @@ Each block gives: title; why it exists; files/modules/docs/tests; visible promis
 ```text
 You are performing an independent source-grounded audit of the MyLittleHarness product repository only.
 
-Repository root: C:\AIDev\MyLittleHarness
+Repository root: <product-repo-root>
 
 Hard scope rules:
-- Do not inspect or analyze MyLittleHarness-dev, local workspace repos, runtime cache, generated local state, or neighboring repositories.
+- Do not inspect or analyze private development roots, local workspace repos, runtime cache, generated local state, or neighboring repositories.
 - If product files mention an operating root/dev root, treat that only as product-model context and do not follow the path.
 - Exclude meta-feedback as a standalone audit topic. Do not audit the meta-feedback route, capture flow, env routing, tests, docs, prompts, or developer-local feedback workflow.
 - Do not fix code, commit, stage, or mutate product behavior during audit unless explicitly asked in a separate task.
@@ -325,7 +325,7 @@ Perform a deep source-grounded audit of this MyLittleHarness audit block:
 
 <paste one block from docs/external-audit-prep.md>
 
-Repository root: C:\AIDev\MyLittleHarness
+Repository root: <product-repo-root>
 
 Use only product repository files. Do not inspect operating-root/dev-root/workspace/cache/sibling repositories. Exclude meta-feedback as a standalone topic.
 

@@ -172,7 +172,7 @@ python -m mylittleharness --root "$TargetRoot" detach --dry-run
 ```
 
 Apply modes are intentionally explicit. Prefer dry-run first.
-Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest and creates or refreshes project-local Codex native hooks by default (`.codex/hooks.json` plus the generated helper). `migrate --apply` copies an existing legacy `.codex/project-workflow.toml` to the neutral path, preserves the legacy file, and refuses missing legacy files, divergent existing neutral manifests, symlinked targets, and root escapes. `hooks adapter --client codex --dry-run|--apply --scope project` remains the explicit refresh/recovery rail. Those hooks are optional non-authoritative sensors, not correctness prerequisites; Codex Trust and user-global client configuration remain client-owned.
+Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest and does not create client-specific hook adapters by default. `migrate --apply` copies an existing legacy `.codex/project-workflow.toml` to the neutral path, preserves the legacy file, and refuses missing legacy files, divergent existing neutral manifests, symlinked targets, and root escapes. Codex users can opt in later with `hooks adapter --client codex --dry-run|--apply --scope project`, which writes `.codex/hooks.json` plus the generated helper only through that reviewed rail. Those hooks are optional non-authoritative sensors, not correctness prerequisites; Codex Trust and user-global client configuration remain client-owned.
 
 ---
 
@@ -340,16 +340,20 @@ non-authoritative.
 ## First-Run Operator Path
 
 ```bash
-python -m mylittleharness --root $ProductRoot bootstrap --package-smoke
-python -m mylittleharness --root $TargetRoot init --dry-run
-python -m mylittleharness --root $TargetRoot check
-python -m mylittleharness --root $TargetRoot migrate --dry-run
-python -m mylittleharness --root $TargetRoot repair --dry-run
-python -m mylittleharness --root $TargetRoot detach --dry-run
+export PYTHONPATH=src
+ProductRoot="$(pwd)"
+TargetRoot="/path/to/target"
+
+python -m mylittleharness --root "$ProductRoot" bootstrap --package-smoke
+python -m mylittleharness --root "$TargetRoot" init --dry-run
+python -m mylittleharness --root "$TargetRoot" check
+python -m mylittleharness --root "$TargetRoot" migrate --dry-run
+python -m mylittleharness --root "$TargetRoot" repair --dry-run
+python -m mylittleharness --root "$TargetRoot" detach --dry-run
 ```
 
 Apply modes stay explicit and target-bound after dry-run review. `bootstrap --inspect`, `tasks --inspect`, hooks, CI, MCP clients, semantic providers, global installation, and workstation adoption can help later; they are not required first-contact steps.
-When `init --apply` or compatibility `attach --apply` writes the operating scaffold, it writes `.mylittleharness/project-workflow.toml` and keeps project-local Codex native hooks current by default without touching Codex Trust or user-global config. `migrate --apply` is only for legacy roots and copies `.codex/project-workflow.toml` to the neutral path without deleting the legacy file. Project-local Codex native hooks remain optional non-authoritative sensors, not correctness prerequisites.
+When `init --apply` or compatibility `attach --apply` writes the operating scaffold, it writes `.mylittleharness/project-workflow.toml` and leaves project-local Codex native hooks unchanged by default. `migrate --apply` is only for legacy roots and copies `.codex/project-workflow.toml` to the neutral path without deleting the legacy file. Project-local Codex native hooks remain optional non-authoritative sensors, not correctness prerequisites, and are installed or refreshed only by `hooks adapter --client codex --dry-run|--apply --scope project`.
 
 Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible files plus CLI reports. Start with `AGENTS.md`, `.mylittleharness/project-workflow.toml`, and `project/project-state.md`; use `.codex/project-workflow.toml` only as the legacy fallback manifest when the neutral manifest is absent. Read `project/implementation-plan.md` only when `plan_status = "active"` or the user asks about plan, phase, or closeout. When a plan is active, `active_phase` and `phase_status` are first-class continuation pointers. `status`/`check` report a compact lifecycle route table for live roots, and `intelligence --focus routes` prints the same read-only route table for the `project/roadmap.md` sequencing route, decision/do-not-revisit records, ADR records, and optional `project/verification/*.md` proof/evidence records. For fuzzy repo, lifecycle, impact, or product-source navigation, start with `dashboard --inspect` or `dashboard --inspect --json` as the cockpit packet, then use `intelligence --query`, optional `adapter --client-config --target mcp-read-projection`, and `rg` or direct file reads for exact verification. Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow, but no Codex skill or generated docs-impact report is required for v1.
 

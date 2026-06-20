@@ -368,8 +368,8 @@ def _request_errors(inventory: Inventory, request: MetaFeedbackRequest) -> list[
                 "error",
                 "meta-feedback-central-root-refused",
                 (
-                    f"destination must be the central {CENTRAL_META_FEEDBACK_PROJECT} live operating root; "
-                    f"use --to-root <{CENTRAL_META_FEEDBACK_PROJECT}> or {META_FEEDBACK_ROOT_ENV_VAR}; "
+                    "destination must be the configured central MLH product-feedback live operating root; "
+                    f"use --to-root <central-root> or {META_FEEDBACK_ROOT_ENV_VAR}; "
                     "the observed source root is provenance only and must not receive canonical MLH product debt"
                 ),
             )

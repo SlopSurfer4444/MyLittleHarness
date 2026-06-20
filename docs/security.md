@@ -113,12 +113,14 @@ or return a client-specific deterministic block for unsafe shortcuts. They must
 not silently repair files, install hidden services, archive plans, commit
 changes, or become the only condition for correctness.
 
-Fresh `init --apply` and compatibility `attach --apply` install or refresh the
-project-local Codex native hook adapter by default. They do not trust hooks in
-Codex, write user-global client configuration, install MCP, or configure other
-native clients. Codex, Claude Code, GitHub Copilot, VS Code, MCP, and other
-adapters remain advisory helpers; their output remains advisory even when a user
-installs them through a reviewed adapter command.
+Fresh `init --apply` and compatibility `attach --apply` do not install or
+refresh client-specific native hook adapters by default. The project-local Codex
+native hook adapter is installed or refreshed only through the explicit `hooks
+adapter --client codex --dry-run|--apply --scope project` rail. That rail does
+not trust hooks in Codex, write user-global client configuration, install MCP,
+or configure other native clients. Codex, Claude Code, GitHub Copilot, VS Code,
+MCP, and other adapters remain advisory helpers; their output remains advisory
+even when a user installs them through a reviewed adapter command.
 
 ## Release Readiness Notes
 
