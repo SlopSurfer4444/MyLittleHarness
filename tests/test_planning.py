@@ -236,6 +236,58 @@ class PlanningTests(unittest.TestCase):
             self.assertIn("research quality gate blocks planning", rendered)
             self.assertIn("requires source_hashes for source/evidence refs", rendered)
 
+    def test_plan_dry_run_anchors_shared_source_excerpt_to_requested_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/thread-sweep-addendum.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "thread sweep addendum"\n'
+                "---\n"
+                "# Thread Sweep\n\n"
+                "[MLH-Fix-Candidate] Shared addendum packet for multiple candidates.\n\n"
+                "Classification intent before roadmap promotion:\n\n"
+                "- A1 Plan Synthesis Can Bind Neighboring Candidate Context: anchor to candidate ids and source lines.\n"
+                "- A2 Roadmap Relationship Vocabulary Is Too Opaque: explain legal relationship fields.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Addendum A1\n\n"
+                "- `id`: `operator-friction-a01-plan-synthesis-source-anchoring`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `operator-friction-a01-plan-synthesis-source-anchoring`\n"
+                "- `slice_goal`: `Anchor plan synthesis to candidate ids.`\n"
+                "- `slice_members`: `[\"operator-friction-a01-plan-synthesis-source-anchoring\"]`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `target_artifacts`: `[\"project/project-state.md\"]`\n"
+                "- `verification_summary`: `Dry-run should not bind neighboring candidate prose.`\n"
+                "- `candidate_numbers`: `A1`\n",
+                encoding="utf-8",
+            )
+
+            findings = plan_dry_run_findings(
+                load_inventory(root),
+                make_plan_request(
+                    None,
+                    None,
+                    None,
+                    roadmap_item="operator-friction-a01-plan-synthesis-source-anchoring",
+                    only_requested_item=True,
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertIn("candidate task:", rendered)
+            self.assertIn("A1 Plan Synthesis Can Bind Neighboring Candidate Context", rendered)
+            self.assertIn(f"source_anchor: {source_rel}:", rendered)
+            self.assertNotIn("A2 Roadmap Relationship Vocabulary Is Too Opaque", rendered)
+
     def test_renderer_includes_docs_scope_when_docs_decision_will_be_updated(self) -> None:
         request = make_plan_request(
             "Docs Scope",

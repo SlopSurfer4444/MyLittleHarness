@@ -136,8 +136,15 @@ class VerificationGateProfile:
 class DocTargetExistenceGate:
     report: RoadmapSynthesisReport
     missing_targets: tuple[str, ...] = ()
+    missing_artifact_targets: tuple[str, ...] = ()
     candidate_summaries: tuple[str, ...] = ()
     target_root: str = ""
+
+
+@dataclass(frozen=True)
+class SourceExcerptParagraph:
+    text: str
+    line: int
 
 
 def make_plan_request(
@@ -3108,22 +3115,38 @@ def _synthesis_report_with_contract_targets(
 
 
 def _doc_target_existence_gate(inventory: Inventory, report: RoadmapSynthesisReport) -> DocTargetExistenceGate:
-    target_root = _verification_target_root(inventory)
+    product_target_root = _verification_target_root(inventory)
     effective_targets: list[str] = []
     missing_targets: list[str] = []
+    missing_artifact_targets: list[str] = []
     candidate_summaries: list[str] = []
     for target in report.target_artifacts:
         normalized = normalize_route_path(target)
-        if is_exact_doc_target(normalized) and not doc_target_exists(target_root, normalized):
+        artifact_root = _plan_target_artifact_root(inventory, normalized, product_target_root)
+        if (
+            artifact_root is not None
+            and _is_exact_plan_target_artifact(normalized)
+            and not (artifact_root / normalized).is_file()
+        ):
+            if not is_exact_doc_target(normalized):
+                missing_artifact_targets.append(f"{normalized} ({artifact_root})")
+            elif not doc_target_exists(artifact_root, normalized):
+                missing_targets.append(normalized)
+                candidates = existing_doc_target_candidates(artifact_root, normalized)
+                if candidates:
+                    candidate_summaries.append(f"{normalized} -> {', '.join(candidates)}")
+                effective_targets.append(DOCS_WRITE_SCOPE_PLACEHOLDER)
+                continue
+        if artifact_root is None and is_exact_doc_target(normalized) and not doc_target_exists(product_target_root, normalized):
             missing_targets.append(normalized)
-            candidates = existing_doc_target_candidates(target_root, normalized)
+            candidates = existing_doc_target_candidates(product_target_root, normalized)
             if candidates:
                 candidate_summaries.append(f"{normalized} -> {', '.join(candidates)}")
             effective_targets.append(DOCS_WRITE_SCOPE_PLACEHOLDER)
         else:
             effective_targets.append(target)
-    if not missing_targets:
-        return DocTargetExistenceGate(report=report, target_root=str(target_root))
+    if not missing_targets and not missing_artifact_targets:
+        return DocTargetExistenceGate(report=report, target_root=str(product_target_root))
 
     gated_targets = tuple(_dedupe_nonempty(effective_targets))
     bundle_signals = tuple(
@@ -3138,9 +3161,32 @@ def _doc_target_existence_gate(inventory: Inventory, report: RoadmapSynthesisRep
     return DocTargetExistenceGate(
         report=gated_report,
         missing_targets=tuple(_dedupe_nonempty(missing_targets)),
+        missing_artifact_targets=tuple(_dedupe_nonempty(missing_artifact_targets)),
         candidate_summaries=tuple(_dedupe_nonempty(candidate_summaries)),
-        target_root=str(target_root),
+        target_root=str(product_target_root),
     )
+
+
+def _plan_target_artifact_root(inventory: Inventory, target: str, product_target_root: Path) -> Path | None:
+    ownerships = target_artifact_ownerships(inventory, (target,))
+    if not ownerships:
+        return None
+    ownership = ownerships[0]
+    if ownership.ownership in {"operating-memory-route", "archive-evidence"}:
+        return inventory.root
+    if ownership.ownership in {"product-source-artifact", "product-compat-fixture"}:
+        return product_target_root
+    return None
+
+
+def _is_exact_plan_target_artifact(target: str) -> bool:
+    normalized = normalize_route_path(target)
+    if not _looks_like_target_artifact_route(normalized):
+        return False
+    if "*" in normalized or "<" in normalized or ">" in normalized or normalized.endswith("/"):
+        return False
+    leaf = normalized.rsplit("/", 1)[-1]
+    return "." in leaf or normalized in {"AGENTS.md", "README.md", "pyproject.toml", "uv.lock"}
 
 
 def _roadmap_source_incubation(inventory: Inventory, roadmap_item: str) -> str:
@@ -3243,24 +3289,33 @@ def _roadmap_source_excerpt(inventory: Inventory, fields: dict[str, object]) -> 
         text = source_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return ""
-    body = _body_without_frontmatter(text)
-    paragraphs = _candidate_paragraphs(body)
-    tagged = _select_source_excerpt_paragraph(paragraphs, text)
-    excerpt = _clean_candidate_text(tagged or (paragraphs[0] if paragraphs else ""))
-    if tagged:
+    body, body_start_line = _body_without_frontmatter_with_start_line(text)
+    paragraphs = _candidate_paragraphs(body, start_line=body_start_line)
+    selected = _select_source_excerpt_paragraph(paragraphs, text, fields)
+    excerpt = _clean_candidate_text(selected.text if selected else (paragraphs[0].text if paragraphs else ""))
+    if selected:
         excerpt = _source_excerpt_with_hints(excerpt, text)
+        if selected.line > 0:
+            excerpt = f"{excerpt}; source_anchor: {source_rel}:{selected.line}"
     return excerpt
 
 
-def _select_source_excerpt_paragraph(paragraphs: tuple[str, ...], source_text: str) -> str:
-    tagged = tuple(paragraph for paragraph in paragraphs if paragraph.lstrip().startswith("[MLH-Fix-Candidate]"))
+def _select_source_excerpt_paragraph(
+    paragraphs: tuple[SourceExcerptParagraph, ...],
+    source_text: str,
+    fields: dict[str, object],
+) -> SourceExcerptParagraph | None:
+    anchored = _candidate_anchored_source_paragraph(paragraphs, fields)
+    if anchored is not None:
+        return anchored
+    tagged = tuple(paragraph for paragraph in paragraphs if paragraph.text.lstrip().startswith("[MLH-Fix-Candidate]"))
     if not tagged:
-        tagged = tuple(paragraph for paragraph in paragraphs if "[MLH-Fix-Candidate]" in paragraph)
+        tagged = tuple(paragraph for paragraph in paragraphs if "[MLH-Fix-Candidate]" in paragraph.text)
     if not tagged:
-        return ""
-    enriched: list[tuple[str, str]] = []
+        return None
+    enriched: list[tuple[SourceExcerptParagraph, str]] = []
     for paragraph in tagged:
-        cleaned = _clean_candidate_text(paragraph)
+        cleaned = _clean_candidate_text(paragraph.text)
         enriched.append((paragraph, _source_excerpt_with_hints(cleaned, source_text)))
     for paragraph, excerpt in reversed(enriched):
         if _source_excerpt_has_route_hints(excerpt) and not _source_excerpt_is_recovery_only(excerpt):
@@ -3271,6 +3326,49 @@ def _select_source_excerpt_paragraph(paragraphs: tuple[str, ...], source_text: s
     return tagged[-1]
 
 
+def _candidate_anchored_source_paragraph(
+    paragraphs: tuple[SourceExcerptParagraph, ...],
+    fields: dict[str, object],
+) -> SourceExcerptParagraph | None:
+    terms = _source_excerpt_anchor_terms(fields)
+    if not terms:
+        return None
+    for paragraph in paragraphs:
+        folded = paragraph.text.casefold()
+        if any(_candidate_anchor_term_matches(folded, term) for term in terms):
+            return paragraph
+    return None
+
+
+def _source_excerpt_anchor_terms(fields: dict[str, object]) -> tuple[str, ...]:
+    terms: list[str] = []
+    for value in _field_list(fields.get("candidate_numbers")):
+        normalized = str(value or "").strip()
+        if normalized:
+            terms.append(normalized)
+    for value in (fields.get("id"), fields.get("execution_slice")):
+        candidate_label = _candidate_label_from_identifier(str(value or ""))
+        if candidate_label:
+            terms.append(candidate_label)
+    return tuple(_dedupe_nonempty(terms))
+
+
+def _candidate_label_from_identifier(value: str) -> str:
+    match = re.search(r"(?:^|[-_\s])a0*([1-9]\d*)\b", str(value or ""), flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return f"A{match.group(1)}"
+
+
+def _candidate_anchor_term_matches(folded_text: str, term: str) -> bool:
+    folded_term = term.casefold()
+    if not folded_term:
+        return False
+    if re.fullmatch(r"[a-z]\d+", folded_term):
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(folded_term)}(?![a-z0-9])", folded_text))
+    return folded_term in folded_text
+
+
 def _roadmap_domain_context(roadmap_context: str, source_excerpt: str, fields: dict[str, object]) -> str:
     if _source_excerpt_should_lead(fields, source_excerpt):
         return source_excerpt
@@ -3278,29 +3376,50 @@ def _roadmap_domain_context(roadmap_context: str, source_excerpt: str, fields: d
 
 
 def _body_without_frontmatter(text: str) -> str:
+    body, _start_line = _body_without_frontmatter_with_start_line(text)
+    return body
+
+
+def _body_without_frontmatter_with_start_line(text: str) -> tuple[str, int]:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return text
+        return text, 1
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
-            return "\n".join(lines[index + 1 :])
-    return text
+            return "\n".join(lines[index + 1 :]), index + 2
+    return text, 1
 
 
-def _candidate_paragraphs(text: str) -> tuple[str, ...]:
-    paragraphs: list[str] = []
+def _candidate_paragraphs(text: str, *, start_line: int = 1) -> tuple[SourceExcerptParagraph, ...]:
+    paragraphs: list[SourceExcerptParagraph] = []
     current: list[str] = []
-    for raw_line in text.splitlines():
+    current_start = start_line
+    for line_number, raw_line in enumerate(text.splitlines(), start=start_line):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             if current:
-                paragraphs.append(" ".join(current))
+                paragraphs.append(SourceExcerptParagraph(" ".join(current), current_start))
                 current = []
+            current_start = line_number + 1
             continue
+        if current and _starts_candidate_bullet(line):
+            paragraphs.append(SourceExcerptParagraph(" ".join(current), current_start))
+            current = []
+            current_start = line_number
+        elif not current:
+            current_start = line_number
         current.append(line)
     if current:
-        paragraphs.append(" ".join(current))
-    return tuple(paragraph for paragraph in (re.sub(r"\s+", " ", item).strip() for item in paragraphs) if paragraph)
+        paragraphs.append(SourceExcerptParagraph(" ".join(current), current_start))
+    return tuple(
+        SourceExcerptParagraph(cleaned, paragraph.line)
+        for paragraph in paragraphs
+        if (cleaned := re.sub(r"\s+", " ", paragraph.text).strip())
+    )
+
+
+def _starts_candidate_bullet(line: str) -> bool:
+    return bool(re.match(r"^[-*]\s+(?:[A-Z]\d+|Candidate\s+\d+)\b", line, flags=re.IGNORECASE))
 
 
 def _source_excerpt_with_hints(excerpt: str, source_text: str) -> str:
@@ -3737,22 +3856,38 @@ def _plan_synthesis_findings(inventory: Inventory, report: RoadmapSynthesisRepor
 
 
 def _plan_doc_target_existence_findings(gate: DocTargetExistenceGate, apply: bool) -> list[Finding]:
-    if not gate.missing_targets:
+    if not gate.missing_targets and not gate.missing_artifact_targets:
         return []
     prefix = "" if apply else "would "
-    candidates = "; ".join(gate.candidate_summaries) if gate.candidate_summaries else "<none found>"
-    return [
-        Finding(
-            "warn",
-            "plan-doc-target-missing",
-            (
-                f"{prefix}gate missing exact docs target(s) in product/source root {gate.target_root}: "
-                f"{', '.join(gate.missing_targets)}; candidates: {candidates}; "
-                "retarget to an existing docs/spec/template file or keep docs_decision='uncertain' before docs mutation"
-            ),
-            DEFAULT_PLAN_REL,
+    findings: list[Finding] = []
+    if gate.missing_artifact_targets:
+        findings.append(
+            Finding(
+                "warn",
+                "plan-target-artifact-missing",
+                (
+                    f"{prefix}report missing exact target_artifact(s) before active-plan write: "
+                    f"{', '.join(gate.missing_artifact_targets)}; verify this is an intentional new-file target "
+                    "or retarget before apply"
+                ),
+                DEFAULT_PLAN_REL,
+            )
         )
-    ]
+    if gate.missing_targets:
+        candidates = "; ".join(gate.candidate_summaries) if gate.candidate_summaries else "<none found>"
+        findings.append(
+            Finding(
+                "warn",
+                "plan-doc-target-missing",
+                (
+                    f"{prefix}gate missing exact docs target(s) in product/source root {gate.target_root}: "
+                    f"{', '.join(gate.missing_targets)}; candidates: {candidates}; "
+                    "retarget to an existing docs/spec/template file or keep docs_decision='uncertain' before docs mutation"
+                ),
+                DEFAULT_PLAN_REL,
+            )
+        )
+    return findings
 
 
 def _target_artifact_ownership_findings(

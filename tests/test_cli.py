@@ -22315,6 +22315,52 @@ class CliTests(unittest.TestCase):
                     self.assertIn("strange.bin->unknown", rendered)
                     self.assertIn("no automatic mirror or product mutation is implied", rendered)
 
+    def test_plan_dry_run_reports_missing_exact_target_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operating")
+            product_root = Path(tmp) / "product"
+            product_root.mkdir()
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"\n',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Missing Target Gate\n\n"
+                "- `id`: `missing-target-gate`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `1`\n"
+                "- `execution_slice`: `missing-target-gate`\n"
+                "- `slice_goal`: `Report missing exact target artifacts before apply.`\n"
+                "- `slice_members`: `[\"missing-target-gate\"]`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/missing_target.py\"]`\n"
+                "- `verification_summary`: `Dry-run reports nonexistent synthesized targets before apply.`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "plan", "--dry-run", "--roadmap-item", "missing-target-gate", "--only-requested-item"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("plan-target-artifact-missing", rendered)
+            self.assertIn("src/mylittleharness/missing_target.py", rendered)
+            self.assertIn("before active-plan write", rendered)
+
     def test_plan_apply_marks_verification_unresolved_when_no_repo_visible_gate_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp) / "operating")
