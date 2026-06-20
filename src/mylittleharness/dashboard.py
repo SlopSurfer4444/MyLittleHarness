@@ -22,7 +22,7 @@ from .projection_artifacts import (
 )
 from .projection_index import inspect_projection_index
 from .roadmap import roadmap_items_for_diagnostics
-from .reporting import command_action_report_dict
+from .reporting import add_compact_summary_skipped, command_action_report_dict, compact_summary_for_report
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .safe_commands import safe_item_id
 from .vcs import worktree_coordination_findings
@@ -122,6 +122,25 @@ def dashboard_payload(
         cache_posture=cache_posture,
         accelerator_adoption=accelerator_adoption,
     )
+    projection_payload = _dashboard_projection_payload(
+        inventory,
+        detail=projection_mode,
+        requested_detail=detail_mode,
+        projection=projection,
+    )
+    summary = compact_summary_for_report(
+        "dashboard --inspect",
+        _dashboard_result_for(findings),
+        findings,
+        sections=sections,
+    )
+    if projection_payload.get("full_projection_skipped"):
+        add_compact_summary_skipped(
+            summary,
+            section="Projection",
+            code="dashboard-projection-full-skipped",
+            reason=str(projection_payload.get("mode") or projection_mode),
+        )
     return {
         "schema": DASHBOARD_SCHEMA,
         "root": str(inventory.root),
@@ -131,16 +150,12 @@ def dashboard_payload(
         "mode": projection_mode,
         "degraded": projection_mode == "degraded",
         "source_refs": _dashboard_source_refs(inventory, sections),
+        "summary": summary,
         "lifecycle": _lifecycle_payload(inventory),
         "roadmap": _roadmap_payload(inventory),
         "mlhd": mlhd_freshness_payload(inventory),
         "contextMemory": context_memory_capsule_payload(inventory),
-        "projection": _dashboard_projection_payload(
-            inventory,
-            detail=projection_mode,
-            requested_detail=detail_mode,
-            projection=projection,
-        ),
+        "projection": projection_payload,
         "cachePosture": cache_posture,
         "agentPacket": agent_packet,
         "authorityCards": agent_packet.get("authorityCards", []),
@@ -163,6 +178,14 @@ def dashboard_payload(
             "approves lifecycle movement, archive, staging, commit, push, release, dispatcher work, or daemon state"
         ),
     }
+
+
+def _dashboard_result_for(findings: list[Finding]) -> str:
+    if any(finding.severity == "error" for finding in findings):
+        return "error"
+    if any(finding.severity == "warn" for finding in findings):
+        return "warn"
+    return "ok"
 
 
 def dashboard_check_findings(inventory: Inventory, code_prefix: str = "check-dashboard") -> list[Finding]:

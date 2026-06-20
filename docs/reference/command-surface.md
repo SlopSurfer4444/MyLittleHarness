@@ -98,6 +98,15 @@ provenance, related research, docs decision, and lifecycle boundaries.
 Some navigation commands can report stale generated projection cache and suggest
 refresh commands. That suggestion is not cache truth or lifecycle approval.
 
+`check --json` and `dashboard --inspect --json` include a top-level `summary`
+object with schema `mylittleharness.compact-report-summary.v1`. The summary is
+a compact advisory index for automation: status, work-result outcome, severity
+counts, section summaries, timeout/skipped/not-checked buckets, nonblocking and
+known-environment warning classification, next-safe-route count, command-action
+count, and explicit authority flags. It keeps warnings visible, does not change
+exit codes, and cannot approve lifecycle movement, archive, roadmap status, Git
+state, release, provider routing, or cache truth.
+
 ## Machine-Readable Audit Surface
 
 `manifest --inspect --json` includes a `command_surface` array with schema

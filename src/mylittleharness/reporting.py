@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
 import re
@@ -382,12 +383,21 @@ def render_json_report(
     sections: list[tuple[str, list[Finding]]] | None = None,
     route_manifest: tuple[dict[str, object], ...] | None = None,
 ) -> str:
+    work_result = work_result_capsule_for_report(command, result, findings, suggestions)
     payload: dict[str, object] = {
         "schema_version": "mylittleharness.report.v1",
         "command": command,
         "root": str(root),
         "result": {"status": result, "advisory": True},
-        "work_result": work_result_to_report_dict(work_result_capsule_for_report(command, result, findings, suggestions)),
+        "work_result": work_result_to_report_dict(work_result),
+        "summary": compact_summary_for_report(
+            command,
+            result,
+            findings,
+            suggestions,
+            sections=sections,
+            work_result_outcome=work_result.outcome,
+        ),
         "next_safe_routes": [next_safe_route_to_report_dict(route) for route in next_safe_routes_for_report(findings)],
         "command_actions": [command_action_to_report_dict(action) for action in command_actions_for_report(findings)],
         "boundary": {
@@ -411,6 +421,211 @@ def render_json_report(
     if route_manifest is not None:
         payload["route_manifest"] = list(route_manifest)
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
+
+
+def compact_summary_for_report(
+    command: str,
+    result: str,
+    findings: list[Finding],
+    suggestions: list[str] | tuple[str, ...] = (),
+    *,
+    sections: list[tuple[str, list[Finding]]] | None = None,
+    report_scope: dict[str, object] | None = None,
+    work_result_outcome: str = "",
+) -> dict[str, object]:
+    warnings = [finding for finding in findings if finding.severity == "warn"]
+    nonblocking_warnings = [finding for finding in warnings if _is_nonblocking_warning(finding)]
+    known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
+    return {
+        "schema": "mylittleharness.compact-report-summary.v1",
+        "command": command,
+        "status": result,
+        "work_result_outcome": work_result_outcome,
+        "finding_count": len(findings),
+        "section_count": len(sections or []),
+        "severity_counts": _severity_counts(findings),
+        "section_summaries": _section_summaries(sections or []),
+        "outcomes": {
+            "timeout": _outcome_bucket(findings, ("timeout", "timed-out", "timed out")),
+            "skipped": _outcome_bucket(findings, ("skipped", "-skip", " skip ")),
+            "not_checked": _not_checked_bucket(report_scope),
+        },
+        "warning_classification": {
+            "warning_count": len(warnings),
+            "nonblocking_warning_count": len(nonblocking_warnings),
+            "blocking_warning_count": len(warnings) - len(nonblocking_warnings),
+            "known_environment_warning_count": len(known_environment_warnings),
+            "nonblocking_warning_codes_sample": _finding_code_sample(nonblocking_warnings),
+            "blocking_warning_codes_sample": _finding_code_sample(
+                [finding for finding in warnings if finding not in nonblocking_warnings]
+            ),
+            "classification_boundary": (
+                "classification keeps warnings visible for operator review; it does not suppress warnings, "
+                "change exit codes, or approve lifecycle, archive, roadmap, Git, provider, cache, or release actions"
+            ),
+        },
+        "next_safe_routes": _next_safe_route_summary(findings),
+        "command_actions": {
+            "count": len(command_actions_for_report(findings)),
+        },
+        "suggestion_count": len(suggestions),
+        "authority": {
+            "reports_advisory": True,
+            "repo_visible_files_authoritative": True,
+            "apply_rails_required_for_mutation": True,
+            "approves_lifecycle": False,
+            "approves_archive": False,
+            "approves_roadmap_done": False,
+            "approves_git": False,
+            "approves_release": False,
+            "approves_provider_routing": False,
+            "approves_cache_truth": False,
+        },
+    }
+
+
+def apply_report_scope_to_compact_summary(summary: dict[str, object], report_scope: dict[str, object]) -> None:
+    outcomes = summary.get("outcomes")
+    if isinstance(outcomes, dict):
+        outcomes["not_checked"] = _not_checked_bucket(report_scope)
+
+
+def add_compact_summary_skipped(
+    summary: dict[str, object],
+    *,
+    section: str,
+    code: str,
+    reason: str,
+) -> None:
+    outcomes = summary.get("outcomes")
+    if not isinstance(outcomes, dict):
+        return
+    skipped = outcomes.get("skipped")
+    if not isinstance(skipped, dict):
+        return
+    items = skipped.setdefault("items", [])
+    if isinstance(items, list):
+        items.append({"section": section, "code": code, "reason": reason})
+    codes = skipped.setdefault("codes", [])
+    if isinstance(codes, list) and code not in codes:
+        codes.append(code)
+    sections = skipped.setdefault("sections", [])
+    if isinstance(sections, list) and section not in sections:
+        sections.append(section)
+    skipped["count"] = int(skipped.get("count") or 0) + 1
+    skipped["detected"] = True
+
+
+def _severity_counts(findings: list[Finding]) -> dict[str, int]:
+    counts = Counter(finding.severity for finding in findings)
+    return {
+        "error": counts.get("error", 0),
+        "warn": counts.get("warn", 0),
+        "info": counts.get("info", 0),
+    }
+
+
+def _section_summaries(sections: list[tuple[str, list[Finding]]]) -> list[dict[str, object]]:
+    return [
+        {
+            "name": section_name,
+            "finding_count": len(section_findings),
+            "severity_counts": _severity_counts(section_findings),
+        }
+        for section_name, section_findings in sections
+    ]
+
+
+def _finding_search_text(finding: Finding) -> str:
+    return f"{finding.code} {finding.message}".replace("_", "-").casefold()
+
+
+def _outcome_bucket(findings: list[Finding], markers: tuple[str, ...]) -> dict[str, object]:
+    matches = [
+        finding
+        for finding in findings
+        if any(marker in _finding_search_text(finding) for marker in markers)
+    ]
+    return {
+        "detected": bool(matches),
+        "count": len(matches),
+        "codes": _finding_code_sample(matches),
+        "sections": [],
+        "items": [
+            {
+                "code": finding.code,
+                "severity": finding.severity,
+                "source": finding.source or "",
+            }
+            for finding in matches[:5]
+        ],
+    }
+
+
+def _not_checked_bucket(report_scope: dict[str, object] | None) -> dict[str, object]:
+    omitted = report_scope.get("omitted_sections", []) if isinstance(report_scope, dict) else []
+    sections = [str(section) for section in omitted] if isinstance(omitted, list) else []
+    return {
+        "detected": bool(sections),
+        "count": len(sections),
+        "sections": sections,
+        "reason": "focused-report-scope" if sections else "",
+        "items": [
+            {
+                "section": section,
+                "reason": "focused-report-scope",
+            }
+            for section in sections[:10]
+        ],
+    }
+
+
+def _finding_code_sample(findings: list[Finding]) -> list[str]:
+    return [finding.code for finding in findings[:10]]
+
+
+def _is_known_environment_warning(finding: Finding) -> bool:
+    text = _finding_search_text(finding)
+    return any(
+        marker in text
+        for marker in (
+            "known-environment",
+            "known environment",
+            "environment warning",
+            "windows environment",
+            "pytest warning",
+            "test warning",
+        )
+    )
+
+
+def _is_nonblocking_warning(finding: Finding) -> bool:
+    text = _finding_search_text(finding)
+    return _is_known_environment_warning(finding) or any(
+        marker in text
+        for marker in (
+            "nonblocking",
+            "non-blocking",
+            "degraded",
+            "skipped",
+            "optional",
+            "runtime-cache-absent",
+            "cache-posture",
+            "projection-cache",
+            "generated-cache",
+        )
+    )
+
+
+def _next_safe_route_summary(findings: list[Finding]) -> dict[str, object]:
+    routes = next_safe_routes_for_report(findings)
+    first = routes[0] if routes else None
+    return {
+        "count": len(routes),
+        "first_command": first.command if first else "",
+        "first_action_class": first.action_class if first else "",
+        "requires_dry_run_review": bool(first.requires_dry_run_review) if first else False,
+    }
 
 
 def next_safe_route_to_report_dict(route: NextSafeRoute) -> dict[str, object]:

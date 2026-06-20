@@ -177,7 +177,15 @@ from .projection_index import (
 from .preflight import orchestrator_workspace_preflight_sections, preflight_sections, render_git_pre_commit_template
 from .vcs import dispatcher_worktree_coordination_findings, worktree_coordination_findings
 from .reconcile import reconcile_findings
-from .reporting import emit_text, render_intelligence_report, render_json_report, render_quick_check_report, render_report, render_sectioned_report
+from .reporting import (
+    apply_report_scope_to_compact_summary,
+    emit_text,
+    render_intelligence_report,
+    render_json_report,
+    render_quick_check_report,
+    render_report,
+    render_sectioned_report,
+)
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .relationship_drift import (
     make_relationship_drift_request,
@@ -563,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
                 payload["report_scope"] = _focused_report_scope(args.focus, sections)
             if getattr(args, "quick", False):
                 payload["report_scope"] = _quick_report_scope(sections)
+            if "report_scope" in payload:
+                apply_report_scope_to_compact_summary(payload["summary"], payload["report_scope"])
             emit_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
         elif getattr(args, "quick", False):
             emit_text(render_quick_check_report(inventory.root, result, inventory.sources_for_report(), sections, suggestions))

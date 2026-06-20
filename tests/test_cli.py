@@ -840,6 +840,15 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["boundary"]["json_output_approves_lifecycle"])
             self.assertEqual("ok", payload["result"]["status"])
             self.assertTrue(payload["findings"])
+            summary = payload["summary"]
+            self.assertEqual("mylittleharness.compact-report-summary.v1", summary["schema"])
+            self.assertEqual("check", summary["command"])
+            self.assertEqual("ok", summary["status"])
+            self.assertEqual(0, summary["outcomes"]["timeout"]["count"])
+            self.assertEqual(0, summary["outcomes"]["skipped"]["count"])
+            self.assertEqual(0, summary["outcomes"]["not_checked"]["count"])
+            self.assertFalse(summary["authority"]["approves_lifecycle"])
+            self.assertFalse(summary["authority"]["approves_git"])
             finding = payload["findings"][0]
             for key in (
                 "severity",
@@ -3391,6 +3400,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("Agents", payload["report_scope"]["omitted_sections"])
             self.assertTrue(payload["report_scope"]["global_status_uncomputed"])
             self.assertTrue(payload["report_scope"]["status_represents_included_sections_only"])
+            self.assertEqual("focused-report-scope", payload["summary"]["outcomes"]["not_checked"]["reason"])
+            self.assertIn("Agents", payload["summary"]["outcomes"]["not_checked"]["sections"])
+            self.assertGreater(payload["summary"]["outcomes"]["not_checked"]["count"], 0)
 
     def test_check_focus_validation_skips_unselected_focus_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -10170,6 +10182,10 @@ class CliTests(unittest.TestCase):
             self.assertGreaterEqual(payload["roadmap"]["status_counts"]["accepted"], 1)
             self.assertGreaterEqual(payload["projection"]["source_count"], 1)
             self.assertGreaterEqual(payload["alerts"]["warning_count"], 1)
+            self.assertEqual("mylittleharness.compact-report-summary.v1", payload["summary"]["schema"])
+            self.assertEqual("dashboard --inspect", payload["summary"]["command"])
+            self.assertGreaterEqual(payload["summary"]["severity_counts"]["warn"], 1)
+            self.assertFalse(payload["summary"]["authority"]["approves_lifecycle"])
             self.assertIn("writeback --dry-run --phase-status complete", payload["nextLegalDryRun"]["command"])
             self.assertFalse(payload["nextLegalDryRun"]["approves_lifecycle"])
             self.assertIn("product-diff acceptance", payload["nextLegalDryRun"]["boundary"])
@@ -10222,6 +10238,9 @@ class CliTests(unittest.TestCase):
             }
             self.assertIn("dashboard-projection-degraded", finding_codes)
             self.assertIn("dashboard-projection-summary-degraded", finding_codes)
+            self.assertGreaterEqual(payload["summary"]["outcomes"]["skipped"]["count"], 1)
+            self.assertIn("Projection", payload["summary"]["outcomes"]["skipped"]["sections"])
+            self.assertGreaterEqual(payload["summary"]["warning_classification"]["nonblocking_warning_count"], 1)
 
     def test_dashboard_json_full_detail_keeps_complete_projection_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -38718,6 +38737,24 @@ class CliTests(unittest.TestCase):
             self.assertIn("Dirty Route Summary", rendered)
             self.assertIn("Actionable Findings", rendered)
             self.assertNotIn("\nSources\n", rendered)
+
+    def test_check_quick_json_reports_summary_without_not_checked_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--quick", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("quick", payload["report_scope"]["scope"])
+            self.assertEqual("mylittleharness.compact-report-summary.v1", payload["summary"]["schema"])
+            self.assertEqual("check --quick", payload["summary"]["command"])
+            self.assertEqual(0, payload["summary"]["outcomes"]["not_checked"]["count"])
+            self.assertFalse(payload["summary"]["authority"]["approves_git"])
 
 
 class EncodingLimitedTextStream:
