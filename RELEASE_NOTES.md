@@ -1,17 +1,17 @@
-# MyLittleHarness 1.0.0-rc1 Local Readiness Notes
+# MyLittleHarness 1.0.0-rc1
 
 ## Summary
 
-MyLittleHarness `1.0.0-rc1` is a local readiness candidate for owner review. It packages the current repo-visible workflow safety utility around one direct model: `MyLittleHarness -> target repository`.
+MyLittleHarness `1.0.0-rc1` is the first public GitHub release candidate for the repo-visible workflow safety utility built around one direct model: `MyLittleHarness -> target repository`.
 
-The candidate is ready to validate locally from source and from a freshly built artifact. It is not yet a public release.
+This is a real release candidate, not a final stable release. It is ready for public GitHub review and local validation from source or from the attached artifacts.
 
 ## What This Candidate Is
 
 - A local Python CLI for initializing, checking, repairing, and safely navigating MLH target repositories.
 - A repository authority pattern built from ordinary files: `AGENTS.md`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`, optional roadmap/evidence files, and explicit dry-run/apply routes.
 - A stdlib-first package with no required runtime dependencies, Apache-2.0 licensing metadata, Python `>=3.11`, and the `mylittleharness` console script.
-- A bounded release-candidate baseline for local product verification before any owner-approved publication step.
+- A bounded release-candidate baseline for public GitHub review before any package-index publication or stable-release claim.
 
 ## What It Can Do Now
 
@@ -40,11 +40,10 @@ The candidate is ready to validate locally from source and from a freshly built 
 - Record verification facts in the serviced operating root.
 - Create exact local Git savepoints for the product source and operating-root evidence.
 
-## Owner Approval Required Before
+## Still Not Included
 
-- Creating or pushing a release tag.
-- Pushing the local branch.
 - Publishing to a package index.
 - Uploading signed artifacts.
-- Announcing a public release.
+- Claiming final stable `1.0.0` status.
+- Running a wider public announcement campaign.
 - Installing globally or mutating workstation/user configuration.
