@@ -405,7 +405,11 @@ GIT_WRITE_COMMANDS = (
     "git stage ",
     "git commit ",
 )
-PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])((?:\.?[\\/])?(?:project|src|tests|docs|\.mylittleharness)[\\/][^\s\"'`]+)")
+PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'`]+"
+    r"|(?<![A-Za-z0-9_.:/-])/(?:[A-Za-z0-9_.-]+/)+[^\s\"'`]+"
+    r"|(?:^|[\s\"'`])((?:\.?[\\/])?(?:project|src|tests|docs|\.mylittleharness)[\\/][^\s\"'`]+)"
+)
 POWERSHELL_HERE_STRING_RE = re.compile(r"@(['\"])\r?\n.*?\r?\n\1@", re.DOTALL)
 POSIX_HEREDOC_START_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 POWERSHELL_SPLAT_INVOCATION_RE = re.compile(
@@ -2581,6 +2585,7 @@ def _workdir_relative_write_targets(data: dict[str, object], targets: list[str])
         if (
             normalized
             and not re.match(r"^[a-z]:/", normalized)
+            and not normalized.startswith("/")
             and not normalized.startswith(("../", "./", "project/", "src/", "tests/", "docs/", ".mylittleharness/"))
         ):
             resolved.append(f"{normalized_workdir}/{normalized}")
@@ -2688,7 +2693,7 @@ def _path_argument_value(token: str) -> str:
         return ""
     normalized = value.replace("\\", "/")
     if re.match(r"^[A-Za-z]:[\\/]", value) or normalized.startswith(
-        ("../", "./", "project/", "src/", "tests/", "docs/", ".mylittleharness/")
+        ("/", "../", "./", "project/", "src/", "tests/", "docs/", ".mylittleharness/")
     ):
         return value
     if re.match(r"^[A-Za-z0-9_.-]+\.(?:md|py|json|toml|ya?ml|txt)$", normalized):
@@ -6635,7 +6640,7 @@ def _codex_hooks_config_path(root: Path, request: CodexHookAdapterRequest) -> Pa
 
 def _native_hooks_config_path(root: Path, request: CodexHookAdapterRequest) -> Path:
     if request.config_path:
-        candidate = Path(request.config_path).expanduser()
+        candidate = Path(str(request.config_path).replace("\\", "/")).expanduser()
         if not candidate.is_absolute():
             candidate = root / candidate
         return candidate

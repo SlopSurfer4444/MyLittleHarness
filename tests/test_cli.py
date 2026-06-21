@@ -31003,6 +31003,16 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["block"])
             self.assertIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
 
+    def test_hooks_path_helpers_extract_posix_absolute_tokens(self) -> None:
+        from mylittleharness.hooks import _extract_paths, _path_argument_value, _workdir_relative_write_targets
+
+        product_path = "/tmp/mlh-ci/product/src/mylittleharness/hooks.py"
+
+        self.assertIn(product_path, _extract_paths(f"Set-Content -Path {product_path} -Value 'x'"))
+        self.assertEqual(product_path, _path_argument_value(product_path))
+        self.assertEqual([], _workdir_relative_write_targets({"workdir": "operator"}, [product_path]))
+        self.assertEqual([], _extract_paths("See https://example.com/product/src/mylittleharness/hooks.py"))
+
     def test_hooks_pre_tool_warns_for_reviewed_local_vcs_delegation_prompt(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
