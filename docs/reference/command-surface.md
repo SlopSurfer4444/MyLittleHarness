@@ -62,7 +62,12 @@ or attachment evidence routes, and `related_plan`/`archived_plan` point to
 implementation plans. External evidence must first be imported or adopted
 through a route such as `research-import`, `research-distill`, or
 `attachment-import`; product source and test paths belong in `target_artifacts`
-and verification commands, not source relationship fields.
+and verification commands, not source relationship fields. `evidence --record`
+accepts ordinary root-relative refs and, when `product_source_root` is
+configured, `product-source:<relative-path>` refs for product-source files in
+input, output, claimed, and changed-file fields. Product refs are hashed as
+cross-root evidence only; they do not move product files under the operating
+root or satisfy a declared `project/verification/*.md` artifact by themselves.
 For protected incubation cleanup, `memory-hygiene --dry-run --archive-list-file
 <project/verification/reviewed-list.txt> --archive-folder
 project/archive/reference/<reviewed-folder>` validates an explicit reviewed

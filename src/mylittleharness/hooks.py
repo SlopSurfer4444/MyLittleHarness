@@ -6017,7 +6017,7 @@ def _git_mutation_next_safe_command(inventory: Inventory, data: dict[str, object
     actual_root_next_safe = _actual_root_vcs_next_safe_command(inventory, data, command)
     if actual_root_next_safe:
         return actual_root_next_safe
-    product_source_next_safe = _product_source_vcs_next_safe_command(inventory, command)
+    product_source_next_safe = _product_source_vcs_next_safe_command(inventory, data, command)
     if product_source_next_safe:
         return product_source_next_safe
     return "gi" + "t add -- <exact-reviewed-files>; " + "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
@@ -6065,17 +6065,17 @@ def _reviewed_local_vcs_checkpoint_next_safe_command(checkpoint: ReviewedLocalVc
     return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
 
 
-def _product_source_vcs_next_safe_command(inventory: Inventory, command: str) -> str:
+def _product_source_vcs_next_safe_command(inventory: Inventory, data: dict[str, object], command: str) -> str:
     product_root = _configured_product_source_root_path(inventory)
     if product_root is None:
         return ""
     subcommand = _git_subcommand(command)
     if subcommand not in {"add", "stage", "commit"}:
         return ""
-    git_prefix = "gi" + "t -C " + shell_arg(str(product_root))
+    git_prefix = _product_source_vcs_command_prefix(inventory, data, product_root)
     if subcommand in {"add", "stage"}:
         pathspecs = [
-            pathspec
+            _product_source_tracked_pathspec(product_root, pathspec) or pathspec
             for pathspec in _git_stage_pathspecs(command)
             if _is_exact_post_closeout_stage_file(
                 inventory,
@@ -6091,6 +6091,30 @@ def _product_source_vcs_next_safe_command(inventory: Inventory, command: str) ->
             f"{git_prefix} commit -F <message-file>"
         )
     return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
+
+
+def _product_source_vcs_command_prefix(inventory: Inventory, data: dict[str, object], product_root: Path) -> str:
+    actual_root = _hook_command_workdir_path(inventory, data)
+    try:
+        if actual_root is not None and actual_root.resolve() == product_root.resolve():
+            return "gi" + "t"
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return "gi" + "t -C " + shell_arg(str(product_root))
+
+
+def _product_source_tracked_pathspec(product_root: Path, pathspec: str) -> str:
+    clean = _clean_token(pathspec)
+    if not clean or any(char in clean for char in "*?[]") or clean.startswith(":"):
+        return ""
+    normalized = _normalize_hook_path(clean)
+    result = _run_git_for_root(product_root, "ls-files", "--", normalized)
+    if result is None or result.returncode != 0:
+        return ""
+    matches = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(matches) != 1:
+        return ""
+    return matches[0]
 
 
 def _route_produced_lifecycle_suggested_stage_paths(inventory: Inventory, candidates: list[str] | tuple[str, ...]) -> list[str]:

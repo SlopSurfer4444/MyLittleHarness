@@ -37,6 +37,7 @@ from .evidence import (
     AGENT_RUN_REQUIRED_SCALARS,
     AGENT_RUN_SCHEMA,
     AGENT_RUN_STATUSES,
+    PRODUCT_SOURCE_REF_PREFIX,
     agent_run_retired_records,
     agent_run_record_template_finding,
     lifecycle_mutation_provenance_findings,
@@ -958,7 +959,11 @@ def _coordination_agent_run_source_refs(data: dict[str, object]) -> set[str]:
 
 
 def _coordination_source_hash_required(rel_path: str) -> bool:
-    return rel_path in COORDINATION_SOURCE_HASH_REQUIRED_FILES or rel_path.startswith(COORDINATION_SOURCE_HASH_REQUIRED_PREFIXES)
+    return (
+        _coordination_is_product_source_ref(rel_path)
+        or rel_path in COORDINATION_SOURCE_HASH_REQUIRED_FILES
+        or rel_path.startswith(COORDINATION_SOURCE_HASH_REQUIRED_PREFIXES)
+    )
 
 
 def _coordination_source_hash_refs(value: object, rel_path: str, code_prefix: str) -> tuple[set[str], list[Finding]]:
@@ -973,10 +978,14 @@ def _coordination_source_hash_refs(value: object, rel_path: str, code_prefix: st
             continue
         source_ref = _coordination_normalize_ref(match.group(1))
         refs.add(source_ref)
-        conflict = root_relative_path_conflict(source_ref)
+        conflict = "" if _coordination_is_product_source_ref(source_ref) else root_relative_path_conflict(source_ref)
         if conflict:
             findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-malformed", f"source_hashes path {conflict}: {source_ref}", rel_path))
     return refs, findings
+
+
+def _coordination_is_product_source_ref(value: str) -> bool:
+    return str(value or "").replace("\\", "/").strip().casefold().startswith(PRODUCT_SOURCE_REF_PREFIX)
 
 
 def _coordination_string_list(value: object) -> tuple[str, ...]:

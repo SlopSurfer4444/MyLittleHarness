@@ -3258,8 +3258,9 @@ def _declared_target_evidence_findings(
                 f"{code_prefix}-target-evidence-missing",
                 (
                     f"{completion_reason} declares target_artifacts evidence target {target_rel}, but that artifact is "
-                    "missing and closeout does not record a reviewed artifact substitution with before/after paths and "
-                    "a residual-risk marker"
+                    "missing. Write the declared artifact first, or record a reviewed artifact substitution with before/after "
+                    "paths and a residual-risk marker. Agent-run records under project/verification/agent-runs/*.md are "
+                    "supporting evidence only and do not satisfy a declared project/verification/*.md artifact by themselves"
                 ),
                 contract.source,
             )

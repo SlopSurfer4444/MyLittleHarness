@@ -6579,6 +6579,169 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             self.assertNotIn("check-agent-run-record-stale", refreshed_check.getvalue())
 
+    def test_evidence_record_accepts_structured_product_source_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src").mkdir(parents=True)
+            (product_root / "src" / "changed.py").write_text("print('product')\n", encoding="utf-8")
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/smoke.md").write_text("# Smoke\n", encoding="utf-8")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            product_ref = "product-source:src/changed.py"
+            args = [
+                "--root",
+                str(root),
+                "evidence",
+                "--record",
+                "--record-id",
+                "product-run",
+                "--role",
+                "coder",
+                "--actor",
+                "codex",
+                "--task",
+                "Record product-source evidence.",
+                "--assigned-scope",
+                "product-source-polish",
+                "--runtime",
+                "local-shell",
+                "--worktree-id",
+                "main",
+                "--status",
+                "succeeded",
+                "--stop-reason",
+                "done",
+                "--attempt-budget",
+                "1/1",
+                "--input-ref",
+                "AGENTS.md",
+                "--output-ref",
+                "project/verification/smoke.md",
+                "--claimed-path",
+                product_ref,
+                "--changed-file",
+                product_ref,
+                "--command",
+                "python -m unittest tests.test_cli",
+                "--verification-ref",
+                "project/verification/smoke.md",
+                "--docs-decision",
+                "not-needed",
+                "--residual-risk",
+                "none",
+                "--apply",
+            ]
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(args), 0)
+
+            rendered = output.getvalue()
+            record_text = (root / "project/verification/agent-runs/product-run.md").read_text(encoding="utf-8")
+            self.assertIn("agent-run-record-written", rendered)
+            self.assertIn(f"{product_ref} sha256=", rendered)
+            self.assertIn(f'  - "{product_ref}"', record_text)
+            self.assertIn(f"{product_ref} sha256=", record_text)
+
+            clean_check = io.StringIO()
+            with redirect_stdout(clean_check):
+                clean_rc = main(["--root", str(root), "check"])
+            self.assertIn(clean_rc, {0, 1})
+            clean_rendered = clean_check.getvalue()
+            self.assertIn("source hash current for product-source:src/changed.py", clean_rendered)
+            self.assertNotIn("check-agent-run-record-stale", clean_rendered)
+
+            (product_root / "src" / "changed.py").write_text("print('product changed')\n", encoding="utf-8")
+            stale_check = io.StringIO()
+            with redirect_stdout(stale_check):
+                stale_rc = main(["--root", str(root), "check"])
+            self.assertIn(stale_rc, {0, 1})
+            self.assertIn("source hash product-source target changed", stale_check.getvalue())
+
+    def test_evidence_record_rejects_absolute_product_source_refs_with_canonical_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src").mkdir(parents=True)
+            changed_path = product_root / "src" / "changed.py"
+            changed_path.write_text("print('product')\n", encoding="utf-8")
+            (root / "project/verification").mkdir(parents=True, exist_ok=True)
+            (root / "project/verification/smoke.md").write_text("# Smoke\n", encoding="utf-8")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--record",
+                            "--record-id",
+                            "absolute-product-run",
+                            "--role",
+                            "coder",
+                            "--actor",
+                            "codex",
+                            "--task",
+                            "Record product-source evidence.",
+                            "--assigned-scope",
+                            "product-source-polish",
+                            "--runtime",
+                            "local-shell",
+                            "--worktree-id",
+                            "main",
+                            "--status",
+                            "succeeded",
+                            "--stop-reason",
+                            "done",
+                            "--attempt-budget",
+                            "1/1",
+                            "--input-ref",
+                            "AGENTS.md",
+                            "--output-ref",
+                            "project/verification/smoke.md",
+                            "--claimed-path",
+                            str(changed_path),
+                            "--changed-file",
+                            "product-source:src/changed.py",
+                            "--command",
+                            "python -m unittest tests.test_cli",
+                            "--verification-ref",
+                            "project/verification/smoke.md",
+                            "--docs-decision",
+                            "not-needed",
+                            "--residual-risk",
+                            "none",
+                            "--dry-run",
+                        ]
+                    ),
+                    0,
+                )
+
+            rendered = output.getvalue()
+            self.assertIn("agent-run-record-refused", rendered)
+            self.assertIn("--claimed-path absolute product_source_root path must use canonical product-source:src/changed.py", rendered)
+            self.assertFalse((root / "project/verification/agent-runs/absolute-product-run.md").exists())
+
     def test_check_and_dashboard_group_high_volume_agent_run_source_hash_posture(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -33796,6 +33959,54 @@ class CliTests(unittest.TestCase):
             self.assertIn(str(product_root), messages)
             self.assertIn("src/mylittleharness/hooks.py", messages)
             self.assertIn("commit -F <message-file>", messages)
+
+    def test_hooks_pre_tool_product_source_workdir_guidance_uses_plain_git_and_tracked_casing(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            product_root.mkdir()
+            (product_root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+            (product_root / "RELEASE_NOTES.md").write_text("# Release Notes\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "add -- changelog.md release_notes.md .",
+                }
+            )
+
+            def fake_run_git_for_root(_root: Path, *args: str):
+                if args[:2] == ("ls-files", "--"):
+                    requested = args[2]
+                    if requested == "changelog.md":
+                        return subprocess.CompletedProcess(args, 0, "CHANGELOG.md\n", "")
+                    if requested == "release_notes.md":
+                        return subprocess.CompletedProcess(args, 0, "RELEASE_NOTES.md\n", "")
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            with patch("mylittleharness.hooks._run_git_for_root", side_effect=fake_run_git_for_root), patch(
+                "mylittleharness.hooks._is_exact_post_closeout_stage_file",
+                side_effect=lambda _inventory, pathspec, **_kwargs: pathspec != ".",
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("next_safe_command=git add -- CHANGELOG.md RELEASE_NOTES.md", messages)
+            self.assertNotIn("next_safe_command=git -C", messages)
+            self.assertNotIn("git add -- changelog.md release_notes.md", messages)
 
     def test_hooks_pre_tool_neighbor_combined_checkpoint_guidance_uses_actual_root(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

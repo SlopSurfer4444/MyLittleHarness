@@ -60,6 +60,7 @@ AGENT_RUN_RETIREMENT_SUMMARY_REL = "project/verification/agent-run-retirement-su
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
 AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD = 8
 AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
+PRODUCT_SOURCE_REF_PREFIX = "product-source:"
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
 WORKER_RUN_RECEIPT_REFRESH_TOKEN_PREFIX = "wrr-"
@@ -2050,6 +2051,20 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
         ("--claim-ref", request.claim_refs),
     ):
         for value in values:
+            if _is_product_source_ref(value):
+                findings.extend(_product_source_ref_findings(inventory.root, field, value, severity))
+                continue
+            product_ref = _product_source_ref_for_absolute_path(inventory.root, value)
+            if product_ref:
+                findings.append(
+                    Finding(
+                        "error",
+                        "agent-run-record-refused",
+                        f"{field} absolute product_source_root path must use canonical {product_ref}",
+                        value,
+                    )
+                )
+                continue
             conflict = _root_relative_path_conflict(value)
             if conflict:
                 findings.append(Finding("error", "agent-run-record-refused", f"{field} {conflict}", value))
@@ -2232,6 +2247,30 @@ def _source_hash_entries_for_refs(root: Path, rel_paths: Iterable[str], code_pre
     entries: list[str] = []
     findings: list[Finding] = []
     for rel_path in rel_paths:
+        product_ref = _product_source_ref_target(root, rel_path)
+        if product_ref is not None:
+            ref_label, path, conflict = product_ref
+            if conflict:
+                entries.append(f"{ref_label} invalid-path")
+                findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{ref_label} was recorded as invalid-path: {conflict}", ref_label))
+                continue
+            if not path.exists():
+                entries.append(f"{ref_label} missing")
+                findings.append(Finding("info", f"{code_prefix}-source-hash", f"{ref_label} recorded as missing product-source evidence", ref_label))
+                continue
+            if not path.is_file():
+                entries.append(f"{ref_label} invalid-path")
+                findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{ref_label} is not a regular product-source file and was recorded as invalid-path", ref_label))
+                continue
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                entries.append(f"{ref_label} unreadable")
+                findings.append(Finding("warn", f"{code_prefix}-source-hash", f"{ref_label} could not be read for hashing: {exc}", ref_label))
+                continue
+            entries.append(f"{ref_label} sha256={digest}")
+            findings.append(Finding("info", f"{code_prefix}-source-hash", f"{ref_label} sha256={digest[:12]}", ref_label))
+            continue
         conflict = _root_relative_path_conflict(rel_path)
         if conflict:
             entries.append(f"{rel_path} invalid-path")
@@ -2338,6 +2377,8 @@ def _agent_run_record_metadata_findings(
             findings.append(Finding("warn", code, f"agent run record missing required list field: {field}", rel_path))
     for field in ("input_refs", "output_refs", "claimed_paths", "changed_files", "verification_refs", "handoff_refs", "claim_refs"):
         for value in _frontmatter_string_list(data.get(field)):
+            if _is_product_source_ref(value):
+                continue
             conflict = _root_relative_path_conflict(value)
             if conflict:
                 findings.append(Finding("warn", code, f"agent run record {field} path {conflict}: {value}", rel_path))
@@ -2364,6 +2405,37 @@ def _agent_run_source_hash_findings(
         expected_missing = bool(match.group(3))
         expected_unreadable = bool(match.group(4))
         expected_invalid = bool(match.group(5))
+        product_ref = _product_source_ref_target(root, source_rel)
+        if product_ref is not None:
+            ref_label, source_path, conflict = product_ref
+            if conflict:
+                findings.append(Finding("warn", f"{code}-malformed", f"source hash product-source path {conflict}: {ref_label}", rel_path))
+                continue
+            if not check_freshness:
+                continue
+            if expected_missing:
+                if source_path.exists():
+                    findings.append(Finding("warn", f"{code}-stale", f"source hash recorded missing product-source path now exists: {ref_label}", rel_path))
+                continue
+            if expected_unreadable or expected_invalid:
+                findings.append(Finding("info", f"{code}-hash", f"source hash entry records {ref_label} as degraded product-source evidence", rel_path))
+                continue
+            if not source_path.exists():
+                findings.append(Finding("warn", f"{code}-stale", f"source hash product-source target is now missing: {ref_label}", rel_path))
+                continue
+            if not source_path.is_file():
+                findings.append(Finding("warn", f"{code}-stale", f"source hash product-source target is not a regular file: {ref_label}", rel_path))
+                continue
+            try:
+                digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                findings.append(Finding("warn", f"{code}-stale", f"source hash product-source target could not be read: {exc}", rel_path))
+                continue
+            if expected_hash and digest.lower() != expected_hash.lower():
+                findings.append(Finding("warn", f"{code}-stale", f"source hash product-source target changed: {ref_label}", rel_path))
+            else:
+                findings.append(Finding("info", f"{code}-hash", f"source hash current for {ref_label}: {digest[:12]}", rel_path))
+            continue
         conflict = _root_relative_path_conflict(source_rel)
         if conflict:
             findings.append(Finding("warn", f"{code}-malformed", f"source hash path {conflict}: {source_rel}", rel_path))
@@ -5531,6 +5603,90 @@ def _root_relative_path_key(value: str) -> str:
     if normalized.startswith("./"):
         normalized = normalized[2:]
     return normalized.casefold()
+
+
+def _is_product_source_ref(value: str) -> bool:
+    return str(value or "").replace("\\", "/").strip().casefold().startswith(PRODUCT_SOURCE_REF_PREFIX)
+
+
+def _product_source_ref_rel(value: str) -> str:
+    text = str(value or "").replace("\\", "/").strip()
+    if not text.casefold().startswith(PRODUCT_SOURCE_REF_PREFIX):
+        return ""
+    rel = text[len(PRODUCT_SOURCE_REF_PREFIX) :].strip().lstrip("/")
+    return rel
+
+
+def _product_source_root_from_state(root: Path) -> Path | None:
+    state_path = root / "project/project-state.md"
+    try:
+        frontmatter = parse_frontmatter(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+    value = str(frontmatter.data.get("product_source_root") or "").strip()
+    if not value:
+        return None
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _product_source_ref_findings(root: Path, field: str, value: str, severity: str) -> list[Finding]:
+    target = _product_source_ref_target(root, value)
+    if target is None:
+        return [Finding(severity, "agent-run-record-refused", f"{field} product-source refs require product_source_root in project/project-state.md", value)]
+    ref_label, path, conflict = target
+    if conflict:
+        return [Finding(severity, "agent-run-record-refused", f"{field} product-source ref {conflict}: {ref_label}", value)]
+    try:
+        product_root = _product_source_root_from_state(root)
+        if product_root is not None:
+            path.relative_to(product_root)
+    except (OSError, RuntimeError, ValueError):
+        return [Finding(severity, "agent-run-record-refused", f"{field} product-source ref escapes configured product_source_root: {ref_label}", value)]
+    return []
+
+
+def _product_source_ref_for_absolute_path(root: Path, value: str) -> str:
+    product_root = _product_source_root_from_state(root)
+    if product_root is None:
+        return ""
+    try:
+        candidate = Path(str(value or "").strip()).expanduser()
+        if not candidate.is_absolute():
+            return ""
+        rel = candidate.resolve().relative_to(product_root).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if not rel or rel.startswith("../"):
+        return ""
+    return f"{PRODUCT_SOURCE_REF_PREFIX}{rel}"
+
+
+def _product_source_ref_target(root: Path, value: str) -> tuple[str, Path, str] | None:
+    rel = _product_source_ref_rel(value)
+    if not rel:
+        return None
+    ref_label = f"{PRODUCT_SOURCE_REF_PREFIX}{rel}"
+    conflict = _root_relative_path_conflict(rel)
+    product_root = _product_source_root_from_state(root)
+    if product_root is None:
+        return ref_label, root / rel, "product_source_root is not configured"
+    if conflict:
+        return ref_label, product_root / rel, conflict
+    try:
+        path = (product_root / rel).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return ref_label, product_root / rel, "could not be resolved"
+    try:
+        path.relative_to(product_root)
+    except (OSError, RuntimeError, ValueError):
+        return ref_label, path, "escapes configured product_source_root"
+    return ref_label, path, ""
 
 
 def _agent_run_record_boundary_findings(code_prefix: str = "agent-run-record") -> list[Finding]:
