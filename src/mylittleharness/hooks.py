@@ -4179,14 +4179,14 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
     staged_paths = _git_staged_paths(inventory)
     staged = {_normalize_hook_path(path).casefold() for path in staged_paths}
     if any(_is_top_level_verification_checkpoint_path(path) for path in staged):
-        return bool(_coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, staged_paths))
+        return bool(_coherent_post_closeout_mixed_vcs_finalization_paths(inventory, staged_paths))
     return True
 
 
 def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, command: str) -> set[str]:
     if not _is_post_closeout_local_vcs_commit_command(inventory, command):
         return set()
-    return _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, _git_staged_paths(inventory))
+    return _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, _git_staged_paths(inventory))
 
 
 def _coherent_post_closeout_lifecycle_vcs_stage_paths(
@@ -4491,6 +4491,64 @@ def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventor
     if not all(_is_reviewed_lifecycle_finalization_evidence_file(inventory, path) for path in evidence_paths):
         return set()
     return normalized
+
+
+def _coherent_post_closeout_mixed_vcs_finalization_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    lifecycle_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
+    if lifecycle_paths:
+        return lifecycle_paths
+
+    route_candidates: list[str] = []
+    ordinary_candidates: list[str] = []
+    for path in paths:
+        if _is_existing_lifecycle_route_file(inventory, path):
+            route_candidates.append(path)
+        else:
+            ordinary_candidates.append(path)
+    if not route_candidates or not ordinary_candidates:
+        return set()
+
+    lifecycle_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, route_candidates)
+    if not lifecycle_paths:
+        return set()
+
+    allowed_targets = _post_closeout_archived_plan_target_artifacts(inventory, lifecycle_paths)
+    if not allowed_targets:
+        return set()
+
+    ordinary_paths: set[str] = set()
+    for path in ordinary_candidates:
+        if not _is_exact_post_closeout_stage_file(inventory, path):
+            return set()
+        normalized = _normalize_plan_artifact_candidate(inventory, path)
+        if not normalized or normalized not in allowed_targets:
+            return set()
+        ordinary_paths.add(normalized)
+    return lifecycle_paths | ordinary_paths
+
+
+def _post_closeout_archived_plan_target_artifacts(inventory: Inventory, paths: set[str]) -> set[str]:
+    targets: set[str] = set()
+    for path in paths:
+        if not _is_deferred_archive_plan_route_path(path):
+            continue
+        route_path = _hook_route_file_path(inventory, path)
+        if route_path is None:
+            continue
+        try:
+            frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        artifacts = frontmatter.data.get("target_artifacts")
+        if not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            normalized = _normalize_hook_path(str(artifact or "")).casefold().rstrip("/")
+            if normalized:
+                targets.add(normalized)
+    return targets
 
 
 def _is_reviewed_lifecycle_finalization_evidence_file(inventory: Inventory, path: str) -> bool:

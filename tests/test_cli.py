@@ -33923,6 +33923,74 @@ class CliTests(unittest.TestCase):
             self.assertTrue(bad_payload["block"])
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", bad_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_finalization_with_declared_source_targets(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, _succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            source_rel = "elixir/lib/symphony_elixir/openai_sdk/planner_backend.ex"
+            test_rel = "elixir/test/symphony_elixir/openai_sdk/controlled_multi_agent_execution_test.exs"
+            extra_rel = "elixir/lib/symphony_elixir/openai_sdk/unplanned.ex"
+            for rel in (source_rel, test_rel, extra_rel):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# reviewed exact file\n", encoding="utf-8")
+            archive_path = root / archive_rel
+            archive_path.write_text(
+                archive_path.read_text(encoding="utf-8").replace(
+                    'docs_decision: "not-needed"\n---',
+                    (
+                        'docs_decision: "not-needed"\n'
+                        "target_artifacts:\n"
+                        f'  - "{source_rel}"\n'
+                        f'  - "{test_rel}"\n'
+                        "---"
+                    ),
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            evidence_rel = "project/verification/symphony-planner-no-write-proposal-scope-hardening-2026-06-21.md"
+            (root / evidence_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / evidence_rel).write_text(
+                "---\n"
+                'title: "Planner proposal scope hardening"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "---\n"
+                "# Planner proposal scope hardening\n\n"
+                "Boundary: this verification is evidence only. It cannot approve lifecycle "
+                "acceptance, archive, staging, commit, push, release, provider routing, "
+                "target-repo acceptance, or public publication.\n",
+                encoding="utf-8",
+            )
+            staged = (source_rel, test_rel, state_rel, archive_rel, evidence_rel)
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "commit -F reviewed-message.txt",
+                    "parameters": {"staged_files": list(staged)},
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=staged):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=staged + (extra_rel,)):
+                bad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            bad_codes = {finding["code"] for finding in bad_payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
+            self.assertTrue(bad_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", bad_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", bad_codes)
+
     def test_hooks_pre_tool_allows_top_level_verification_post_closeout_package_staging_payload(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
