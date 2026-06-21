@@ -1527,9 +1527,9 @@ def _codex_config_install_boundary_findings() -> list[Finding]:
 
 def _root_selection_payload(inventory: Inventory, default_root: Path | None, requested_root: str | None) -> dict[str, object]:
     return {
-        "defaultRoot": str(default_root) if default_root is not None else "",
+        "defaultRoot": str(default_root.resolve()) if default_root is not None else "",
         "selectedRoot": str(inventory.root),
-        "requestedRoot": requested_root or "",
+        "requestedRoot": str(inventory.root) if requested_root else "",
         "toolArgument": "root",
         "inventoryReloadedPerCall": True,
         "startupRootAvailable": default_root is not None,

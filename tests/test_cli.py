@@ -2284,8 +2284,8 @@ class CliTests(unittest.TestCase):
             run_probe.assert_not_called()
             self.assertIn("installed-cli-command-surface-static", rendered)
             self.assertIn("PYTHONPATH='", rendered)
-            self.assertIn(str(product_src), rendered)
-            self.assertNotIn(f"PYTHONPATH={product_src} python", rendered)
+            self.assertIn(str(product_src.resolve()), rendered)
+            self.assertNotIn(f"PYTHONPATH={product_src.resolve()} python", rendered)
 
     def test_check_warns_on_operating_doc_copy_retired_command_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18440,9 +18440,10 @@ class CliTests(unittest.TestCase):
             before = snapshot_tree(root)
             attempts = {"count": 0}
             original_replace_once = atomic_files._replace_path_once
+            roadmap_path = (root / "project/roadmap.md").resolve()
 
             def flaky_replace_once(source_path: Path, target_path: Path) -> None:
-                if target_path == root / "project/roadmap.md" and attempts["count"] < 2:
+                if target_path.resolve() == roadmap_path and attempts["count"] < 2:
                     attempts["count"] += 1
                     raise SharingViolation("sharing violation")
                 original_replace_once(source_path, target_path)

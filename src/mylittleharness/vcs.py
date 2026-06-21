@@ -634,7 +634,12 @@ def _git_top_level(root: Path, runner: GitRunner | None) -> str | None:
     if isinstance(result, str) or result.returncode != 0:
         return None
     value = (result.stdout or "").strip()
-    return value or None
+    if not value:
+        return None
+    try:
+        return str(Path(value).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return value
 
 
 def _run_git(root: Path, args: Sequence[str], runner: GitRunner | None) -> subprocess.CompletedProcess[str] | str:

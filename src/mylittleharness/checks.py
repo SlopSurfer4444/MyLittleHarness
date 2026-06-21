@@ -14328,7 +14328,10 @@ def _nearby_text_contains(lines: list[str], line_number: int, needles: set[str])
     start = max(0, line_number - 3)
     end = min(len(lines), line_number + 1)
     window = " ".join(lines[start:end]).lower()
-    return any(needle in window for needle in needles)
+    return any(
+        re.search(r"(?<![a-z0-9])" + re.escape(needle.lower()) + r"(?![a-z0-9])", window)
+        for needle in needles
+    )
 
 
 def _line_claims_operating_role(line: str) -> bool:

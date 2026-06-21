@@ -4188,7 +4188,13 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
     if subcommand in {"add", "stage"}:
         pathspecs = _git_stage_pathspecs(command)
         if not pathspecs:
-            return ReviewedLocalVcsCheckpoint(root=target_inventory.root, blocked_reason="no exact pathspecs were supplied")
+            return ReviewedLocalVcsCheckpoint(
+                root=target_inventory.root,
+                blocked_reason=(
+                    "no exact pathspecs were supplied; "
+                    + _reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, (), "pathspecs")
+                ),
+            )
         paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, pathspecs)
         if not paths:
             paths = _coherent_delegated_neighbor_exact_file_checkpoint_paths(target_inventory, pathspecs)
@@ -4579,8 +4585,9 @@ def _normalized_delegated_neighbor_exact_file_paths(
     normalized: set[str] = set()
     for path in paths:
         rel = _hook_route_rel_path(inventory, path)
-        clean = _normalize_hook_path(rel).casefold() if rel else ""
-        if not clean or _delegated_neighbor_exact_path_blocked(clean):
+        clean = _normalize_hook_path(rel) if rel else ""
+        clean_key = clean.casefold()
+        if not clean_key or _delegated_neighbor_exact_path_blocked(clean_key):
             return set()
         route_path = _hook_route_file_path(inventory, clean)
         if route_path is None:
@@ -4590,7 +4597,7 @@ def _normalized_delegated_neighbor_exact_file_paths(
                 return set()
         except (OSError, RuntimeError):
             return set()
-        normalized.add(clean)
+        normalized.add(clean_key)
     return normalized
 
 
@@ -5652,7 +5659,12 @@ def _git_stage_pathspecs(command: str) -> list[str]:
             if clean in GIT_STAGE_EXACT_PATHSPEC_OPTIONS:
                 continue
             return []
-        pathspecs.append(clean)
+        if clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+            pathspecs.append(clean)
+            continue
+        pathspec = _clean_hook_path_token(str(token))
+        if pathspec:
+            pathspecs.append(pathspec)
     return pathspecs
 
 
@@ -5663,7 +5675,7 @@ def _is_exact_post_closeout_stage_file(
     base_root: Path | None = None,
     boundary_root: Path | None = None,
 ) -> bool:
-    clean = _clean_token(pathspec)
+    clean = _clean_hook_path_token(pathspec)
     if not clean:
         return False
     rel = _normalize_hook_path(clean).casefold()
@@ -5673,7 +5685,7 @@ def _is_exact_post_closeout_stage_file(
         return False
     if rel.startswith(":") or any(rel.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
         return False
-    raw = _clean_hook_path_token(clean)
+    raw = clean
     try:
         unresolved_target = Path(raw).expanduser()
         if not unresolved_target.is_absolute():
