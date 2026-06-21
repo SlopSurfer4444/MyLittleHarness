@@ -33621,6 +33621,109 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-push", push_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", push_codes)
 
+    def test_hooks_pre_tool_allows_exact_product_release_publication_push_when_ready(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            product_root.mkdir()
+
+            def run_git(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["git", "-C", str(product_root), *args],
+                    check=False,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+            if run_git("init").returncode != 0:
+                self.skipTest("git is not available")
+            self.assertEqual(run_git("checkout", "-b", "main").returncode, 0)
+            (product_root / "README.md").write_text("# Product\n", encoding="utf-8")
+            self.assertEqual(run_git("add", "README.md").returncode, 0)
+            commit = run_git(
+                "-c",
+                "user.name=MLH Test",
+                "-c",
+                "user.email=mlh-test@example.invalid",
+                "commit",
+                "-m",
+                "Initial product",
+            )
+            self.assertEqual(commit.returncode, 0, commit.stderr)
+            tag = run_git(
+                "-c",
+                "user.name=MLH Test",
+                "-c",
+                "user.email=mlh-test@example.invalid",
+                "tag",
+                "-a",
+                "v1.0.0-rc1",
+                "-m",
+                "RC1",
+            )
+            self.assertEqual(tag.returncode, 0, tag.stderr)
+            self.assertEqual(run_git("remote", "add", "origin", "https://example.invalid/mlh.git").returncode, 0)
+
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                )
+                + "\n## Release Publication Context\n\n"
+                + "- Owner approval is the remaining release gate for publication.\n"
+                + "- Exact release-publication command may publish main plus v1.0.0-rc1 when local checks are green.\n",
+                encoding="utf-8",
+            )
+            exact_command = (
+                "git "
+                + "push --dry-run origin "
+                + "refs/heads/main:refs/heads/main "
+                + "refs/tags/v1.0.0-rc1:refs/tags/v1.0.0-rc1"
+            )
+            hook_input = json.dumps(
+                {"toolName": "shell_command", "workdir": str(product_root), "command": exact_command}
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+            self.assertIn("hooks-policy-allow-product-source-release-publication-push", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertIn("remote=origin", messages)
+            self.assertIn("tag commit matches main", messages)
+
+            unsafe_commands = {
+                "ordinary_tag_only": "git " + "push origin refs/tags/v1.0.0-rc1",
+                "bare_tag": "git " + "push origin main v1.0.0-rc1",
+                "wrong_remote": exact_command.replace(" origin ", " upstream "),
+                "force": exact_command.replace("push --dry-run", "push --force"),
+                "wildcard": "git " + "push origin refs/heads/main:refs/heads/main refs/tags/*",
+                "tag_move": exact_command.replace(
+                    "refs/tags/v1.0.0-rc1:refs/tags/v1.0.0-rc1",
+                    "refs/tags/v1.0.0-rc1:refs/tags/v1.0.0",
+                ),
+            }
+            for name, command in unsafe_commands.items():
+                with self.subTest(name=name):
+                    unsafe_payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "workdir": str(product_root), "command": command}),
+                    )
+                    unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
+                    self.assertTrue(unsafe_payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
+                    self.assertNotIn("hooks-policy-allow-product-source-release-publication-push", unsafe_codes)
+
     def test_hooks_pre_tool_product_source_git_diagnostic_names_git_c_when_workdir_missing(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

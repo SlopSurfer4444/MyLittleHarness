@@ -1650,7 +1650,13 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_route_produced_lifecycle_commit = _is_route_produced_lifecycle_commit_command(inventory, command)
     allow_product_source_vcs_stage = _is_product_source_vcs_stage_command(inventory, data, command)
     allow_product_source_vcs_commit = _is_product_source_vcs_commit_command(inventory, data, command)
-    allow_product_source_vcs_push = _is_product_source_vcs_push_command(inventory, data, command)
+    allow_product_source_release_publication_push = _is_product_source_release_publication_push_command(
+        inventory, data, command
+    )
+    allow_product_source_vcs_push = (
+        allow_product_source_release_publication_push
+        or _is_product_source_vcs_push_command(inventory, data, command)
+    )
     allow_product_source_vcs_finalization = _is_product_source_vcs_finalization_sequence(inventory, data, command)
     allow_product_source_vcs_command = (
         allow_product_source_vcs_stage
@@ -1906,6 +1912,20 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "allowed ordinary non-force Git push from the configured product_source_root workdir after "
                     "plan_status=none; force, mirror, delete, broad refspec, operating-root lifecycle mutation, "
                     "release, and future lifecycle decisions remain unapproved"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_product_source_release_publication_push:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-product-source-release-publication-push",
+                (
+                    "allowed exact owner-intent release publication push from the configured product_source_root: "
+                    "remote=origin, branch target=refs/heads/main, tag target=local release-candidate tag, clean "
+                    "product worktree, and tag commit matches main; force, mirror, delete, wildcard, broad refspec, "
+                    "package-index upload, tag movement, lifecycle mutation, and future release decisions remain blocked"
                 ),
                 paths[0] if paths else None,
             )
@@ -3757,32 +3777,170 @@ def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, ob
     subcommand, tokens, subcommand_index = _git_command_context(command)
     if subcommand != "push" or subcommand_index < 0:
         return False
+    operands = _product_source_push_operands(tokens[subcommand_index + 1 :])
+    if operands is None:
+        return False
+    if _is_exact_release_publication_refspecs(operands):
+        return False
+    if any(
+        clean.startswith("+")
+        or ":" in clean
+        or _looks_like_product_source_tag_push_ref(clean)
+        or any(char in clean for char in "*?[]")
+        for clean in operands
+    ):
+        return False
+    return len(operands) <= 2
+
+
+def _is_product_source_release_publication_push_command(
+    inventory: Inventory, data: dict[str, object], command: str
+) -> bool:
+    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+        return False
+    base_root, product_root = _product_source_vcs_roots(inventory, data, command)
+    if base_root is None or product_root is None:
+        return False
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand != "push" or subcommand_index < 0:
+        return False
+    operands = _product_source_push_operands(tokens[subcommand_index + 1 :], allow_dry_run=True)
+    if operands is None or not _is_exact_release_publication_refspecs(operands):
+        return False
+    tag_name = _release_publication_tag_name(operands[2])
+    if not tag_name:
+        return False
+    return (
+        _product_source_release_publication_intent_present(inventory, command, tag_name)
+        and _product_source_release_publication_ready(product_root, tag_name)
+    )
+
+
+def _product_source_push_operands(tokens: list[str], *, allow_dry_run: bool = False) -> list[str] | None:
     operands: list[str] = []
-    for token in tokens[subcommand_index + 1 :]:
+    for token in tokens:
         clean = _clean_token(token)
         if not clean:
             continue
         if _is_shell_command_separator(token, clean):
-            return False
+            return None
         if clean == "--":
             continue
-        if clean in {"-u", "--set-upstream"}:
+        if allow_dry_run and clean == "--dry-run":
+            continue
+        if clean in {"-u", "--set-upstream"} and not allow_dry_run:
             continue
         if clean.startswith("--force") or clean in {"-f", "--mirror", "--delete", "--all", "--tags", "--prune"}:
-            return False
+            return None
         if clean.startswith("-") and not clean.startswith("--") and "f" in clean[1:]:
-            return False
+            return None
         if clean.startswith("-"):
-            return False
-        if (
-            clean.startswith("+")
-            or ":" in clean
-            or _looks_like_product_source_tag_push_ref(clean)
-            or any(char in clean for char in "*?[]")
-        ):
-            return False
+            return None
+        if clean.startswith("+") or any(char in clean for char in "*?[]"):
+            return None
         operands.append(clean)
-    return len(operands) <= 2
+    return operands
+
+
+def _is_exact_release_publication_refspecs(operands: list[str]) -> bool:
+    return (
+        len(operands) == 3
+        and operands[0] == "origin"
+        and _release_publication_branch_targets_main(operands[1])
+        and bool(_release_publication_tag_name(operands[2]))
+    )
+
+
+def _release_publication_branch_targets_main(refspec: str) -> bool:
+    source, target = _split_exact_refspec(refspec)
+    if source not in {"main", "refs/heads/main"}:
+        return False
+    return target in {"", "refs/heads/main"}
+
+
+def _release_publication_tag_name(refspec: str) -> str:
+    source, target = _split_exact_refspec(refspec)
+    if not source.startswith("refs/tags/"):
+        return ""
+    if target and target != source:
+        return ""
+    tag_name = source.removeprefix("refs/tags/")
+    if not re.match(r"^v\d+\.\d+\.\d+-rc\d+$", tag_name):
+        return ""
+    return tag_name
+
+
+def _split_exact_refspec(refspec: str) -> tuple[str, str]:
+    clean = _normalize_hook_path(_clean_token(refspec))
+    if clean.startswith(":") or clean.endswith(":") or clean.count(":") > 1:
+        return "", ""
+    if ":" not in clean:
+        return clean, ""
+    source, target = clean.split(":", 1)
+    return source, target
+
+
+def _product_source_release_publication_intent_present(
+    inventory: Inventory, command: str, tag_name: str
+) -> bool:
+    lowered_command = str(command or "").casefold()
+    if "push" not in lowered_command or tag_name.casefold() not in lowered_command:
+        return False
+    state = inventory.state
+    if not state or not state.exists or not state.path:
+        return False
+    try:
+        state_text = state.path.read_text(encoding="utf-8").casefold()
+    except (OSError, UnicodeDecodeError):
+        return False
+    has_release_context = "release" in state_text or "publication" in state_text
+    has_owner_context = (
+        "owner approval" in state_text
+        or "owner-approved" in state_text
+        or "explicit owner intent" in state_text
+        or "release-publication" in state_text
+    )
+    return has_release_context and has_owner_context
+
+
+def _product_source_release_publication_ready(product_root: Path, tag_name: str) -> bool:
+    return (
+        _git_worktree_clean_for_root(product_root)
+        and _git_remote_exists_for_root(product_root, "origin")
+        and _git_ref_commit_for_root(product_root, "refs/heads/main")
+        == _git_ref_commit_for_root(product_root, f"refs/tags/{tag_name}^{{commit}}")
+    )
+
+
+def _git_worktree_clean_for_root(root: Path) -> bool:
+    result = _run_git_for_root(root, "status", "--porcelain=v1")
+    return result is not None and result.returncode == 0 and not result.stdout.strip()
+
+
+def _git_remote_exists_for_root(root: Path, remote: str) -> bool:
+    result = _run_git_for_root(root, "remote", "get-url", remote)
+    return result is not None and result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _git_ref_commit_for_root(root: Path, ref: str) -> str:
+    result = _run_git_for_root(root, "rev-parse", "--verify", ref)
+    if result is None or result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _run_git_for_root(root: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _is_product_source_vcs_finalization_sequence(inventory: Inventory, data: dict[str, object], command: str) -> bool:
