@@ -5234,6 +5234,7 @@ def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
         (
             "cannot approve" in content
             or "does not approve" in content
+            or "does not prove" in content
             or "do not approve" in content
             or "do not grant" in content
             or "cannot" in content

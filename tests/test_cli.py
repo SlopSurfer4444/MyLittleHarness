@@ -32497,6 +32497,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             reviewed_rel = "project/verification/reviewed-checkpoint.md"
+            symphony_rel = "project/verification/symphony-live-multirole-no-write-dogfood-2026-06-21.md"
             malformed_rel = "project/verification/malformed-checkpoint.md"
             authority_rel = "project/verification/authority-checkpoint.md"
             source_rel = "src/work.py"
@@ -32512,6 +32513,25 @@ class CliTests(unittest.TestCase):
                 "---\n"
                 "# Reviewed checkpoint\n\n"
                 "This verification note is evidence only and does not approve lifecycle, archive, roadmap, staging, commit, push, or release.\n",
+                encoding="utf-8",
+            )
+            (root / symphony_rel).write_text(
+                "---\n"
+                'title: "Symphony live multi-role no-write dogfood"\n'
+                'status: "partially-verified"\n'
+                'route: "verification"\n'
+                'related_plan: "project/archive/plans/live-cliproxy-provider-gateway-setup.md"\n'
+                "source_members:\n"
+                '  - "project/verification/symphony-provider-cliproxy-readiness-design.md"\n'
+                '  - "project/verification/openai-sdk-live-planner-queue-smoke.md"\n'
+                "---\n"
+                "# Symphony live multi-role no-write dogfood\n\n"
+                "Verification: live cliproxy multi-role no-write conductor dogfood partially verified.\n\n"
+                "Boundary: this proves the live provider-backed no-write conductor path across "
+                "researcher, planner, reviewer, and verifier roles. It does not prove live "
+                "implementer, live fixer, scoped source writes, persisted handoff fan-in, writeback, "
+                "archive, staging, commit, push, provider routing policy, release, lifecycle "
+                "acceptance, target-repo acceptance, or successful shell verification.\n",
                 encoding="utf-8",
             )
             (root / malformed_rel).write_text(
@@ -32540,6 +32560,17 @@ class CliTests(unittest.TestCase):
             self.assertFalse(allowed_payload["block"])
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", allowed_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", allowed_codes)
+
+            symphony_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"git add -- {symphony_rel}"}),
+            )
+            symphony_codes = {finding["code"] for finding in symphony_payload["findings"]}
+            self.assertFalse(symphony_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", symphony_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", symphony_codes)
 
             blocked_cases = {
                 "broad": f"git add -- project/verification",
