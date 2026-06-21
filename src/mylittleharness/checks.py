@@ -13340,7 +13340,7 @@ def _stale_root_pointer_findings(inventory: Inventory) -> list[Finding]:
             fallback_root = configured_roots.get("fallback")
             product_root = configured_roots.get("product")
             operating_root = configured_roots.get("operating")
-            if fallback_root and _line_references_path(normalized, fallback_root) and not _nearby_text_contains(
+            if fallback_root and _line_references_any_path(normalized, fallback_root) and not _nearby_text_contains(
                 lines, index, {"fallback", "archive", "evidence", "historical", "old", "reopened only"}
             ):
                 findings.append(
@@ -13352,7 +13352,7 @@ def _stale_root_pointer_findings(inventory: Inventory) -> list[Finding]:
                         index,
                     )
                 )
-            if product_root and _line_references_path(normalized, product_root) and _line_claims_operating_role(normalized):
+            if product_root and _line_references_any_path(normalized, product_root) and _line_claims_operating_role(normalized):
                 findings.append(
                     Finding(
                         "warn",
@@ -13362,7 +13362,7 @@ def _stale_root_pointer_findings(inventory: Inventory) -> list[Finding]:
                         index,
                     )
                 )
-            if operating_root and _line_references_path(normalized, operating_root) and _line_claims_product_role(normalized):
+            if operating_root and _line_references_any_path(normalized, operating_root) and _line_claims_product_role(normalized):
                 findings.append(
                     Finding(
                         "warn",
@@ -13375,7 +13375,7 @@ def _stale_root_pointer_findings(inventory: Inventory) -> list[Finding]:
     return findings
 
 
-def _configured_root_references(inventory: Inventory) -> dict[str, str]:
+def _configured_root_references(inventory: Inventory) -> dict[str, tuple[str, ...]]:
     state = inventory.state
     data = state.frontmatter.data if state and state.exists else {}
     references = {
@@ -13384,21 +13384,33 @@ def _configured_root_references(inventory: Inventory) -> dict[str, str]:
         "fallback": data.get("historical_fallback_root"),
     }
     return {
-        role: _root_reference_text(value, inventory.root)
+        role: _root_reference_texts(value, inventory.root)
         for role, value in references.items()
         if value not in (None, "")
     }
 
 
-def _root_reference_text(value: object, root: Path) -> str:
+def _root_reference_texts(value: object, root: Path) -> tuple[str, ...]:
     text = _display_path_value(str(value)).strip()
+    aliases = [text]
     try:
         candidate = Path(text).expanduser()
         if not candidate.is_absolute():
             candidate = root / candidate
-        return str(candidate.resolve())
+        aliases.extend([str(candidate), str(candidate.resolve())])
     except (OSError, RuntimeError):
-        return text
+        pass
+    seen: set[str] = set()
+    unique: list[str] = []
+    for alias in aliases:
+        if alias and alias not in seen:
+            seen.add(alias)
+            unique.append(alias)
+    return tuple(unique)
+
+
+def _line_references_any_path(line: str, references: tuple[str, ...]) -> bool:
+    return any(_line_references_path(line, reference) for reference in references)
 
 
 def _line_references_path(line: str, reference: str) -> bool:
@@ -14303,6 +14315,12 @@ def _root_relative_link_path(inventory: Inventory, rel: str) -> str | None:
     prefix = root + "/"
     if rel.casefold().startswith(prefix.casefold()):
         return rel[len(prefix) :]
+    try:
+        target = Path(_display_path_value(rel)).expanduser().resolve(strict=False)
+        relative = target.relative_to(inventory.root.resolve()).as_posix()
+        return "" if relative == "." else relative
+    except (OSError, RuntimeError, ValueError):
+        pass
     return None
 
 

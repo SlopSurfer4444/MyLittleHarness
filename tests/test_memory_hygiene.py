@@ -1896,9 +1896,10 @@ def snapshot_tree(root: Path) -> dict[str, str]:
 def fail_once_when_replace_targets(target_path: Path):
     original_replace = atomic_files._replace_path
     state = {"failed": False}
+    target_path = target_path.resolve()
 
     def replace(source: Path, target: Path) -> None:
-        if not state["failed"] and target == target_path:
+        if not state["failed"] and target.resolve() == target_path:
             state["failed"] = True
             raise OSError("injected replace failure")
         original_replace(source, target)

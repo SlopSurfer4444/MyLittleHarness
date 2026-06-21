@@ -2459,7 +2459,7 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
 def _hook_tool_intent(data: dict[str, object], text: str, *, inventory: Inventory | None = None) -> HookToolIntent:
     command = _hook_input_command(data, text)
     write_target_paths = _hook_write_target_paths(data, command, inventory=inventory)
-    paths = _hook_input_paths(data, text, command=command, write_target_paths=write_target_paths)
+    paths = _hook_input_paths(data, text, command=command, write_target_paths=write_target_paths, inventory=inventory)
     return HookToolIntent(
         command=command,
         paths=paths,
@@ -2480,6 +2480,7 @@ def _hook_input_paths(
     *,
     command: str | None = None,
     write_target_paths: list[str] | None = None,
+    inventory: Inventory | None = None,
 ) -> list[str]:
     apply_patch_targets = _hook_apply_patch_target_paths(data)
     if apply_patch_targets:
@@ -2507,7 +2508,63 @@ def _hook_input_paths(
 
     collect(data)
     paths.extend(_extract_paths(_command_without_shell_literal_payloads(text)))
+    if inventory is not None and command:
+        paths = _filter_git_navigation_paths(inventory, data, command, paths)
     return _dedupe_normalized_hook_paths(paths)
+
+
+def _filter_git_navigation_paths(
+    inventory: Inventory,
+    data: dict[str, object],
+    command: str,
+    paths: list[str],
+) -> list[str]:
+    navigation_tokens = _git_navigation_path_tokens(data, command)
+    if not navigation_tokens:
+        return paths
+    normalized_tokens = {_normalize_hook_path(token).casefold() for token in navigation_tokens if str(token or "").strip()}
+    resolved_tokens = {
+        resolved
+        for token in navigation_tokens
+        if (resolved := _resolve_path_token_from_base(token, inventory.root)) is not None
+    }
+    filtered: list[str] = []
+    for path in paths:
+        if _normalize_hook_path(path).casefold() in normalized_tokens:
+            continue
+        resolved_path = _resolve_path_token_from_base(path, inventory.root)
+        if resolved_path is not None and any(_same_resolved_path(resolved_path, resolved) for resolved in resolved_tokens):
+            continue
+        filtered.append(path)
+    return filtered
+
+
+def _git_navigation_path_tokens(data: dict[str, object], command: str) -> list[str]:
+    subcommand, tokens, raw_tokens, subcommand_index = _git_command_context_tokens(command)
+    if not subcommand or subcommand_index < 0:
+        return []
+    values: list[str] = []
+    workdir = _hook_workdir_value(data)
+    if workdir:
+        values.append(_path_argument_value(str(workdir)) or str(workdir).strip())
+    git_index = -1
+    for index, token in enumerate(tokens[:subcommand_index]):
+        if _is_git_executable_token(token):
+            git_index = index
+            break
+    if git_index < 0:
+        return values
+    index = git_index + 1
+    while index < subcommand_index:
+        raw_clean = _clean_git_option_raw_token(raw_tokens[index])
+        if raw_clean == "-C" and index + 1 < subcommand_index:
+            values.append(_path_argument_value(raw_tokens[index + 1]) or _clean_hook_path_token(raw_tokens[index + 1]))
+            index += 2
+            continue
+        if raw_clean.startswith("-C") and len(raw_clean) > 2:
+            values.append(raw_clean[2:])
+        index += 1
+    return [value for value in values if value]
 
 
 def _hook_write_target_paths(data: dict[str, object], command: str, *, inventory: Inventory | None = None) -> list[str]:
@@ -5616,8 +5673,15 @@ def _is_exact_post_closeout_stage_file(
         return False
     if rel.startswith(":") or any(rel.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
         return False
-    target = _resolve_hook_path_from_root(inventory, clean, base_root=base_root)
-    if target is None:
+    raw = _clean_hook_path_token(clean)
+    try:
+        unresolved_target = Path(raw).expanduser()
+        if not unresolved_target.is_absolute():
+            unresolved_target = (base_root or inventory.root) / unresolved_target
+        if unresolved_target.is_symlink():
+            return False
+        target = unresolved_target.resolve()
+    except (OSError, RuntimeError, ValueError):
         return False
     boundary = boundary_root or inventory.root
     try:

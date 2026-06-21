@@ -10008,8 +10008,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.task-session.conductor.inspect.v1", payload["schema"])
             self.assertTrue(payload["read_only"])
             self.assertEqual("ready", payload["conductor"]["status"])
-            self.assertEqual(str(root), payload["conductor"]["coordination_root"])
-            self.assertEqual(str(root), payload["conductor"]["integration_root"])
+            self.assertEqual(str(root.resolve()), payload["conductor"]["coordination_root"])
+            self.assertEqual(str(root.resolve()), payload["conductor"]["integration_root"])
             self.assertIn("project/verification/work-claims", payload["conductor"]["living_routes"])
             self.assertIn("project/verification/handoffs", payload["conductor"]["living_routes"])
             self.assertIn("project/verification/task-sessions", payload["conductor"]["living_routes"])
@@ -10700,7 +10700,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, popen.call_count)
             popen_args = popen.call_args.args[0]
             self.assertIn("-c", popen_args)
-            self.assertIn(str(root), popen_args)
+            self.assertIn(str(root.resolve()), popen_args)
 
             runtime_dir = root / ".mylittleharness/runtime/mlhd"
             self.assertTrue((runtime_dir / "pid.json").is_file())
@@ -36280,12 +36280,12 @@ class CliTests(unittest.TestCase):
                 self.assertIn(required_key, tool["outputSchema"]["required"])
             self.assertEqual("full", structured["mode"])
             self.assertFalse(structured["degraded"])
-            self.assertEqual(str(root), structured["root"]["path"])
+            self.assertEqual(str(root.resolve()), structured["root"]["path"])
             self.assertEqual("coarse-routing-only", structured["root"]["classificationScope"])
             self.assertFalse(structured["root"]["certifiesLifecycleValidity"])
             self.assertTrue(structured["root"]["requiresRouteValidation"])
-            self.assertEqual(str(root), structured["rootSelection"]["defaultRoot"])
-            self.assertEqual(str(root), structured["rootSelection"]["selectedRoot"])
+            self.assertEqual(str(root.resolve()), structured["rootSelection"]["defaultRoot"])
+            self.assertEqual(str(root.resolve()), structured["rootSelection"]["selectedRoot"])
             self.assertTrue(structured["rootSelection"]["inventoryReloadedPerCall"])
             self.assertFalse(structured["rootSelection"]["rootKindIsLifecycleCertification"])
             self.assertEqual("ok", structured["status"])
@@ -36550,14 +36550,14 @@ class CliTests(unittest.TestCase):
             self.assertFalse((default_root / ".mylittleharness/generated").exists())
             self.assertFalse((selected_root / ".mylittleharness/generated").exists())
             structured = jsonrpc_lines(output.getvalue())[0]["result"]["structuredContent"]
-            self.assertEqual(str(selected_root), structured["root"]["path"])
+            self.assertEqual(str(selected_root.resolve()), structured["root"]["path"])
             self.assertEqual("live_operating_root", structured["root"]["kind"])
-            self.assertEqual(str(default_root), structured["rootSelection"]["defaultRoot"])
-            self.assertEqual(str(selected_root), structured["rootSelection"]["selectedRoot"])
-            self.assertEqual(str(selected_root), structured["rootSelection"]["requestedRoot"])
-            self.assertEqual(str(default_root), structured["runtime"]["startupRoot"])
-            self.assertEqual(str(selected_root), structured["runtime"]["selectedRoot"])
-            self.assertEqual(str(selected_root), structured["runtime"]["requestedRoot"])
+            self.assertEqual(str(default_root.resolve()), structured["rootSelection"]["defaultRoot"])
+            self.assertEqual(str(selected_root.resolve()), structured["rootSelection"]["selectedRoot"])
+            self.assertEqual(str(selected_root.resolve()), structured["rootSelection"]["requestedRoot"])
+            self.assertEqual(str(default_root.resolve()), structured["runtime"]["startupRoot"])
+            self.assertEqual(str(selected_root.resolve()), structured["runtime"]["selectedRoot"])
+            self.assertEqual(str(selected_root.resolve()), structured["runtime"]["requestedRoot"])
             self.assertEqual("1.0.0", structured["runtime"]["packageVersion"])
             self.assertIn("adapter.py", structured["runtime"]["modulePath"])
             self.assertTrue(
@@ -36602,10 +36602,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(responses[1]["result"]["isError"])
             self.assertIn("root is required", responses[1]["result"]["content"][0]["text"])
             structured = responses[2]["result"]["structuredContent"]
-            self.assertEqual(str(selected_root), structured["root"]["path"])
+            self.assertEqual(str(selected_root.resolve()), structured["root"]["path"])
             self.assertEqual("", structured["rootSelection"]["defaultRoot"])
-            self.assertEqual(str(selected_root), structured["rootSelection"]["selectedRoot"])
-            self.assertEqual(str(selected_root), structured["rootSelection"]["requestedRoot"])
+            self.assertEqual(str(selected_root.resolve()), structured["rootSelection"]["selectedRoot"])
+            self.assertEqual(str(selected_root.resolve()), structured["rootSelection"]["requestedRoot"])
             self.assertFalse(structured["rootSelection"]["startupRootAvailable"])
             self.assertTrue(structured["rootSelection"]["routerMode"])
             self.assertEqual("", structured["runtime"]["startupRoot"])
@@ -36637,8 +36637,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse((root / ".mylittleharness/generated").exists())
             structured = jsonrpc_lines(output.getvalue())[0]["result"]["structuredContent"]
             self.assertIn("docs/root-aware-refresh.md [product-doc; optional; present]", structured["sources"])
-            self.assertEqual(str(root), structured["rootSelection"]["selectedRoot"])
-            self.assertEqual(str(root), structured["runtime"]["startupRoot"])
+            self.assertEqual(str(root.resolve()), structured["rootSelection"]["selectedRoot"])
+            self.assertEqual(str(root.resolve()), structured["runtime"]["startupRoot"])
 
     def test_adapter_serve_mcp_stdio_protocol_and_tool_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -40269,7 +40269,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(posture.git_available)
             self.assertTrue(posture.is_worktree)
             self.assertEqual("unknown", posture.state)
-            self.assertEqual(str(root), posture.top_level)
+            self.assertEqual(str(root.resolve()), posture.top_level)
             self.assertIn("decode failed", posture.detail)
 
     def test_probe_vcs_preserves_non_ascii_porcelain_paths(self) -> None:
@@ -41546,9 +41546,10 @@ def snapshot_tree_bytes(root: Path) -> dict[str, bytes]:
 def fail_once_when_replace_targets(target_path: Path):
     original_replace = atomic_files._replace_path
     state = {"failed": False}
+    target_path = target_path.resolve()
 
     def replace(source: Path, target: Path) -> None:
-        if not state["failed"] and target == target_path:
+        if not state["failed"] and target.resolve() == target_path:
             state["failed"] = True
             raise OSError("injected replace failure")
         original_replace(source, target)
