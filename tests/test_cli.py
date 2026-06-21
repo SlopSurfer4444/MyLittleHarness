@@ -10700,6 +10700,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, popen.call_count)
             popen_args = popen.call_args.args[0]
             self.assertIn("-c", popen_args)
+            worker_loop_code = popen_args[2]
+            self.assertIn("CREATE_NO_WINDOW", worker_loop_code)
+            self.assertIn("subprocess.run(runner, **run_kwargs)", worker_loop_code)
+            popen_kwargs = popen.call_args.kwargs
+            if os.name == "nt":
+                self.assertIn("creationflags", popen_kwargs)
+                self.assertTrue(popen_kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW)
+            else:
+                self.assertNotIn("creationflags", popen_kwargs)
+
             self.assertIn(str(root.resolve()), popen_args)
 
             runtime_dir = root / ".mylittleharness/runtime/mlhd"

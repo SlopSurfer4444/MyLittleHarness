@@ -72,10 +72,15 @@ _MLHD_WORKER_LOOP_CODE = "\n".join(
         "else:",
         "    sys.exit(0)",
         "runner = [sys.executable, '-m', 'mylittleharness', '--root', str(root), 'mlhd', 'run-once', '--apply', '--quiet-period-seconds', quiet_period_seconds]",
+        "run_kwargs = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'check': False}",
+        "if os.name == 'nt':",
+        "    creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)",
+        "    if creationflags:",
+        "        run_kwargs['creationflags'] = creationflags",
         "while True:",
         "    if not lock_path.exists() or not pid_path.exists():",
         "        break",
-        "    subprocess.run(runner, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)",
+        "    subprocess.run(runner, **run_kwargs)",
         "    time.sleep(interval_seconds)",
     ]
 )
@@ -721,7 +726,11 @@ def _spawn_mlhd_worker(root: Path, *, quiet_period_seconds: float) -> subprocess
         "close_fds": True,
     }
     if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
         if creationflags:
             kwargs["creationflags"] = creationflags
     return subprocess.Popen(_mlhd_worker_command(root, quiet_period_seconds=quiet_period_seconds), **kwargs)
