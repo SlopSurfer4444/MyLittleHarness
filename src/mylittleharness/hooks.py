@@ -5641,16 +5641,16 @@ def _git_reports_deleted_path_for_root(root: Path, rel_path: str) -> bool:
 
 
 def _git_stage_pathspecs(command: str) -> list[str]:
-    subcommand, tokens, subcommand_index = _git_command_context(command)
+    subcommand, tokens, raw_tokens, subcommand_index = _git_command_context_tokens(command)
     if subcommand not in {"add", "stage"} or subcommand_index < 0:
         return []
     pathspecs: list[str] = []
     option_mode = True
-    for token in tokens[subcommand_index + 1 :]:
+    for token, raw_token in zip(tokens[subcommand_index + 1 :], raw_tokens[subcommand_index + 1 :]):
         clean = _clean_token(token)
         if not clean:
             continue
-        if _is_shell_command_separator(token, clean):
+        if _is_shell_command_separator(raw_token, clean):
             return []
         if clean == "--":
             option_mode = False
@@ -5662,7 +5662,7 @@ def _git_stage_pathspecs(command: str) -> list[str]:
         if clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
             pathspecs.append(clean)
             continue
-        pathspec = _clean_hook_path_token(str(token))
+        pathspec = _clean_hook_path_token(str(raw_token))
         if pathspec:
             pathspecs.append(pathspec)
     return pathspecs
