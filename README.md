@@ -166,6 +166,8 @@ Optional helpers reduce repeated reading. They do not move authority out of the 
 
 The current product posture is a local `1.0.0` release candidate. The release confidence claim is documentation-and-verification based, not a public publication claim.
 
+See `CHANGELOG.md` and `RELEASE_NOTES.md` for the local RC1 checkpoint summary, verification expectations, and owner-approval boundary.
+
 The local release checklist is:
 
 - package metadata and runtime version agree on `1.0.0`
@@ -188,6 +190,8 @@ Use focused tests for bounded edits, then broader verification when the touched 
 
 ## Docs Map
 
+- `CHANGELOG.md`: local release-candidate change history.
+- `RELEASE_NOTES.md`: local RC1 readiness notes and owner-approval boundary.
 - `docs/README.md`: product documentation index and release posture.
 - `docs/security.md`: local trust and security boundaries.
 - `docs/reference/command-surface.md`: command overview.
