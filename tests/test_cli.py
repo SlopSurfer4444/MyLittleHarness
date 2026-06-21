@@ -33700,13 +33700,53 @@ class CliTests(unittest.TestCase):
             self.assertIn("remote=origin", messages)
             self.assertIn("tag commit matches main", messages)
 
+            (product_root / "README.md").write_text("# Product\n\nPost-tag hook fix.\n", encoding="utf-8")
+            self.assertEqual(run_git("add", "README.md").returncode, 0)
+            post_tag_commit = run_git(
+                "-c",
+                "user.name=MLH Test",
+                "-c",
+                "user.email=mlh-test@example.invalid",
+                "commit",
+                "-m",
+                "Post-tag hook fix",
+            )
+            self.assertEqual(post_tag_commit.returncode, 0, post_tag_commit.stderr)
+            moved_main_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                hook_input,
+            )
+            moved_main_codes = {finding["code"] for finding in moved_main_payload["findings"]}
+            self.assertTrue(moved_main_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", moved_main_codes)
+            self.assertNotIn("hooks-policy-allow-product-source-release-publication-push", moved_main_codes)
+
+            tag_source_command = (
+                "git "
+                + "push --dry-run origin "
+                + "refs/tags/v1.0.0-rc1:refs/heads/main "
+                + "refs/tags/v1.0.0-rc1:refs/tags/v1.0.0-rc1"
+            )
+            tag_source_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "workdir": str(product_root), "command": tag_source_command}),
+            )
+            tag_source_codes = {finding["code"] for finding in tag_source_payload["findings"]}
+            self.assertFalse(tag_source_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-push", tag_source_codes)
+            self.assertIn("hooks-policy-allow-product-source-release-publication-push", tag_source_codes)
+
             unsafe_commands = {
                 "ordinary_tag_only": "git " + "push origin refs/tags/v1.0.0-rc1",
                 "bare_tag": "git " + "push origin main v1.0.0-rc1",
-                "wrong_remote": exact_command.replace(" origin ", " upstream "),
-                "force": exact_command.replace("push --dry-run", "push --force"),
+                "wrong_remote": tag_source_command.replace(" origin ", " upstream "),
+                "force": tag_source_command.replace("push --dry-run", "push --force"),
                 "wildcard": "git " + "push origin refs/heads/main:refs/heads/main refs/tags/*",
-                "tag_move": exact_command.replace(
+                "tag_move": tag_source_command.replace(
                     "refs/tags/v1.0.0-rc1:refs/tags/v1.0.0-rc1",
                     "refs/tags/v1.0.0-rc1:refs/tags/v1.0.0",
                 ),

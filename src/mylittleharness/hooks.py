@@ -3812,7 +3812,7 @@ def _is_product_source_release_publication_push_command(
         return False
     return (
         _product_source_release_publication_intent_present(inventory, command, tag_name)
-        and _product_source_release_publication_ready(product_root, tag_name)
+        and _product_source_release_publication_ready(product_root, tag_name, operands[1])
     )
 
 
@@ -3853,7 +3853,7 @@ def _is_exact_release_publication_refspecs(operands: list[str]) -> bool:
 
 def _release_publication_branch_targets_main(refspec: str) -> bool:
     source, target = _split_exact_refspec(refspec)
-    if source not in {"main", "refs/heads/main"}:
+    if source not in {"main", "refs/heads/main"} and not source.startswith("refs/tags/"):
         return False
     return target in {"", "refs/heads/main"}
 
@@ -3903,13 +3903,20 @@ def _product_source_release_publication_intent_present(
     return has_release_context and has_owner_context
 
 
-def _product_source_release_publication_ready(product_root: Path, tag_name: str) -> bool:
-    return (
-        _git_worktree_clean_for_root(product_root)
-        and _git_remote_exists_for_root(product_root, "origin")
-        and _git_ref_commit_for_root(product_root, "refs/heads/main")
-        == _git_ref_commit_for_root(product_root, f"refs/tags/{tag_name}^{{commit}}")
-    )
+def _product_source_release_publication_ready(product_root: Path, tag_name: str, branch_refspec: str) -> bool:
+    if not _git_worktree_clean_for_root(product_root) or not _git_remote_exists_for_root(product_root, "origin"):
+        return False
+    tag_commit = _git_ref_commit_for_root(product_root, f"refs/tags/{tag_name}^{{commit}}")
+    if not tag_commit:
+        return False
+    branch_source, _branch_target = _split_exact_refspec(branch_refspec)
+    if branch_source in {"main", "refs/heads/main"}:
+        branch_commit = _git_ref_commit_for_root(product_root, "refs/heads/main")
+    elif branch_source == f"refs/tags/{tag_name}":
+        branch_commit = tag_commit
+    else:
+        return False
+    return bool(branch_commit) and branch_commit == tag_commit
 
 
 def _git_worktree_clean_for_root(root: Path) -> bool:
