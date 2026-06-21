@@ -130,7 +130,7 @@ python -m mylittleharness --root "$TargetRoot" repair --dry-run
 python -m mylittleharness --root "$TargetRoot" detach --dry-run
 ```
 
-Apply modes stay explicit and target-bound. Commands such as `init --apply`, `migrate --apply`, `repair --apply`, and `detach --apply` are available when the dry-run route is reviewed, but they are not required first-contact steps.
+Apply modes stay explicit and target-bound. Commands such as `init --apply`, `migrate --apply`, `repair --apply`, and `detach --apply` are available when the dry-run route is reviewed, but they are not required first-contact steps. If `repair --dry-run` reports target-bound changes needed for a fresh root, run `repair --apply` after review and rerun `check` or `check --quick` before treating first contact as clean.
 
 ## Agent And Operator Details
 

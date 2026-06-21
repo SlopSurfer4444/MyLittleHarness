@@ -274,6 +274,8 @@ class PackageMetadataTests(unittest.TestCase):
         prefix = "mylittleharness-1.0.0/"
         self.assertIn(prefix + "pyproject.toml", names)
         self.assertIn(prefix + "README.md", names)
+        self.assertIn(prefix + "CHANGELOG.md", names)
+        self.assertIn(prefix + "RELEASE_NOTES.md", names)
         self.assertIn(prefix + "LICENSE", names)
         self.assertIn(prefix + "build_backend/mylittleharness_build.py", names)
         self.assertIn(prefix + "src/mylittleharness/cli.py", names)
@@ -514,6 +516,7 @@ class PackageMetadataTests(unittest.TestCase):
             'python -m mylittleharness --root "$TargetRoot" repair --dry-run',
             'python -m mylittleharness --root "$TargetRoot" detach --dry-run',
             "Apply modes stay explicit and target-bound",
+            "`repair --apply` after review and rerun `check` or `check --quick`",
             "they are not required first-contact steps",
         ):
             self.assertIn(expected, readme)
@@ -526,6 +529,7 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "The first-run operator path is deliberately shorter than the full diagnostic surface",
             "then point `--root` at the target repository",
+            "`repair --apply` after reviewing the dry-run and rerun `check` or `check --quick`",
             "not prerequisites for first-run correctness",
         ):
             self.assertIn(expected, docs_readme)

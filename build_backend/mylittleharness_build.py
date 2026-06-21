@@ -15,7 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 _PATH_SAFE_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _PATH_SAFE_VERSION = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$")
 _PATH_FORBIDDEN_CHARS = {"/", "\\", ":"}
-_SDIST_FILE_NAMES = ("AGENTS.md", "LICENSE", "README.md", "pyproject.toml", "uv.lock")
+_SDIST_FILE_NAMES = (
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "RELEASE_NOTES.md",
+    "pyproject.toml",
+    "uv.lock",
+)
 _SDIST_DIR_NAMES = (".agents", ".mylittleharness", "build_backend", "docs", "project", "src", "tests")
 _SDIST_EXCLUDED_PARTS = {
     ".git",
