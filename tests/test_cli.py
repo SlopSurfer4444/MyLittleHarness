@@ -33971,12 +33971,19 @@ class CliTests(unittest.TestCase):
             fixture_rel = "project/verification/queue-runner-fixtures/cliproxy-live-scoped-write-proof-2026-06-21.txt"
             (root / fixture_rel).parent.mkdir(parents=True, exist_ok=True)
             (root / fixture_rel).write_text(
-                "cliproxy live scoped-write queue runner proof fixture\n\n"
+                "cliproxy live scoped-write smoke fixture\n\n"
                 "Seeded by the local smoke harness before provider execution.\n"
+                "The live scoped writer must report this exact path as an applied write.\n"
                 "No secrets or raw provider payloads belong in this file.\n",
                 encoding="utf-8",
             )
             staged = (source_rel, test_rel, state_rel, archive_rel, evidence_rel, fixture_rel)
+            unsafe_fixture_rel = "project/" + "verification/queue-runner-fixtures/unsafe-smoke-fixture.txt"
+            (root / unsafe_fixture_rel).write_text(
+                "cliproxy live scoped-write smoke fixture\n\n"
+                "The live scoped writer must report this exact path as an applied write.\n",
+                encoding="utf-8",
+            )
             commit_input = json.dumps(
                 {
                     "toolName": "shell_command",
@@ -33989,15 +33996,22 @@ class CliTests(unittest.TestCase):
                 payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
             with patch("mylittleharness.hooks._git_staged_paths", return_value=staged + (extra_rel,)):
                 bad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            unsafe_staged = (source_rel, test_rel, state_rel, archive_rel, evidence_rel, unsafe_fixture_rel)
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=unsafe_staged):
+                unsafe_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
             bad_codes = {finding["code"] for finding in bad_payload["findings"]}
+            unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
             self.assertIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
             self.assertTrue(bad_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", bad_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", bad_codes)
+            self.assertTrue(unsafe_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", unsafe_codes)
 
     def test_hooks_pre_tool_allows_top_level_verification_post_closeout_package_staging_payload(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

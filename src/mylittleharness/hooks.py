@@ -5246,7 +5246,16 @@ def _is_reviewed_queue_runner_fixture_file(inventory: Inventory, path: str) -> b
     except (OSError, UnicodeDecodeError):
         return False
     content = text.casefold()
-    return bool(content.strip()) and "queue runner" in content and "proof" in content
+    if not content.strip():
+        return False
+    has_safety_boundary = "no secrets" in content and "raw provider payload" in content
+    has_explicit_proof = "queue runner" in content and "proof" in content
+    has_scoped_write_smoke = (
+        "smoke fixture" in content
+        and "live scoped writer" in content
+        and "applied write" in content
+    )
+    return has_safety_boundary and (has_explicit_proof or has_scoped_write_smoke)
 
 
 def _is_reviewed_post_closeout_archive_plan_file(inventory: Inventory, path: str) -> bool:
