@@ -4165,6 +4165,8 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
         return False
     normalized = {_normalize_hook_path(_hook_route_rel_path(inventory, pathspec) or pathspec).casefold() for pathspec in pathspecs}
     if any(_is_top_level_verification_checkpoint_path(path) for path in normalized):
+        if _coherent_post_closeout_lifecycle_vcs_stage_paths(inventory, pathspecs):
+            return True
         return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in normalized)
     return all(_is_exact_post_closeout_stage_file(inventory, pathspec) for pathspec in pathspecs)
 
@@ -4174,9 +4176,10 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
         return False
     if not _is_narrow_local_vcs_commit_command(command):
         return False
-    staged = {_normalize_hook_path(path).casefold() for path in _git_staged_paths(inventory)}
+    staged_paths = _git_staged_paths(inventory)
+    staged = {_normalize_hook_path(path).casefold() for path in staged_paths}
     if any(_is_top_level_verification_checkpoint_path(path) for path in staged):
-        return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in staged)
+        return bool(_coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, staged_paths))
     return True
 
 
@@ -4184,6 +4187,22 @@ def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, comman
     if not _is_post_closeout_local_vcs_commit_command(inventory, command):
         return set()
     return _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, _git_staged_paths(inventory))
+
+
+def _coherent_post_closeout_lifecycle_vcs_stage_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    direct = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
+    if direct:
+        return direct
+    staged_paths = _git_staged_paths(inventory)
+    if not staged_paths:
+        return set()
+    normalized_current = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized_current:
+        return set()
+    combined = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, tuple(staged_paths) + tuple(paths))
+    return combined if combined and normalized_current <= combined else set()
 
 
 def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object], command: str) -> ReviewedLocalVcsCheckpoint:
@@ -4456,15 +4475,30 @@ def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventor
     last_archive_rel = _last_archived_plan_rel_path(inventory)
     if not last_archive_rel:
         return set()
-    evidence_paths = {path for path in normalized if _is_agent_run_evidence_route_path(path)}
-    allowed = {state_rel, roadmap_rel, last_archive_rel, *evidence_paths}
+    archive_paths = {path for path in normalized if _is_deferred_archive_plan_route_path(path)}
+    evidence_paths = {
+        path
+        for path in normalized
+        if _is_agent_run_evidence_route_path(path) or _is_top_level_verification_checkpoint_path(path)
+    }
+    allowed = {state_rel, roadmap_rel, *archive_paths, *evidence_paths}
     if any(path not in allowed for path in normalized):
         return set()
-    if state_rel not in normalized or last_archive_rel not in normalized or not evidence_paths:
+    if state_rel not in normalized or last_archive_rel not in archive_paths or not evidence_paths:
         return set()
-    if not all(_is_reviewed_agent_run_evidence_file(inventory, path) for path in evidence_paths):
+    if not all(_is_reviewed_post_closeout_archive_plan_file(inventory, path) for path in archive_paths):
+        return set()
+    if not all(_is_reviewed_lifecycle_finalization_evidence_file(inventory, path) for path in evidence_paths):
         return set()
     return normalized
+
+
+def _is_reviewed_lifecycle_finalization_evidence_file(inventory: Inventory, path: str) -> bool:
+    if _is_agent_run_evidence_route_path(path):
+        return _is_reviewed_agent_run_evidence_file(inventory, path)
+    if _is_top_level_verification_checkpoint_path(path):
+        return _is_reviewed_top_level_verification_checkpoint_file(inventory, path)
+    return False
 
 
 def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:

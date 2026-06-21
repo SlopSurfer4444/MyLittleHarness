@@ -32617,7 +32617,24 @@ class CliTests(unittest.TestCase):
         succeeded_rel = "project/" + "verification/agent-runs/reviewed-finalization.md"
         (root / archive_rel).parent.mkdir(parents=True, exist_ok=True)
         (root / blocked_rel).parent.mkdir(parents=True, exist_ok=True)
-        (root / archive_rel).write_text("# Reviewed Closeout\n", encoding="utf-8")
+        (root / archive_rel).write_text(
+            "---\n"
+            'plan_id: "reviewed-closeout"\n'
+            'title: "Reviewed Closeout"\n'
+            'status: "complete"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'phase_status: "complete"\n'
+            'docs_decision: "not-needed"\n'
+            "---\n"
+            "# Reviewed Closeout\n\n"
+            "## MLH Closeout Writeback\n\n"
+            "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            "- docs_decision: not-needed\n"
+            "- commit_decision: commit exact route package only\n"
+            "- residual_risk: broad Git, push, release, and lifecycle authority remain blocked\n"
+            "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
         for rel, status in ((blocked_rel, "blocked"), (succeeded_rel, "succeeded")):
             (root / rel).write_text(
                 "---\n"
@@ -33839,6 +33856,138 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertIn("prior reviewed staged lifecycle/evidence diff", messages)
             self.assertIn("does not approve lifecycle content, archive, push, release", messages)
+
+    def test_hooks_pre_tool_allows_top_level_verification_post_closeout_finalization_payload(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, _succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            dogfood_rel = "project/verification/symphony-live-multirole-no-write-dogfood-2026-06-21.md"
+            hotfix_rel = "project/verification/symphony-mlh-hook-verification-checkpoint-staging-hotfix-2026-06-21.md"
+            (root / dogfood_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / dogfood_rel).write_text(
+                "---\n"
+                'title: "Symphony live multi-role no-write dogfood"\n'
+                'status: "partially-verified"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "source_members:\n"
+                '  - "project/verification/symphony-provider-cliproxy-readiness-design.md"\n'
+                "---\n"
+                "# Symphony live multi-role no-write dogfood\n\n"
+                "Boundary: this proves the live provider-backed no-write conductor path. "
+                "It does not prove writeback, archive, staging, commit, push, provider "
+                "routing policy, release, lifecycle acceptance, or target-repo acceptance.\n",
+                encoding="utf-8",
+            )
+            (root / hotfix_rel).write_text(
+                "---\n"
+                'title: "MLH hook verification checkpoint staging hotfix"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "source_members:\n"
+                f'  - "{dogfood_rel}"\n'
+                "---\n"
+                "# MLH hook verification checkpoint staging hotfix\n\n"
+                "Boundary: this verification is evidence only. It does not approve lifecycle "
+                "acceptance, roadmap movement, staging, commit, push, release, provider routing "
+                "policy, target-repo acceptance, or public publication.\n",
+                encoding="utf-8",
+            )
+            staged = (state_rel, archive_rel, dogfood_rel, hotfix_rel)
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "commit -F reviewed-message.txt",
+                    "parameters": {"staged_files": list(staged)},
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=staged):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
+
+            bad_rel = "project/verification/not-reviewed-finalization.md"
+            (root / bad_rel).write_text("# Missing frontmatter\n", encoding="utf-8")
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=(state_rel, archive_rel, bad_rel)):
+                bad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            bad_codes = {finding["code"] for finding in bad_payload["findings"]}
+            self.assertTrue(bad_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", bad_codes)
+
+    def test_hooks_pre_tool_allows_top_level_verification_post_closeout_package_staging_payload(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, _succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            prior_archive_rel = "project/archive/plans/prior-reviewed-closeout.md"
+            (root / prior_archive_rel).write_text((root / archive_rel).read_text(encoding="utf-8"), encoding="utf-8")
+            dogfood_rel = "project/verification/symphony-live-multirole-no-write-dogfood-2026-06-21.md"
+            hotfix_rel = "project/verification/symphony-mlh-hook-verification-checkpoint-staging-hotfix-2026-06-21.md"
+            for rel, body in (
+                (
+                    dogfood_rel,
+                    "Boundary: this proves the live provider-backed no-write conductor path. "
+                    "It does not prove writeback, archive, staging, commit, push, provider routing "
+                    "policy, release, lifecycle acceptance, or target-repo acceptance.\n",
+                ),
+                (
+                    hotfix_rel,
+                    "Boundary: this verification is evidence only. It does not approve lifecycle "
+                    "acceptance, roadmap movement, staging, commit, push, release, provider routing "
+                    "policy, target-repo acceptance, or public publication.\n",
+                ),
+            ):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(
+                    "---\n"
+                    f'title: "{Path(rel).stem}"\n'
+                    'status: "passed"\n'
+                    'route: "verification"\n'
+                    f'related_plan: "{archive_rel}"\n'
+                    "---\n"
+                    f"# {Path(rel).stem}\n\n"
+                    + body,
+                    encoding="utf-8",
+                )
+            stage_paths = (state_rel, prior_archive_rel, archive_rel, dogfood_rel, hotfix_rel)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -f -- " + " ".join(stage_paths),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+
+            bad_archive_rel = "project/archive/plans/unreviewed-closeout.md"
+            (root / bad_archive_rel).write_text("# Missing reviewed closeout frontmatter\n", encoding="utf-8")
+            bad_stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -f -- " + " ".join((state_rel, bad_archive_rel, dogfood_rel)),
+                }
+            )
+            bad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bad_stage_input)
+            bad_codes = {finding["code"] for finding in bad_payload["findings"]}
+            self.assertTrue(bad_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", bad_codes)
 
     def test_hooks_pre_tool_keeps_unsafe_post_closeout_lifecycle_vcs_finalization_blocked(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
