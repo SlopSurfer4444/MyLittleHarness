@@ -3811,7 +3811,7 @@ def _is_product_source_release_publication_push_command(
     if not tag_name:
         return False
     return (
-        _product_source_release_publication_intent_present(inventory, command, tag_name)
+        _product_source_release_publication_intent_present(inventory, command, tag_name, product_root)
         and _product_source_release_publication_ready(product_root, tag_name, operands[1])
     )
 
@@ -3881,18 +3881,18 @@ def _split_exact_refspec(refspec: str) -> tuple[str, str]:
 
 
 def _product_source_release_publication_intent_present(
-    inventory: Inventory, command: str, tag_name: str
+    inventory: Inventory, command: str, tag_name: str, product_root: Path | None
 ) -> bool:
     lowered_command = str(command or "").casefold()
     if "push" not in lowered_command or tag_name.casefold() not in lowered_command:
         return False
     state = inventory.state
     if not state or not state.exists or not state.path:
-        return False
+        return _product_source_release_docs_name_tag(product_root, tag_name)
     try:
         state_text = state.path.read_text(encoding="utf-8").casefold()
     except (OSError, UnicodeDecodeError):
-        return False
+        state_text = ""
     has_release_context = "release" in state_text or "publication" in state_text
     has_owner_context = (
         "owner approval" in state_text
@@ -3900,7 +3900,24 @@ def _product_source_release_publication_intent_present(
         or "explicit owner intent" in state_text
         or "release-publication" in state_text
     )
-    return has_release_context and has_owner_context
+    return (has_release_context and has_owner_context) or _product_source_release_docs_name_tag(
+        product_root, tag_name
+    )
+
+
+def _product_source_release_docs_name_tag(product_root: Path | None, tag_name: str) -> bool:
+    if product_root is None or not tag_name:
+        return False
+    tag_variants = {tag_name.casefold(), tag_name.removeprefix("v").casefold()}
+    for filename in ("RELEASE_NOTES.md", "CHANGELOG.md"):
+        path = product_root / filename
+        try:
+            text = path.read_text(encoding="utf-8").casefold()
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not any(variant in text for variant in tag_variants):
+            return False
+    return True
 
 
 def _product_source_release_publication_ready(product_root: Path, tag_name: str, branch_refspec: str) -> bool:
