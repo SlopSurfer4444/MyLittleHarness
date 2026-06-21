@@ -33968,7 +33968,15 @@ class CliTests(unittest.TestCase):
                 "target-repo acceptance, or public publication.\n",
                 encoding="utf-8",
             )
-            staged = (source_rel, test_rel, state_rel, archive_rel, evidence_rel)
+            fixture_rel = "project/verification/queue-runner-fixtures/cliproxy-live-scoped-write-proof-2026-06-21.txt"
+            (root / fixture_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / fixture_rel).write_text(
+                "cliproxy live scoped-write queue runner proof fixture\n\n"
+                "Seeded by the local smoke harness before provider execution.\n"
+                "No secrets or raw provider payloads belong in this file.\n",
+                encoding="utf-8",
+            )
+            staged = (source_rel, test_rel, state_rel, archive_rel, evidence_rel, fixture_rel)
             commit_input = json.dumps(
                 {
                     "toolName": "shell_command",

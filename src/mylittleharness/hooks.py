@@ -4479,7 +4479,7 @@ def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventor
     evidence_paths = {
         path
         for path in normalized
-        if _is_agent_run_evidence_route_path(path) or _is_top_level_verification_checkpoint_path(path)
+        if _is_verification_checkpoint_route_path(path) or _is_top_level_verification_checkpoint_path(path)
     }
     allowed = {state_rel, roadmap_rel, *archive_paths, *evidence_paths}
     if any(path not in allowed for path in normalized):
@@ -4552,8 +4552,8 @@ def _post_closeout_archived_plan_target_artifacts(inventory: Inventory, paths: s
 
 
 def _is_reviewed_lifecycle_finalization_evidence_file(inventory: Inventory, path: str) -> bool:
-    if _is_agent_run_evidence_route_path(path):
-        return _is_reviewed_agent_run_evidence_file(inventory, path)
+    if _is_verification_checkpoint_route_path(path):
+        return _is_reviewed_verification_checkpoint_file(inventory, path)
     if _is_top_level_verification_checkpoint_path(path):
         return _is_reviewed_top_level_verification_checkpoint_file(inventory, path)
     return False
