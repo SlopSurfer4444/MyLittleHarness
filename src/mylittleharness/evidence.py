@@ -2495,7 +2495,7 @@ def _summarize_agent_run_source_hash_findings(findings: list[Finding], code_pref
             summarized.append(finding)
 
     if len(stale_findings) > AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD:
-        summarized.append(_agent_run_source_hash_summary_finding(stale_findings, f"{stale_code}-summary", "warn", "stale"))
+        summarized.append(_agent_run_source_hash_summary_finding(stale_findings, f"{stale_code}-summary", "info", "stale"))
     else:
         summarized.extend(stale_findings)
 

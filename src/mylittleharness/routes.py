@@ -246,9 +246,14 @@ ROUTE_REGISTRY: tuple[MemoryRoute, ...] = LIVE_LIFECYCLE_ROUTES + SUPPORT_ROUTES
 ROUTE_BY_ID = {route.route_id: route for route in ROUTE_REGISTRY}
 LEGACY_ROUTE_ID_ALIASES = {
     "check": "verification",
+    "claim": "work-claims",
     "docs": "product-docs",
     "evidence": "agent-runs",
+    "handoff": "handoffs",
+    "intake": "verification",
     "memory-hygiene": "archive",
+    "plan": "active-plan",
+    "writeback": "closeout-writeback",
 }
 CHANGED_ROUTE_METADATA_PROFILES: dict[str, ChangedRouteMetadataProfile] = {
     "adrs": ChangedRouteMetadataProfile("adrs", ("status",), ()),

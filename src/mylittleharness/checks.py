@@ -754,8 +754,8 @@ def _accepted_handoff_legacy_route_alias(route_id: str, data: dict[str, object])
     if normalized == "check":
         if not any(ref == "project/verification" or ref.startswith("project/verification/") for ref in evidence_refs):
             return None
-    elif normalized == "evidence":
-        if not any(ref.startswith("project/verification/agent-runs/") for ref in evidence_refs):
+    elif normalized in {"evidence", "intake"}:
+        if not any(ref == "project/verification" or ref.startswith("project/verification/") for ref in evidence_refs):
             return None
     return target
 

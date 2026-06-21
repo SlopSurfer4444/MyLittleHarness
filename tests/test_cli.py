@@ -6831,6 +6831,78 @@ class CliTests(unittest.TestCase):
             ]
             self.assertEqual(codes.count("dashboard-agent-run-record-stale-summary"), 1)
             self.assertNotIn("dashboard-agent-run-record-stale", codes)
+            stale_summary = [
+                finding
+                for section in payload["sections"]
+                for finding in section["findings"]
+                if finding["code"] == "dashboard-agent-run-record-stale-summary"
+            ]
+            self.assertEqual(["info"], [finding["severity"] for finding in stale_summary])
+
+    def test_agent_run_source_hash_small_stale_set_still_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            work_path = root / "src/work.py"
+            work_path.write_text("def work():\n    return 'before'\n", encoding="utf-8")
+            old_hash = hashlib.sha256(work_path.read_bytes()).hexdigest()
+            record_dir = root / "project/verification/agent-runs"
+            record_dir.mkdir(parents=True)
+            (record_dir / "run-1.md").write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-1"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "preserve exact stale warning"\n'
+                'assigned_scope: "small-stale-source-hash"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "verification-passed"\n'
+                'attempt_budget: "1/1"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none"\n'
+                "input_refs:\n"
+                '  - "project/implementation-plan.md"\n'
+                "output_refs:\n"
+                '  - "src/work.py"\n'
+                "claimed_paths:\n"
+                '  - "src/work.py"\n'
+                "changed_files:\n"
+                '  - "src/work.py"\n'
+                "commands:\n"
+                '  - "pytest -q tests/test_cli.py"\n'
+                "verification_refs:\n"
+                '  - "project/verification/smoke.md"\n'
+                "source_hashes:\n"
+                f'  - "src/work.py sha256={old_hash}"\n'
+                "---\n"
+                "# Agent Run\n",
+                encoding="utf-8",
+            )
+            work_path.write_text("def work():\n    return 'after'\n", encoding="utf-8")
+
+            payload_output = io.StringIO()
+            with redirect_stdout(payload_output):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+            payload = json.loads(payload_output.getvalue())
+            stale_findings = [
+                finding
+                for section in payload["sections"]
+                for finding in section["findings"]
+                if finding["code"] == "dashboard-agent-run-record-stale"
+            ]
+            self.assertEqual(["warn"], [finding["severity"] for finding in stale_findings])
+            self.assertFalse(
+                [
+                    finding
+                    for section in payload["sections"]
+                    for finding in section["findings"]
+                    if finding["code"] == "dashboard-agent-run-record-stale-summary"
+                ]
+            )
 
     def test_agent_run_retirement_summary_skips_active_agent_run_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12685,6 +12757,16 @@ class CliTests(unittest.TestCase):
             root = make_operating_root(Path(tmp))
             handoff_dir = root / "project/verification/handoffs"
             handoff_dir.mkdir(parents=True, exist_ok=True)
+            smoke_rel = "project/verification/top-level-smoke.md"
+            (root / smoke_rel).write_text(
+                "---\n"
+                'title: "Top level smoke"\n'
+                'status: "passed"\n'
+                'docs_decision: "not-needed"\n'
+                "---\n"
+                "# Smoke\n\nordinary verification evidence\n",
+                encoding="utf-8",
+            )
             (handoff_dir / "accepted-legacy-alias.json").write_text(
                 json.dumps(
                     {
@@ -12697,12 +12779,12 @@ class CliTests(unittest.TestCase):
                         "worker_id": "worker-a",
                         "role_id": "reviewer",
                         "execution_slice": "slice-a",
-                        "allowed_routes": ["check", "evidence"],
+                        "allowed_routes": ["check", "evidence", "intake"],
                         "write_scope": ["project/verification"],
                         "stop_conditions": ["verification fails"],
                         "context_budget": "compact packet",
                         "required_outputs": ["review"],
-                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "evidence_refs": [smoke_rel],
                         "approval_packet_refs": [],
                         "claim_refs": [],
                     },
@@ -12722,12 +12804,12 @@ class CliTests(unittest.TestCase):
                         "worker_id": "worker-b",
                         "role_id": "reviewer",
                         "execution_slice": "slice-b",
-                        "allowed_routes": ["check"],
+                        "allowed_routes": ["check", "evidence", "intake"],
                         "write_scope": ["project/verification"],
                         "stop_conditions": ["verification fails"],
                         "context_budget": "compact packet",
                         "required_outputs": ["review"],
-                        "evidence_refs": ["project/verification/agent-runs/run-1.md"],
+                        "evidence_refs": [smoke_rel],
                         "approval_packet_refs": [],
                         "claim_refs": [],
                     },
@@ -12749,8 +12831,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("historical alias for route id verification", rendered)
             self.assertIn("legacy command alias evidence", rendered)
             self.assertIn("historical alias for route id agent-runs", rendered)
+            self.assertIn("legacy command alias intake", rendered)
             self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: check"))
-            self.assertNotIn("handoff allowed_routes contains unknown route id: evidence", rendered)
+            self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: evidence"))
+            self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: intake"))
 
     def test_coordination_historical_legacy_route_aliases_cover_claims_and_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12769,7 +12853,16 @@ class CliTests(unittest.TestCase):
                         "owner_role": "coordinator",
                         "owner_actor": "codex",
                         "execution_slice": "slice-a",
-                        "claimed_routes": ["docs", "memory-hygiene", "missing-route"],
+                        "claimed_routes": [
+                            "docs",
+                            "intake",
+                            "memory-hygiene",
+                            "plan",
+                            "writeback",
+                            "claim",
+                            "handoff",
+                            "missing-route",
+                        ],
                         "claimed_paths": [],
                         "claimed_resources": [],
                         "status": "released",
@@ -12790,7 +12883,7 @@ class CliTests(unittest.TestCase):
                         "owner_role": "coordinator",
                         "owner_actor": "codex",
                         "execution_slice": "slice-b",
-                        "claimed_routes": ["docs"],
+                        "claimed_routes": ["docs", "plan", "claim"],
                         "claimed_paths": [],
                         "claimed_resources": [],
                         "status": "active",
@@ -12813,7 +12906,7 @@ class CliTests(unittest.TestCase):
                         "worker_id": "worker-a",
                         "role_id": "reviewer",
                         "execution_slice": "slice-a",
-                        "allowed_routes": ["docs"],
+                        "allowed_routes": ["docs", "handoff"],
                         "write_scope": ["docs/reference/command-surface.md"],
                         "stop_conditions": ["verification fails"],
                         "context_budget": "compact packet",
@@ -12838,7 +12931,7 @@ class CliTests(unittest.TestCase):
                         "worker_id": "worker-b",
                         "role_id": "reviewer",
                         "execution_slice": "slice-b",
-                        "allowed_routes": ["docs"],
+                        "allowed_routes": ["docs", "handoff"],
                         "write_scope": ["docs/reference/command-surface.md"],
                         "stop_conditions": ["verification fails"],
                         "context_budget": "compact packet",
@@ -12863,13 +12956,26 @@ class CliTests(unittest.TestCase):
             self.assertIn("check-coordination-evidence-work-claim-route-legacy-alias", rendered)
             self.assertIn("released work claim claimed_routes contains legacy command alias docs", rendered)
             self.assertIn("historical alias for route id product-docs", rendered)
+            self.assertIn("legacy command alias intake", rendered)
+            self.assertIn("historical alias for route id verification", rendered)
             self.assertIn("legacy command alias memory-hygiene", rendered)
             self.assertIn("historical alias for route id archive", rendered)
+            self.assertIn("legacy command alias plan", rendered)
+            self.assertIn("historical alias for route id active-plan", rendered)
+            self.assertIn("legacy command alias writeback", rendered)
+            self.assertIn("historical alias for route id closeout-writeback", rendered)
+            self.assertIn("legacy command alias claim", rendered)
+            self.assertIn("historical alias for route id work-claims", rendered)
+            self.assertIn("legacy command alias handoff", rendered)
+            self.assertIn("historical alias for route id handoffs", rendered)
             self.assertIn("check-coordination-evidence-handoff-route-legacy-alias", rendered)
             self.assertIn("accepted handoff allowed_routes contains legacy command alias docs", rendered)
             self.assertEqual(1, rendered.count("work claim claimed_routes contains unknown route id: docs"))
+            self.assertEqual(1, rendered.count("work claim claimed_routes contains unknown route id: plan"))
+            self.assertEqual(1, rendered.count("work claim claimed_routes contains unknown route id: claim"))
             self.assertEqual(1, rendered.count("work claim claimed_routes contains unknown route id: missing-route"))
             self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: docs"))
+            self.assertEqual(1, rendered.count("handoff allowed_routes contains unknown route id: handoff"))
 
             claim_status = io.StringIO()
             with redirect_stdout(claim_status):
@@ -32375,6 +32481,97 @@ class CliTests(unittest.TestCase):
                     self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", commit_codes)
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
                     self.assertIn("prior staged-diff review", commit_messages)
+
+    def test_hooks_pre_tool_requires_reviewed_top_level_verification_note_checkpoint(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            reviewed_rel = "project/verification/reviewed-checkpoint.md"
+            malformed_rel = "project/verification/malformed-checkpoint.md"
+            authority_rel = "project/verification/authority-checkpoint.md"
+            source_rel = "src/work.py"
+            (root / reviewed_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / source_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / source_rel).write_text("print('ok')\n", encoding="utf-8")
+            (root / reviewed_rel).write_text(
+                "---\n"
+                'title: "Reviewed checkpoint"\n'
+                'status: "passed"\n'
+                'docs_decision: "not-needed"\n'
+                'authority: "evidence only; does not approve lifecycle, archive, roadmap, staging, commit, push, or release"\n'
+                "---\n"
+                "# Reviewed checkpoint\n\n"
+                "This verification note is evidence only and does not approve lifecycle, archive, roadmap, staging, commit, push, or release.\n",
+                encoding="utf-8",
+            )
+            (root / malformed_rel).write_text(
+                "# Malformed checkpoint\n\n"
+                "This note lacks frontmatter even though it mentions evidence only and does not approve lifecycle, staging, or commit.\n",
+                encoding="utf-8",
+            )
+            (root / authority_rel).write_text(
+                "---\n"
+                'title: "Authority checkpoint"\n'
+                'status: "passed"\n'
+                "lifecycle: true\n"
+                "---\n"
+                "# Authority checkpoint\n\n"
+                "This note claims lifecycle authority.\n",
+                encoding="utf-8",
+            )
+
+            allowed_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"git add -- {reviewed_rel}"}),
+            )
+            allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            self.assertFalse(allowed_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", allowed_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", allowed_codes)
+
+            blocked_cases = {
+                "broad": f"git add -- project/verification",
+                "malformed": f"git add -- {malformed_rel}",
+                "authority": f"git add -- {authority_rel}",
+                "mixed": f"git add -- {reviewed_rel} {source_rel}",
+            }
+            for name, command in blocked_cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", codes)
+
+            active_root = make_active_live_root(Path(tmp) / "active", phase_status="pending")
+            active_note = active_root / reviewed_rel
+            active_note.parent.mkdir(parents=True, exist_ok=True)
+            active_note.write_text((root / reviewed_rel).read_text(encoding="utf-8"), encoding="utf-8")
+            active_payload = hook_event_payload(
+                load_inventory(active_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"git add -- {reviewed_rel}"}),
+            )
+            active_codes = {finding["code"] for finding in active_payload["findings"]}
+            self.assertTrue(active_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", active_codes)
 
     def _write_post_closeout_lifecycle_finalization_fixture(
         self,

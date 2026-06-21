@@ -3772,6 +3772,8 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return False
     if not paths:
         return False
+    if any(_is_top_level_verification_checkpoint_path(_hook_route_rel_path(inventory, path) or path) for path in paths):
+        return False
     if all(_is_existing_lifecycle_route_file(inventory, path) for path in paths):
         return True
     if _has_shell_command_separator(command):
@@ -4161,13 +4163,21 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
     pathspecs = _git_stage_pathspecs(command)
     if not pathspecs:
         return False
+    normalized = {_normalize_hook_path(_hook_route_rel_path(inventory, pathspec) or pathspec).casefold() for pathspec in pathspecs}
+    if any(_is_top_level_verification_checkpoint_path(path) for path in normalized):
+        return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in normalized)
     return all(_is_exact_post_closeout_stage_file(inventory, pathspec) for pathspec in pathspecs)
 
 
 def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: str) -> bool:
     if _has_active_plan(inventory):
         return False
-    return _is_narrow_local_vcs_commit_command(command)
+    if not _is_narrow_local_vcs_commit_command(command):
+        return False
+    staged = {_normalize_hook_path(path).casefold() for path in _git_staged_paths(inventory)}
+    if any(_is_top_level_verification_checkpoint_path(path) for path in staged):
+        return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in staged)
+    return True
 
 
 def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, command: str) -> set[str]:
@@ -5685,6 +5695,8 @@ def _is_exact_post_closeout_stage_file(
         return False
     if rel.startswith(":") or any(rel.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
         return False
+    if _is_top_level_verification_checkpoint_path(rel):
+        return _is_reviewed_top_level_verification_checkpoint_file(inventory, rel)
     raw = clean
     try:
         unresolved_target = Path(raw).expanduser()
@@ -5704,6 +5716,57 @@ def _is_exact_post_closeout_stage_file(
         return target.is_file() and not target.is_symlink()
     except (OSError, RuntimeError):
         return False
+
+
+def _is_top_level_verification_checkpoint_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    if not rel.startswith("project/verification/") or not rel.endswith(".md"):
+        return False
+    return "/" not in rel.removeprefix("project/verification/")
+
+
+def _is_reviewed_top_level_verification_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    if not _is_top_level_verification_checkpoint_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    if _route_frontmatter_grants_checkpoint_authority(frontmatter.data):
+        return False
+    return _route_evidence_text_has_non_authority_boundary(text)
+
+
+def _route_frontmatter_grants_checkpoint_authority(data: dict[str, object]) -> bool:
+    authority_keys = {
+        "archive",
+        "authority",
+        "closeout",
+        "commit",
+        "git",
+        "lifecycle",
+        "provider_routing",
+        "release",
+        "roadmap",
+        "staging",
+    }
+    for key, value in data.items():
+        if str(key or "").strip().casefold() not in authority_keys and not str(key or "").strip().casefold().startswith("approves_"):
+            continue
+        if value is False:
+            continue
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True).casefold()
+        if not _route_evidence_text_has_non_authority_boundary(encoded):
+            return True
+    return False
 
 
 def _has_shell_command_separator(command: str) -> bool:
