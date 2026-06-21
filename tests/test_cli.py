@@ -33699,6 +33699,13 @@ class CliTests(unittest.TestCase):
                     "command": "git " + "push origin main",
                 }
             )
+            exact_main_refspec_push_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "push origin HEAD:refs/heads/main",
+                }
+            )
             stage_git_c_input = json.dumps(
                 {
                     "toolName": "shell_command",
@@ -33757,6 +33764,9 @@ class CliTests(unittest.TestCase):
             unsafe_sequence_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], unsafe_sequence_input)
             grep_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], grep_git_c_input)
             push_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], push_input)
+            exact_main_refspec_push_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], exact_main_refspec_push_input
+            )
 
             stage_codes = {finding["code"] for finding in stage_payload["findings"]}
             stage_git_c_codes = {finding["code"] for finding in stage_git_c_payload["findings"]}
@@ -33766,6 +33776,7 @@ class CliTests(unittest.TestCase):
             unsafe_sequence_codes = {finding["code"] for finding in unsafe_sequence_payload["findings"]}
             grep_git_c_codes = {finding["code"] for finding in grep_git_c_payload["findings"]}
             push_codes = {finding["code"] for finding in push_payload["findings"]}
+            exact_main_refspec_push_codes = {finding["code"] for finding in exact_main_refspec_push_payload["findings"]}
 
             self.assertFalse(stage_payload["block"])
             self.assertIn("hooks-policy-allow-product-source-vcs-staging", stage_codes)
@@ -33793,6 +33804,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(push_payload["block"])
             self.assertIn("hooks-policy-allow-product-source-vcs-push", push_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", push_codes)
+            self.assertFalse(exact_main_refspec_push_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-push", exact_main_refspec_push_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", exact_main_refspec_push_codes)
 
     def test_hooks_pre_tool_allows_exact_product_release_publication_push_when_ready(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -34104,6 +34118,8 @@ class CliTests(unittest.TestCase):
                 "delete_push": "git " + "push origin --delete main",
                 "delete_refspec_push": "git " + "push origin :main",
                 "force_refspec_push": "git " + "push origin +main",
+                "wrong_source_main_refspec_push": "git " + "push origin feature:refs/heads/main",
+                "wrong_target_main_refspec_push": "git " + "push origin HEAD:refs/heads/dev",
                 "explicit_tag_ref_push": "git " + "push origin refs/tags/v1.0.0",
                 "tag_prefix_ref_push": "git " + "push origin tags/v1.0.0",
                 "bare_version_tag_push": "git " + "push origin v1.0.0",

@@ -3789,7 +3789,7 @@ def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, ob
         return False
     if any(
         clean.startswith("+")
-        or ":" in clean
+        or (":" in clean and not _ordinary_product_source_push_refspec_targets_main(clean))
         or _looks_like_product_source_tag_push_ref(clean)
         or any(char in clean for char in "*?[]")
         for clean in operands
@@ -3854,6 +3854,11 @@ def _is_exact_release_publication_refspecs(operands: list[str]) -> bool:
         and _release_publication_branch_targets_main(operands[1])
         and bool(_release_publication_tag_name(operands[2]))
     )
+
+
+def _ordinary_product_source_push_refspec_targets_main(refspec: str) -> bool:
+    source, target = _split_exact_refspec(refspec)
+    return source in {"HEAD", "head", "main", "refs/heads/main"} and target == "refs/heads/main"
 
 
 def _release_publication_branch_targets_main(refspec: str) -> bool:
