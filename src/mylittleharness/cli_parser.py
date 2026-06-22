@@ -77,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run one focused read-only diagnostic through check.",
     )
     check.add_argument("--json", action="store_true", help="Emit a structured JSON report.")
+    check.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="With --json, emit only stable summary/operator diagnostic keys instead of full findings and sections.",
+    )
     manifest = subparsers.add_parser(
         "manifest",
         help=argparse.SUPPRESS,

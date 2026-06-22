@@ -188,6 +188,7 @@ from .reporting import (
     render_quick_check_report,
     render_report,
     render_sectioned_report,
+    summary_only_json_report_payload,
 )
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .relationship_drift import (
@@ -707,6 +708,8 @@ def main(argv: list[str] | None = None) -> int:
                 payload["report_scope"] = _quick_report_scope(sections)
             if "report_scope" in payload:
                 apply_report_scope_to_compact_summary(payload["summary"], payload["report_scope"])
+            if getattr(args, "summary_only", False):
+                payload = summary_only_json_report_payload(payload)
             emit_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
         elif getattr(args, "quick", False):
             emit_text(render_quick_check_report(inventory.root, result, inventory.sources_for_report(), sections, suggestions))

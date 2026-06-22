@@ -229,6 +229,11 @@ SAFE_DELEGATION_ROUTE_CONTEXT_MARKERS = (
     ".codex/project-workflow.toml",
     "project/project-state.md",
     "project/roadmap.md",
+    "product-source",
+    "product source",
+    "product_source_root",
+    "lifecycle",
+    "checkpoint",
     "dashboard/check",
     "dashboard",
     "check",
@@ -242,9 +247,11 @@ SAFE_DELEGATION_ROUTE_CONTEXT_MARKERS = (
     "repo-visible",
     "route authority",
     "route-authority",
+    "route-visible",
     "local contract",
     "local savepoint",
     "local savepoints",
+    "savepoint",
     "main/local",
     "exact staging",
 )
@@ -597,6 +604,7 @@ class ReviewedLocalVcsCheckpoint:
     paths: frozenset[str] = field(default_factory=frozenset)
     mode: str = ""
     blocked_reason: str = ""
+    visible_workdir: bool = False
 
 
 def make_hook_install_request(args) -> HookInstallRequest:
@@ -2226,8 +2234,10 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     if (
         _is_subagent_delegation_tool_request(data)
+        and _is_subagent_delegation_only_request(data)
         and _subagent_delegation_forbidden_shortcut(text)
         and not allow_reviewed_local_vcs_delegation
+        and not allow_delegation_prompt_context
     ):
         findings.append(
             Finding(
@@ -3477,7 +3487,7 @@ def _path_policy_findings(
             and _path_resolves_under_base_root(inventory, rel, reviewed_local_vcs_checkpoint_root)
         ):
             continue
-        if allow_delegation_prompt_context and (_is_lifecycle_route_path(rel) or _is_under_configured_product_root(inventory, rel)):
+        if allow_delegation_prompt_context and _is_delegation_prompt_context_path(inventory, rel):
             continue
         if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and _is_lifecycle_route_path(rel):
             continue
@@ -3583,7 +3593,7 @@ def _hook_tool_names(data: dict[str, object]) -> list[str]:
                 item = value.get(key)
                 if isinstance(item, str) and item.strip():
                     names.append(item.strip().casefold())
-            for key in ("tool_uses", "toolUse", "tool_calls", "calls", "arguments", "parameters", "tool_input", "input"):
+            for key in ("tool_uses", "toolUse", "tool_calls", "calls", "function", "arguments", "parameters", "tool_input", "input"):
                 item = value.get(key)
                 if isinstance(item, (dict, list)):
                     collect(item)
@@ -3601,6 +3611,19 @@ def _is_subagent_delegation_tool_request(data: dict[str, object]) -> bool:
         for tool_name in _hook_tool_names(data)
         for marker in READ_ONLY_SUBAGENT_DELEGATION_TOOLS
     )
+
+
+def _is_subagent_delegation_only_request(data: dict[str, object]) -> bool:
+    names = _hook_tool_names(data)
+    if not names:
+        return False
+    has_delegation = False
+    for tool_name in names:
+        is_delegation = any(tool_name.endswith(marker) or marker in tool_name for marker in READ_ONLY_SUBAGENT_DELEGATION_TOOLS)
+        has_delegation = has_delegation or is_delegation
+        if not is_delegation:
+            return False
+    return has_delegation
 
 
 def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
@@ -3638,6 +3661,49 @@ def _is_safe_route_delegation_coordination_prompt(raw: str, scrubbed: str) -> bo
     return any(marker in lowered for marker in ("create_thread", "handoff", "thread", "worker", "agent", "delegation"))
 
 
+def _delegation_prompt_text(data: dict[str, object], fallback_text: str) -> str:
+    prompt_parts: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                lowered_key = str(key).casefold()
+                if lowered_key in {"input", "prompt", "message", "body", "content", "task", "instructions"} and isinstance(item, str):
+                    prompt_parts.append(item)
+                elif isinstance(item, (dict, list)):
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(data)
+    return "\n".join(part for part in prompt_parts if part.strip()) or str(fallback_text or "")
+
+
+def _is_typed_route_delegation_intent(data: dict[str, object], text: str) -> bool:
+    if not _is_subagent_delegation_tool_request(data):
+        return False
+    raw = _delegation_prompt_text(data, text)
+    lowered = raw.casefold()
+    scrubbed = _scrub_negated_subagent_delegation_guardrails(raw)
+    if SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed):
+        return False
+    if SUBAGENT_DELEGATION_DIRECT_MUTATION_RE.search(scrubbed):
+        return False
+    if re.search(
+        r"(?i)\b(?:run|execute|call|invoke|perform|do)\b[^\n\r.;]*"
+        r"(?:\bgit\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
+        r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r.;]*\s--apply\b)",
+        scrubbed,
+    ):
+        return False
+    context_hits = sum(1 for marker in SAFE_DELEGATION_ROUTE_CONTEXT_MARKERS if marker in lowered)
+    boundary_hits = sum(1 for marker in SAFE_DELEGATION_BOUNDARY_MARKERS if marker in lowered)
+    if context_hits < 3 or boundary_hits < 2:
+        return False
+    return any(marker in lowered for marker in ("thread", "delegation", "handoff", "worker", "agent", "subagent"))
+
+
 def _is_reviewed_local_vcs_delegation_prompt(text: str) -> bool:
     raw = str(text or "")
     lowered = raw.casefold()
@@ -3671,6 +3737,8 @@ def _is_read_only_subagent_delegation_request(data: dict[str, object], text: str
 def _is_delegation_prompt_context_request(data: dict[str, object], text: str) -> bool:
     if not _is_subagent_delegation_tool_request(data):
         return False
+    if _is_typed_route_delegation_intent(data, text):
+        return True
     if _subagent_delegation_forbidden_shortcut(text):
         return False
     return True
@@ -5080,6 +5148,7 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
     target_inventory, root_reason = _neighbor_mlh_root_inventory(inventory, data, command)
     if target_inventory is None:
         return ReviewedLocalVcsCheckpoint(blocked_reason=root_reason) if root_reason else ReviewedLocalVcsCheckpoint()
+    visible_workdir = _checkpoint_uses_visible_workdir(inventory, data, target_inventory.root)
     if subcommand in {"add", "stage"}:
         pathspecs = _git_stage_pathspecs(command)
         if not pathspecs:
@@ -5098,7 +5167,12 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
                 root=target_inventory.root,
                 blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, pathspecs, "pathspecs"),
             )
-        return ReviewedLocalVcsCheckpoint(root=target_inventory.root, paths=frozenset(paths), mode="staging")
+        return ReviewedLocalVcsCheckpoint(
+            root=target_inventory.root,
+            paths=frozenset(paths),
+            mode="staging",
+            visible_workdir=visible_workdir,
+        )
     if not _is_narrow_local_vcs_commit_command(command):
         return ReviewedLocalVcsCheckpoint(
             root=target_inventory.root,
@@ -5113,7 +5187,22 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
             root=target_inventory.root,
             blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, staged, "staged files"),
         )
-    return ReviewedLocalVcsCheckpoint(root=target_inventory.root, paths=frozenset(paths), mode="commit")
+    return ReviewedLocalVcsCheckpoint(
+        root=target_inventory.root,
+        paths=frozenset(paths),
+        mode="commit",
+        visible_workdir=visible_workdir,
+    )
+
+
+def _checkpoint_uses_visible_workdir(inventory: Inventory, data: dict[str, object], target_root: Path) -> bool:
+    workdir = _hook_command_workdir_path(inventory, data)
+    if workdir is None:
+        return False
+    try:
+        return workdir.resolve() == target_root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _neighbor_mlh_root_inventory(inventory: Inventory, data: dict[str, object], command: str) -> tuple[Inventory | None, str]:
@@ -7501,7 +7590,7 @@ def _local_vcs_checkpoint_next_safe_for_root(root: Path) -> str:
 def _reviewed_local_vcs_checkpoint_next_safe_command(checkpoint: ReviewedLocalVcsCheckpoint) -> str:
     if checkpoint.root is None:
         return "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
-    git_prefix = "gi" + "t -C " + shell_arg(str(checkpoint.root))
+    git_prefix = "gi" + "t" if checkpoint.visible_workdir else "gi" + "t -C " + shell_arg(str(checkpoint.root))
     if checkpoint.mode == "commit":
         return f"{git_prefix} commit -F <message-file>"
     return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
@@ -7948,6 +8037,18 @@ def _is_under_configured_product_root(inventory: Inventory, path: str) -> bool:
         return True
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+def _is_delegation_prompt_context_path(inventory: Inventory, path: str) -> bool:
+    normalized = _normalize_hook_path(path).casefold()
+    if _is_lifecycle_route_path(path) or _is_under_configured_product_root(inventory, path):
+        return True
+    return normalized in {
+        "agents.md",
+        ".codex/project-workflow.toml",
+        ".mylittleharness/project-workflow.toml",
+        "readme.md",
+    }
 
 
 def _is_active_plan_product_artifact(inventory: Inventory, path: str) -> bool:

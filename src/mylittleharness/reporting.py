@@ -444,6 +444,63 @@ def render_json_report(
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
 
 
+def summary_only_json_report_payload(payload: dict[str, object]) -> dict[str, object]:
+    omitted_keys = [
+        key
+        for key in ("sources", "findings", "sections", "suggestions", "route_manifest", "next_safe_routes", "command_actions")
+        if key in payload
+    ]
+    compact = {
+        key: payload[key]
+        for key in (
+            "schema_version",
+            "command",
+            "root",
+            "result",
+            "work_result",
+            "summary",
+            "operator_diagnostics",
+            "report_scope",
+            "boundary",
+        )
+        if key in payload
+    }
+    boundary = dict(compact.get("boundary") or {})
+    boundary.update(
+        {
+            "summary_only": True,
+            "full_findings_omitted": True,
+            "rerun_without_summary_only_for_full_findings": True,
+            "json_output_approves_lifecycle": False,
+            "json_output_approves_git": False,
+        }
+    )
+    compact["boundary"] = boundary
+    compact["summary_only"] = {
+        "schema": "mylittleharness.summary-only-report.v1",
+        "enabled": True,
+        "omitted_keys": omitted_keys,
+        "stable_json_paths": (
+            "result.status",
+            "summary.status",
+            "summary.counts",
+            "summary.warning_classification",
+            "summary.next_safe_command",
+            "operator_diagnostics.counts",
+            "operator_diagnostics.first_attention",
+            "operator_diagnostics.next_safe.command",
+        ),
+        "boundary": {
+            "advisory": True,
+            "warnings_visible": True,
+            "full_findings_preserved_in_full_json": True,
+            "approves_lifecycle": False,
+            "approves_git": False,
+        },
+    }
+    return compact
+
+
 def operator_diagnostics_for_report(
     command: str,
     result: str,

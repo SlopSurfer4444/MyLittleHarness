@@ -142,6 +142,16 @@ count, and explicit authority flags. It keeps warnings visible, does not change
 exit codes, and cannot approve lifecycle movement, archive, roadmap status, Git
 state, release, provider routing, or cache truth.
 
+For automation that only needs a compact status contract, `check --json
+--summary-only` emits the stable top-level status, `summary`,
+`operator_diagnostics`, `work_result`, and `report_scope` keys while omitting
+full `findings`, `sections`, route manifests, sources, and suggestions. The
+summary-only payload advertises schema
+`mylittleharness.summary-only-report.v1`; use `result.status`,
+`summary.counts`, `summary.warning_classification`, and
+`operator_diagnostics.counts` for pass/warn/error counting. Rerun without
+`--summary-only` when individual findings or section details are needed.
+
 `check` and `dashboard --inspect` also surface roadmap portfolio status. The
 report names queued active/accepted items, dependency-ready accepted items,
 blocked items, and the next safe `plan --dry-run --roadmap-item <id>` command
