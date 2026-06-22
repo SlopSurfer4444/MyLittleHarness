@@ -1460,6 +1460,7 @@ class IntakeRequest:
     status: str = ""
     related_plan: str = ""
     source_members: tuple[str, ...] = ()
+    update_existing_metadata: bool = False
 
 
 INTAKE_VERIFICATION_STATUS_VALUES = ("pending", "passed", "failed", "partial", "partially-verified", "archived")
@@ -1516,6 +1517,7 @@ def make_intake_request(
     status: str | None = None,
     related_plan: str | None = None,
     source_members: tuple[str, ...] | list[str] | None = None,
+    update_existing_metadata: bool = False,
 ) -> IntakeRequest:
     return IntakeRequest(
         text=str(text or ""),
@@ -1525,6 +1527,7 @@ def make_intake_request(
         status=str(status or "").strip(),
         related_plan=_normalized_intake_metadata_path(related_plan),
         source_members=_normalized_intake_metadata_paths(source_members or ()),
+        update_existing_metadata=bool(update_existing_metadata),
     )
 
 
@@ -1544,13 +1547,27 @@ def intake_dry_run_findings(inventory: Inventory, request: IntakeRequest) -> lis
     findings.extend(_intake_advice_findings(advice, request, prefix="would "))
     if request.target:
         findings.extend(_intake_target_preview_findings(request, advice))
+    if request.update_existing_metadata:
+        document = _intake_existing_metadata_document(inventory, request, advice)
+        if document:
+            findings.extend(
+                route_write_findings(
+                    "intake-existing-metadata-route-write",
+                    (RouteWriteEvidence(request.target, (inventory.root / request.target).read_text(encoding="utf-8"), document),),
+                    apply=False,
+                )
+            )
     findings.extend(_intake_incubation_fallback_findings(request, advice))
     findings.extend(_intake_boundary_findings())
     findings.append(
         Finding(
             "info",
             "intake-validation-posture",
-            "apply would write one explicit new Markdown target in a compatible route; dry-run writes no files",
+            (
+                "apply would update only verification route frontmatter on an existing Markdown target; dry-run writes no files"
+                if request.update_existing_metadata
+                else "apply would write one explicit new Markdown target in a compatible route; dry-run writes no files"
+            ),
             request.target or None,
         )
     )
@@ -1564,7 +1581,12 @@ def intake_apply_findings(inventory: Inventory, request: IntakeRequest) -> list[
         return errors
 
     target_path = inventory.root / request.target
-    document = _intake_document_text(inventory, request, advice)
+    before_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else None
+    document = (
+        _intake_existing_metadata_document(inventory, request, advice)
+        if request.update_existing_metadata
+        else _intake_document_text(inventory, request, advice)
+    )
     operation = AtomicFileWrite(
         target_path=target_path,
         tmp_path=target_path.with_name(f".{target_path.name}.intake.tmp"),
@@ -1579,8 +1601,25 @@ def intake_apply_findings(inventory: Inventory, request: IntakeRequest) -> list[
     findings = [
         Finding("info", "intake-apply", "intake apply started"),
         Finding("info", "intake-root-posture", f"root kind: {inventory.root_kind}"),
-        Finding("info", "intake-written", f"wrote routed intake note to {request.target}", request.target),
+        Finding(
+            "info",
+            "intake-existing-metadata-updated" if request.update_existing_metadata else "intake-written",
+            (
+                f"updated verification route frontmatter metadata on {request.target}"
+                if request.update_existing_metadata
+                else f"wrote routed intake note to {request.target}"
+            ),
+            request.target,
+        ),
     ]
+    if request.update_existing_metadata:
+        findings.extend(
+            route_write_findings(
+                "intake-existing-metadata-route-write",
+                (RouteWriteEvidence(request.target, before_text, document),),
+                apply=True,
+            )
+        )
     findings.extend(_intake_advice_findings(advice, request, prefix=""))
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "intake-backup-cleanup", warning, request.target))
@@ -13741,6 +13780,11 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
         errors.append(Finding("error", "intake-refused", "intake text is required"))
 
     advice = advice or _intake_request_advice(request)
+    if request.update_existing_metadata:
+        if not request.target:
+            errors.append(Finding("error", "intake-refused", "--update-existing-metadata requires --target"))
+        elif classify_memory_route(request.target).route_id != "verification":
+            errors.append(Finding("error", "intake-refused", "--update-existing-metadata is only supported for project/verification/*.md targets", request.target))
     if request.status:
         status = request.status.casefold()
         if status not in INTAKE_VERIFICATION_STATUS_VALUES:
@@ -13781,13 +13825,16 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
             errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}"))
 
     if request.target:
-        errors.extend(_intake_target_errors(inventory, request.target, advice, apply))
+        errors.extend(_intake_target_errors(inventory, request, advice, apply))
+        if request.update_existing_metadata:
+            errors.extend(_intake_existing_metadata_errors(inventory, request, advice))
     if apply and errors:
         errors.extend(_intake_incubation_fallback_findings(request, advice))
     return errors
 
 
-def _intake_target_errors(inventory: Inventory, target: str, advice: IntakeRouteAdvice, apply: bool) -> list[Finding]:
+def _intake_target_errors(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice, apply: bool) -> list[Finding]:
+    target = request.target
     errors: list[Finding] = []
     if _intake_rel_has_absolute_or_parent_parts(target):
         return [Finding("error", "intake-refused", "--target must be a root-relative path without parent segments", target)]
@@ -13822,8 +13869,50 @@ def _intake_target_errors(inventory: Inventory, target: str, advice: IntakeRoute
             errors.append(Finding("error", "intake-refused", f"target directory contains a symlink segment: {rel}", rel))
         elif parent.exists() and not parent.is_dir():
             errors.append(Finding("error", "intake-refused", f"target directory contains a non-directory segment: {rel}", rel))
-    if apply and target_path.exists():
-        errors.append(Finding("error", "intake-refused", "target already exists; choose a new explicit intake file", target))
+    if target_path.exists() and not request.update_existing_metadata:
+        errors.append(Finding("error", "intake-refused", "target already exists; choose a new explicit intake file or use --update-existing-metadata for verification route metadata only", target))
+    return errors
+
+
+def _intake_existing_metadata_errors(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice) -> list[Finding]:
+    errors: list[Finding] = []
+    if advice.route_id != "verification":
+        errors.append(Finding("error", "intake-refused", "--update-existing-metadata requires verification-classified input", request.target))
+    target_path = inventory.root / request.target
+    if not target_path.exists():
+        errors.append(Finding("error", "intake-refused", "--update-existing-metadata target must already exist", request.target))
+        return errors
+    if target_path.is_symlink():
+        errors.append(Finding("error", "intake-refused", "--update-existing-metadata target must not be a symlink", request.target))
+        return errors
+    if not target_path.is_file():
+        errors.append(Finding("error", "intake-refused", "--update-existing-metadata target must be a regular Markdown file", request.target))
+        return errors
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(Finding("error", "intake-refused", f"--update-existing-metadata target is unreadable: {exc}", request.target))
+        return errors
+
+    frontmatter = parse_frontmatter(text)
+    if not frontmatter.has_frontmatter:
+        errors.append(Finding("error", "intake-refused", "--update-existing-metadata requires existing route frontmatter", request.target))
+        return errors
+    for error in frontmatter.errors:
+        errors.append(Finding("error", "intake-refused", f"--update-existing-metadata target frontmatter is malformed: {error}", request.target))
+    route = str(frontmatter.data.get("route") or "").strip()
+    if route and route != "verification":
+        errors.append(Finding("error", "intake-refused", f"--update-existing-metadata target route must be verification, got {route!r}", request.target))
+
+    related_plan, source_members = _intake_verification_metadata_values(inventory, request, advice, existing=frontmatter.data)
+    if related_plan:
+        conflict = root_relative_path_conflict(related_plan)
+        if conflict:
+            errors.append(Finding("error", "intake-refused", f"computed related_plan must be a root-relative route path: {conflict}", related_plan))
+    for source_member in source_members:
+        conflict = root_relative_path_conflict(source_member)
+        if conflict:
+            errors.append(Finding("error", "intake-refused", f"computed source_members entry must be a root-relative route path: {conflict}", source_member))
     return errors
 
 
@@ -13942,6 +14031,51 @@ def _intake_document_text(inventory: Inventory, request: IntakeRequest, advice: 
     )
 
 
+def _intake_existing_metadata_document(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
+    current_text = (inventory.root / request.target).read_text(encoding="utf-8")
+    frontmatter = parse_frontmatter(current_text)
+    existing = dict(frontmatter.data)
+    existing_order = list(existing)
+    related_plan, source_members = _intake_verification_metadata_values(inventory, request, advice, existing=existing)
+    existing_status = str(existing.get("status") or "").strip()
+    if request.status:
+        status = request.status.casefold()
+    elif existing_status in INTAKE_VERIFICATION_STATUS_VALUES:
+        status = existing_status
+    else:
+        status = _intake_document_status(request, advice)
+
+    updates: dict[str, object] = {
+        "title": request.title.strip() or str(existing.get("title") or _intake_title(request)).strip(),
+        "status": status,
+        "route": "verification",
+        "updated": date.today().isoformat(),
+        "metadata_update_source": request.text_source,
+    }
+    if related_plan:
+        updates["related_plan"] = related_plan
+    if source_members:
+        updates["source_members"] = list(source_members)
+
+    metadata = {**existing, **updates}
+    if not related_plan:
+        metadata.pop("related_plan", None)
+    if not source_members:
+        metadata.pop("source_members", None)
+
+    frontmatter_order = _intake_frontmatter_order(
+        existing_order,
+        ("title", "status", "route", "related_plan", "source_members", "created", "updated", "intake_source", "metadata_update_source"),
+        metadata,
+    )
+    body_lines = current_text.splitlines()[frontmatter.body_start_line - 1 :]
+    body = "\n".join(body_lines)
+    if body and current_text.endswith("\n"):
+        body += "\n"
+    updated_frontmatter = "\n".join(("---", *_intake_frontmatter_lines(metadata, frontmatter_order), "---"))
+    return f"{updated_frontmatter}\n{body}" if body else f"{updated_frontmatter}\n"
+
+
 def _intake_document_status(request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
     if request.status:
         return request.status.casefold()
@@ -14007,8 +14141,7 @@ def _clean_intake_title(value: str) -> str:
 def _intake_verification_route_metadata(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
     if advice.route_id != "verification":
         return ""
-    related_plan = _intake_related_plan_metadata(inventory, request)
-    source_members = request.source_members or _intake_active_plan_source_members(inventory)
+    related_plan, source_members = _intake_verification_metadata_values(inventory, request, advice)
     lines: list[str] = []
     if related_plan:
         lines.append(f'related_plan: "{_yaml_double_quoted_value(related_plan)}"')
@@ -14019,6 +14152,61 @@ def _intake_verification_route_metadata(inventory: Inventory, request: IntakeReq
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
+
+
+def _intake_verification_metadata_values(
+    inventory: Inventory,
+    request: IntakeRequest,
+    advice: IntakeRouteAdvice,
+    *,
+    existing: dict[str, object] | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    if advice.route_id != "verification":
+        return "", ()
+    active_plan_source_members = _intake_active_plan_source_members(inventory)
+    related_plan = _intake_related_plan_metadata(inventory, request)
+    if not related_plan and existing:
+        related_plan = _normalized_intake_metadata_path(existing.get("related_plan"))
+    if request.source_members:
+        source_members = request.source_members
+    elif active_plan_source_members:
+        source_members = active_plan_source_members
+    elif existing:
+        source_members = _frontmatter_path_values(existing.get("source_members"))
+    else:
+        source_members = ()
+    return related_plan, _normalized_intake_metadata_paths(source_members)
+
+
+def _intake_frontmatter_order(existing_order: list[str], preferred_order: tuple[str, ...], metadata: dict[str, object]) -> list[str]:
+    order: list[str] = []
+    for key in preferred_order:
+        if key in metadata and key not in order:
+            order.append(key)
+    for key in existing_order:
+        if key in metadata and key not in order:
+            order.append(key)
+    for key in metadata:
+        if key not in order:
+            order.append(key)
+    return order
+
+
+def _intake_frontmatter_lines(metadata: dict[str, object], order: list[str]) -> list[str]:
+    lines: list[str] = []
+    for key in order:
+        value = metadata.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, (list, tuple)):
+            if not value:
+                continue
+            lines.append(f"{key}:")
+            for item in value:
+                lines.append(f'  - "{_yaml_double_quoted_value(item)}"')
+            continue
+        lines.append(f'{key}: "{_yaml_double_quoted_value(value)}"')
+    return lines
 
 
 def _intake_related_plan_metadata(inventory: Inventory, request: IntakeRequest) -> str:

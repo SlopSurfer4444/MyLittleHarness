@@ -5156,6 +5156,186 @@ class CliTests(unittest.TestCase):
             self.assertIn("source_members:\n  - \"project/plan-incubation/metadata-inference.md\"", note_text)
             self.assertIn("intake-written", output.getvalue())
 
+    def test_intake_refuses_existing_target_without_metadata_update_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "verification/intake-metadata.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\n"
+                'title: "Existing Smoke"\n'
+                'status: "partial"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# Existing Smoke\n\n"
+                "Original body stays.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--dry-run",
+                        "--text",
+                        "Verification: metadata repair for an existing note.",
+                        "--target",
+                        target,
+                    ]
+                )
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("target already exists", dry_output.getvalue())
+            self.assertIn("--update-existing-metadata", dry_output.getvalue())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--text",
+                        "Verification: metadata repair for an existing note.",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(apply_code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("target already exists", apply_output.getvalue())
+            self.assertIn("--update-existing-metadata", apply_output.getvalue())
+
+    def test_intake_update_existing_metadata_preserves_body_and_infers_plan_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project" / "implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "metadata-inference"\n'
+                'source_incubation: "project/plan-incubation/metadata-inference.md"\n'
+                "---\n"
+                "# Metadata Inference\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace('plan_status: "none"', 'plan_status: "active"', 1).replace('active_plan: ""', 'active_plan: "project/implementation-plan.md"', 1),
+                encoding="utf-8",
+            )
+            target = "project/" + "verification/intake-metadata.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\n"
+                'title: "Existing Smoke"\n'
+                'status: "partial"\n'
+                'route: "verification"\n'
+                'created: "2026-06-21"\n'
+                "---\n"
+                "# Existing Smoke\n\n"
+                "Original body stays.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--dry-run",
+                        "--update-existing-metadata",
+                        "--text",
+                        "Verification: metadata repair for an existing note.",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("intake-existing-metadata-route-write", dry_rendered)
+            self.assertIn("would write route", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--update-existing-metadata",
+                        "--text",
+                        "Verification: metadata repair for an existing note.",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(apply_code, 0)
+            apply_rendered = apply_output.getvalue()
+            self.assertIn("intake-existing-metadata-updated", apply_rendered)
+            self.assertIn("intake-existing-metadata-route-write", apply_rendered)
+            note_text = target_path.read_text(encoding="utf-8")
+            self.assertIn('title: "Existing Smoke"', note_text)
+            self.assertIn('status: "partial"', note_text)
+            self.assertIn('route: "verification"', note_text)
+            self.assertIn('related_plan: "project/implementation-plan.md"', note_text)
+            self.assertIn("source_members:\n  - \"project/plan-incubation/metadata-inference.md\"", note_text)
+            self.assertIn('created: "2026-06-21"', note_text)
+            self.assertIn("updated: \"", note_text)
+            self.assertIn('metadata_update_source: "--text"', note_text)
+            self.assertTrue(note_text.endswith("# Existing Smoke\n\nOriginal body stays.\n"))
+            self.assertNotIn("metadata repair for an existing note", note_text)
+
+    def test_intake_update_existing_metadata_refuses_non_verification_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "verification/intake-metadata.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\n"
+                'title: "Wrong Route"\n'
+                'status: "imported"\n'
+                'route: "research"\n'
+                "---\n"
+                "# Wrong Route\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--update-existing-metadata",
+                        "--text",
+                        "Verification: metadata repair for an existing note.",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("--update-existing-metadata target route must be verification", output.getvalue())
+
     def test_intake_apply_accepts_explicit_verification_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

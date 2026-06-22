@@ -1047,7 +1047,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             intake_text = text_result[0]
             intake_source = f"--text-file {args.text_file}"
-        request = make_intake_request(intake_text, intake_source, args.title, args.target, args.status, args.related_plan, tuple(args.source_members or ()))
+        request = make_intake_request(
+            intake_text,
+            intake_source,
+            args.title,
+            args.target,
+            args.status,
+            args.related_plan,
+            tuple(args.source_members or ()),
+            update_existing_metadata=args.update_existing_metadata,
+        )
         report_name = "intake --apply" if args.apply else "intake --dry-run"
         findings = intake_apply_findings(inventory, request) if args.apply else intake_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
