@@ -36745,6 +36745,76 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", broad_codes)
 
+    def test_hooks_pre_tool_allows_tracked_existing_incubation_note_with_prompt_language_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            note_rel = "project/" + "plan-incubation/active-plan-work-class-contract.md"
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / note_rel).write_text(
+                "---\n"
+                'topic: "active-plan-work-class-contract"\n'
+                'status: "incubating"\n'
+                'created: "2026-05-14"\n'
+                'updated: "2026-06-23"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                'related_roadmap: "project/roadmap.md"\n'
+                'related_roadmap_item: "scoped-hotfix-interrupt-lifecycle-rail"\n'
+                'promoted_to: "project/roadmap.md"\n'
+                'lifecycle_status: "archived-covered"\n'
+                "---\n"
+                "# Active plan work class contract\n\n"
+                "## Meta-feedback Cluster\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                "- `canonical_id`: `active-plan-work-class-contract`\n"
+                "- `signal_type`: `route-design-gap`\n"
+                "- `expected_owner_command`: `meta-feedback`\n"
+                "- `affected_routes`: `[\"check\", \"transition\", \"writeback\"]`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+                "[MLH-Fix-Candidate] This legitimate incubation note mentions operator prompt, "
+                "hook, checkpoint, staging, and commit language, but it should remain an incubation note.\n"
+                "safe_boundary: no lifecycle movement, archive, staging, commit, or push approval.\n",
+                encoding="utf-8",
+            )
+
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", note_rel]),
+                }
+            )
+
+            def tracked_run_git(git_root: Path, *args: str):
+                if git_root == root and args == ("ls-files", "--", note_rel):
+                    return subprocess.CompletedProcess(args, 0, stdout=note_rel + "\n", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with patch("mylittleharness.hooks._run_git_for_root", side_effect=tracked_run_git):
+                tracked_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            with patch("mylittleharness.hooks._run_git_for_root", return_value=subprocess.CompletedProcess((), 0, stdout="", stderr="")):
+                untracked_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            tracked_codes = {finding["code"] for finding in tracked_payload["findings"]}
+            untracked_codes = {finding["code"] for finding in untracked_payload["findings"]}
+            untracked_messages = "\n".join(str(finding["message"]) for finding in untracked_payload["findings"])
+
+            self.assertFalse(tracked_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", tracked_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", tracked_codes)
+            self.assertTrue(untracked_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", untracked_codes)
+            self.assertIn("move-non-incubation-prompt", untracked_messages)
+
     def test_hooks_pre_tool_blocks_partial_or_unpromoted_roadmap_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

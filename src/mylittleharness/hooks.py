@@ -4358,6 +4358,8 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         inventory, pathspecs
     ):
         return True
+    if all(_is_tracked_existing_lifecycle_route_file(inventory, path) for path in paths):
+        return True
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
         return bool(
             _coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs)
@@ -7802,6 +7804,19 @@ def _is_existing_lifecycle_route_file(inventory: Inventory, path: str) -> bool:
         return route_path.is_file() and not route_path.is_symlink()
     except (OSError, RuntimeError):
         return False
+
+
+def _is_tracked_existing_lifecycle_route_file(inventory: Inventory, path: str) -> bool:
+    rel = _hook_route_rel_path(inventory, path)
+    if not rel or any(char in rel for char in "*?[]") or rel.startswith(":"):
+        return False
+    if not _is_existing_lifecycle_route_file(inventory, rel):
+        return False
+    result = _run_git_for_root(inventory.root, "ls-files", "--", rel)
+    if result is None or result.returncode != 0:
+        return False
+    expected = _normalize_hook_path(rel).casefold()
+    return any(_normalize_hook_path(line.strip()).casefold() == expected for line in result.stdout.splitlines())
 
 
 def _is_roadmap_path(path: str) -> bool:
