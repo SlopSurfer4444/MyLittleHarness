@@ -18,7 +18,7 @@ from .parsing import parse_frontmatter
 from .preflight import preflight_sections
 from .reporting import command_action_report_dict
 from .routes import classify_memory_route
-from .root_boundary import LIVE_OPERATING_ROOT, PRODUCT_SOURCE_FIXTURE
+from .root_boundary import LIVE_OPERATING_ROOT, PRODUCT_SOURCE_FIXTURE, product_source_operator_lane_summary
 from .safe_commands import mlh_command, safe_double_quoted, safe_intent_text, shell_arg
 
 
@@ -3147,7 +3147,17 @@ def _path_policy_findings(
         if _is_under_configured_product_root(inventory, rel):
             if allow_product_source_vcs_command:
                 continue
-            if allow_read_only_source_paths or allow_mlh_owner_route_paths or _is_active_plan_product_artifact(inventory, rel):
+            if allow_read_only_source_paths or allow_mlh_owner_route_paths:
+                continue
+            if _is_active_plan_product_artifact(inventory, rel):
+                findings.append(
+                    Finding(
+                        "info",
+                        "hooks-policy-allow-active-plan-product-source-artifact",
+                        product_source_operator_lane_summary(),
+                        rel,
+                    )
+                )
                 continue
             next_safe = _hook_product_root_write_next_safe_command(inventory, rel)
             findings.append(

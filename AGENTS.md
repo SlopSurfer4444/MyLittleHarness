@@ -5,6 +5,7 @@
 - Treat this directory as the MyLittleHarness product repository: source, tests, docs, package metadata, and compatibility fixtures.
 - Recover active task context from the repository named by the current task before non-trivial product work.
 - MyLittleHarness attaches to and inspects an explicit target repository supplied by the operator or CLI command.
+- Cross-root product-source patches are allowed only as a governed operator lane: recover the live operating-root plan first, ensure the product files are declared in `target_artifacts`, edit only those files in this product checkout, run focused product tests from this checkout, close/archive lifecycle in the operating root, then exact-stage and commit only product-source files after `plan_status = "none"`.
 - Treat `workflow-core` as a compatibility label in fixture manifests and operator wording only. It is not the architectural baseline for MyLittleHarness.
 - Keep `.mylittleharness/project-workflow.toml`, `.agents/docmap.yaml`, `project/project-state.md`, and `project/specs/workflow/**` as product compatibility fixtures only while the CLI/tests need a workflow-shaped target root.
 - Treat legacy `.codex/project-workflow.toml` as target-root fallback/migration compatibility only, not the product fixture path.

@@ -10,6 +10,18 @@ PRODUCT_SOURCE_FIXTURE = "product_source_fixture"
 FALLBACK_OR_ARCHIVE = "fallback_or_archive"
 AMBIGUOUS_ROOT = "ambiguous"
 
+PRODUCT_SOURCE_OPERATOR_LANE_STEPS = (
+    "open a live operating-root plan that declares product-source target_artifacts",
+    "edit only those declared product-source files from the product source checkout",
+    "run focused product tests from product_source_root",
+    "close or archive the operating-root lifecycle through reviewed MLH routes",
+    "after plan_status=none, exact-stage and commit only the product-source files",
+)
+PRODUCT_SOURCE_OPERATOR_LANE_BOUNDARY = (
+    "product-source changes require MLH-dev authority, declared target_artifacts, focused tests, "
+    "reviewed lifecycle closeout before Git checkpointing, exact local staging, and no public remote mutation"
+)
+
 WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
     {
         "CON",
@@ -31,6 +43,11 @@ class BoundaryViolation:
     message: str
     path: Path
     rel_path: str
+
+
+def product_source_operator_lane_summary() -> str:
+    steps = "; ".join(PRODUCT_SOURCE_OPERATOR_LANE_STEPS)
+    return f"governed product-source operator lane: {steps}; boundary: {PRODUCT_SOURCE_OPERATOR_LANE_BOUNDARY}"
 
 
 def absolute_path(path: Path | str, *, base: Path | str | None = None) -> Path:

@@ -32331,9 +32331,13 @@ class CliTests(unittest.TestCase):
             for checked_payload in (payload, raw_payload):
                 self.assertFalse(checked_payload["block"])
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                messages = "\n".join(str(finding["message"]) for finding in checked_payload["findings"])
+                self.assertIn("hooks-policy-allow-active-plan-product-source-artifact", finding_codes)
                 self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
                 self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
                 self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", finding_codes)
+                self.assertIn("governed product-source operator lane", messages)
+                self.assertIn("plan_status=none", messages)
 
     def test_hooks_pre_tool_resolves_relative_product_root_apply_patch_targets(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -32371,10 +32375,14 @@ class CliTests(unittest.TestCase):
             )
 
             allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            allowed_messages = "\n".join(str(finding["message"]) for finding in allowed_payload["findings"])
             self.assertFalse(allowed_payload["block"])
+            self.assertIn("hooks-policy-allow-active-plan-product-source-artifact", allowed_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", allowed_codes)
             self.assertNotIn("hooks-policy-block-product-root-direct-edit", allowed_codes)
             self.assertNotIn("hooks-policy-block-code-write-outside-plan-scope", allowed_codes)
+            self.assertIn("declares product-source target_artifacts", allowed_messages)
+            self.assertIn("no public remote mutation", allowed_messages)
 
             rogue_codes = {finding["code"] for finding in rogue_payload["findings"]}
             self.assertTrue(rogue_payload["block"])
@@ -41180,6 +41188,17 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["severity_counts"]["warn"], diagnostics["counts"]["warnings"])
             self.assertIn("operator_diagnostics.next_safe.command", diagnostics["stable_json_paths"])
             self.assertFalse(diagnostics["boundary"]["approves_lifecycle"])
+
+    def test_root_boundary_describes_governed_product_source_operator_lane(self) -> None:
+        from mylittleharness.root_boundary import PRODUCT_SOURCE_OPERATOR_LANE_STEPS, product_source_operator_lane_summary
+
+        summary = product_source_operator_lane_summary()
+
+        self.assertIn("declares product-source target_artifacts", summary)
+        self.assertIn("product_source_root", summary)
+        self.assertIn("plan_status=none", summary)
+        self.assertIn("exact local staging", summary)
+        self.assertEqual(5, len(PRODUCT_SOURCE_OPERATOR_LANE_STEPS))
 
 
 class EncodingLimitedTextStream:
