@@ -33394,6 +33394,76 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_mixed_route_package_with_feedback_and_evidence(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            source_note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            feedback_rel = "project/" + "plan-incubation/post-archive-exact-lifecycle-package-staging-overblock.md"
+            evidence_rel = "project/" + "verification/agent-runs/post-archive-mixed-package.md"
+            (root / feedback_rel).write_text(
+                "---\n"
+                'topic: "post-archive-exact-lifecycle-package-staging-overblock"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-22"\n'
+                'updated: "2026-06-22"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# post-archive exact lifecycle package staging overblock\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                "- `canonical_id`: `post-archive-exact-lifecycle-package-staging-overblock`\n"
+                "- `signal_type`: `hook-overblock`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+                "[MLH-Fix-Candidate] hook_classification=overblocked; "
+                "blocked_surface=git add -f -- project/project-state.md project/roadmap.md "
+                "project/archive/plans/reviewed-closeout.md project/verification/agent-runs/post-archive-mixed-package.md; "
+                "safe_boundary=evidence only; exact staging does not approve lifecycle movement, archive, "
+                "roadmap mutation, staging of unrelated paths, commit, push, release, provider routing, or cache truth.\n"
+                "authority_boundary=operating-memory capture only; no lifecycle, Git staging, commit, archive, "
+                "roadmap, release, or cache truth approval.\n",
+                encoding="utf-8",
+            )
+            (root / evidence_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / evidence_rel).write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "post-archive-mixed-package"\n'
+                'status: "succeeded"\n'
+                "---\n"
+                "# Agent Run\n",
+                encoding="utf-8",
+            )
+            stage_paths = (state_rel, roadmap_rel, archive_rel, source_note_rel, feedback_rel, evidence_rel)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -f -- " + " ".join(stage_paths),
+                }
+            )
+            broad_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -f -- project/plan-incubation project/verification/agent-runs",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            broad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], broad_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            broad_codes = {finding["code"] for finding in broad_payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertTrue(broad_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", broad_codes)
+
     def test_hooks_pre_tool_allows_post_closeout_route_package_with_source_incubation_retarget_only(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

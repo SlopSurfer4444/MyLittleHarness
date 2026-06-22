@@ -5482,8 +5482,12 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
         and _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
     }
     if extra and not all(
-        _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
-        or _is_post_closeout_source_incubation_tombstone_path(inventory, path, reviewed_source_archives)
+        _is_reviewed_post_closeout_lifecycle_package_extra(
+            inventory,
+            path,
+            last_archive_rel,
+            reviewed_source_archives,
+        )
         for path in extra
     ):
         return set()
@@ -5496,6 +5500,36 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
     if not _roadmap_references_archived_plan(inventory, last_archive_rel):
         return set()
     return normalized
+
+
+def _is_reviewed_post_closeout_lifecycle_package_extra(
+    inventory: Inventory,
+    path: str,
+    last_archive_rel: str,
+    reviewed_source_archives: set[str],
+) -> bool:
+    return (
+        _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
+        or _is_post_closeout_source_incubation_tombstone_path(inventory, path, reviewed_source_archives)
+        or _is_reviewed_post_closeout_meta_feedback_extra_file(inventory, path)
+        or _is_reviewed_lifecycle_finalization_evidence_file(inventory, path)
+    )
+
+
+def _is_reviewed_post_closeout_meta_feedback_extra_file(inventory: Inventory, path: str) -> bool:
+    if not _is_reviewed_meta_feedback_checkpoint_stage_file(inventory, path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    return not any(str(data.get(field) or "").strip() for field in ("archived_plan", "implemented_by"))
 
 
 def _coherent_route_produced_lifecycle_stage_paths(
