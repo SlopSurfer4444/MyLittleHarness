@@ -31594,6 +31594,97 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_real_codex_json_arguments_delegation_prompt_context(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Create a project thread for MLH-dev local main. Read AGENTS.md, "
+                ".codex/project-workflow.toml, project/project-state.md, and dashboard/check first. "
+                "Use legal MLH dry-run/apply routes before lifecycle movement. Preserve unrelated dirty work, "
+                "keep exact staging, and record a local savepoint. Do not push, no release, do not bypass hooks, "
+                "and no provider routing; this is delegation context only for the worker."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "codex_app.create_thread",
+                    "arguments": json.dumps({"input": prompt, "title": "MLH-dev dogfood"}),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+
+    def test_hooks_pre_tool_blocks_real_codex_nested_unsafe_delegation_prompt(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Create a project thread. Read AGENTS.md and project/project-state.md, "
+                "then run mylittleharness --root . writeback --apply and git push origin main."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "codex_app.create_thread",
+                            "parameters": {"prompt": prompt, "title": "Unsafe delegation"},
+                        }
+                    ],
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+
+    def test_hooks_pre_tool_blocks_mixed_parallel_delegation_and_unsafe_shell_mutation(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Read-only review helper. Inspect AGENTS.md, project/project-state.md, and dashboard/check. "
+                "Do not write files, do not stage/commit/push, and do not bypass hooks."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "codex_app.create_thread",
+                            "parameters": {"input": prompt, "title": "Safe review"},
+                        },
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {
+                                "command": "Set-Content project/project-state.md shortcut",
+                                "workdir": str(root),
+                            },
+                        },
+                    ],
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+
     def test_hooks_pre_tool_allows_guarded_live_provider_handoff_context(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -35271,6 +35362,92 @@ class CliTests(unittest.TestCase):
                     self.assertTrue(payload["block"])
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+
+    def test_hooks_pre_tool_allows_real_codex_wrapped_product_source_push_when_active_phase_complete(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="complete")
+            product_root = base / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "complete"',
+                    f'phase_status: "complete"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            wrapped_inputs = {
+                "json_arguments": {
+                    "toolName": "functions.shell_command",
+                    "arguments": json.dumps({"command": "git " + "push origin main", "workdir": str(product_root)}),
+                },
+                "parallel_parameters": {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {
+                                "command": "git " + "push origin HEAD:refs/heads/main",
+                                "workdir": str(product_root),
+                            },
+                        }
+                    ],
+                },
+            }
+
+            for name, hook_data in wrapped_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+                    self.assertNotIn("hooks-policy-block-product-source-vcs-push-hidden-workdir", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_does_not_borrow_sibling_workdir_for_wrapped_product_source_push(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="complete")
+            product_root = base / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "complete"',
+                    f'phase_status: "complete"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"command": "git " + "push origin main"},
+                        },
+                        {
+                            "recipient_name": "codex_app.create_thread",
+                            "parameters": {
+                                "input": "Read-only review helper. Do not write, do not stage, do not push.",
+                                "workdir": str(product_root),
+                            },
+                        },
+                    ],
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-product-source-vcs-push-hidden-workdir", finding_codes)
+            self.assertNotIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
 
     def test_hooks_pre_tool_allows_product_root_main_push_from_product_source_fixture(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

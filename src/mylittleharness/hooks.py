@@ -562,6 +562,7 @@ class HookToolIntent:
     paths: list[str]
     write_command: str
     write_target_paths: list[str]
+    payload: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -1661,6 +1662,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
     intent = _hook_tool_intent(data, text, inventory=inventory)
+    command_data = intent.payload
     paths = intent.paths
     command = intent.command
     write_command = intent.write_command
@@ -1673,13 +1675,13 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     ]
     allow_read_only_product_source_smoke = _is_read_only_product_source_smoke_command(inventory, command)
-    allow_read_only_product_source_inspection = _is_read_only_product_source_inspection_command(inventory, data, command)
+    allow_read_only_product_source_inspection = _is_read_only_product_source_inspection_command(inventory, command_data, command)
     allow_read_only_product_source_vcs_inspection = _is_read_only_product_source_vcs_inspection_command(
         inventory, command, paths
     )
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
-    allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(data))
+    allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(command_data))
     allow_read_only_source_paths = (
         _is_read_only_source_discovery_command(command)
         or _is_read_only_shell_wrapper_command(command)
@@ -1698,50 +1700,50 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         (_is_mlh_owner_route_review_command(command) and not _is_subagent_delegation_tool_request(data))
         or allow_research_import_related_prompt
     )
-    allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, data)
-    allow_active_plan_spec_doc_patch = _is_active_plan_spec_doc_patch_request(inventory, data)
+    allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, command_data)
+    allow_active_plan_spec_doc_patch = _is_active_plan_spec_doc_patch_request(inventory, command_data)
     allow_post_closeout_lifecycle_route_stage = _is_post_closeout_lifecycle_route_stage_command(inventory, command, paths)
     allow_route_produced_lifecycle_route_stage = _is_route_produced_lifecycle_route_stage_command(inventory, command)
     allow_post_closeout_local_vcs_stage = (
         _is_post_closeout_local_vcs_stage_command(inventory, command)
-        and not _hook_command_workdir_outside_root(inventory, data)
+        and not _hook_command_workdir_outside_root(inventory, command_data)
     )
     allow_post_closeout_local_vcs_commit = _is_post_closeout_local_vcs_commit_command(inventory, command)
     post_closeout_lifecycle_vcs_finalization_paths = _post_closeout_lifecycle_vcs_finalization_paths(inventory, command)
     allow_route_produced_lifecycle_commit = _is_route_produced_lifecycle_commit_command(inventory, command)
-    allow_product_source_vcs_stage = _is_product_source_vcs_stage_command(inventory, data, command)
-    allow_product_source_vcs_commit = _is_product_source_vcs_commit_command(inventory, data, command)
+    allow_product_source_vcs_stage = _is_product_source_vcs_stage_command(inventory, command_data, command)
+    allow_product_source_vcs_commit = _is_product_source_vcs_commit_command(inventory, command_data, command)
     allow_product_source_release_publication_push = _is_product_source_release_publication_push_command(
-        inventory, data, command
+        inventory, command_data, command
     )
     block_product_source_vcs_push_before_phase_complete = (
         _active_plan_blocks_product_source_vcs_push(inventory)
         and (
-            _is_product_source_vcs_push_candidate(inventory, data, command)
-            or _is_product_source_fixture_vcs_push_candidate(inventory, data, command)
+            _is_product_source_vcs_push_candidate(inventory, command_data, command)
+            or _is_product_source_fixture_vcs_push_candidate(inventory, command_data, command)
         )
     )
     allow_product_source_vcs_push = (
         allow_product_source_release_publication_push
-        or _is_product_source_vcs_push_command(inventory, data, command)
-        or _is_product_source_fixture_vcs_push_command(inventory, data, command)
+        or _is_product_source_vcs_push_command(inventory, command_data, command)
+        or _is_product_source_fixture_vcs_push_command(inventory, command_data, command)
     )
     block_product_source_publication_push_unsafe = (
-        _is_product_source_fixture_vcs_push_context(inventory, data, command)
+        _is_product_source_fixture_vcs_push_context(inventory, command_data, command)
         and not allow_product_source_vcs_push
         and not block_product_source_vcs_push_before_phase_complete
     )
     block_product_source_publication_push_hidden_workdir = _is_product_source_publication_push_hidden_workdir(
-        inventory, data, command
+        inventory, command_data, command
     )
-    allow_product_source_vcs_finalization = _is_product_source_vcs_finalization_sequence(inventory, data, command)
+    allow_product_source_vcs_finalization = _is_product_source_vcs_finalization_sequence(inventory, command_data, command)
     allow_product_source_vcs_command = (
         allow_product_source_vcs_stage
         or allow_product_source_vcs_commit
         or allow_product_source_vcs_push
         or allow_product_source_vcs_finalization
     )
-    reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, data, command)
+    reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, command_data, command)
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
     allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
@@ -1783,7 +1785,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         reviewed_local_vcs_checkpoint_paths=set(reviewed_local_vcs_checkpoint.paths),
     ):
         findings.append(finding)
-    if _is_product_source_root_mlh_mutation_command(inventory, data, command):
+    if _is_product_source_root_mlh_mutation_command(inventory, command_data, command):
         findings.append(
             Finding(
                 "error",
@@ -2308,7 +2310,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not block_product_source_publication_push_unsafe
         and not block_product_source_publication_push_hidden_workdir
     ):
-        next_safe = _git_mutation_next_safe_command(inventory, data, command)
+        next_safe = _git_mutation_next_safe_command(inventory, command_data, command)
         if reviewed_local_vcs_checkpoint.blocked_reason:
             git_message = (
                 "blocked reviewed local VCS checkpoint because "
@@ -2540,7 +2542,41 @@ def _hook_input_data(hook_input_text: str) -> dict[str, object]:
         value = json.loads(hook_input_text)
     except json.JSONDecodeError:
         return {"raw": hook_input_text}
-    return value if isinstance(value, dict) else {"raw": value}
+    if not isinstance(value, dict):
+        return {"raw": value}
+    decoded = _decode_hook_embedded_payloads(value)
+    return decoded if isinstance(decoded, dict) else value
+
+
+def _decode_hook_embedded_payloads(value: object, *, key: str = "", depth: int = 0) -> object:
+    if depth > 6:
+        return value
+    if isinstance(value, dict):
+        return {
+            str(item_key): _decode_hook_embedded_payloads(item, key=str(item_key), depth=depth + 1)
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_decode_hook_embedded_payloads(item, key=key, depth=depth + 1) for item in value]
+    if not isinstance(value, str):
+        return value
+    if key.casefold() not in {"arguments", "parameters", "tool_input", "input"}:
+        return value
+    parsed = _parse_hook_embedded_json(value)
+    if parsed is None:
+        return value
+    return _decode_hook_embedded_payloads(parsed, key=key, depth=depth + 1)
+
+
+def _parse_hook_embedded_json(value: str) -> object | None:
+    stripped = str(value or "").strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
 
 
 def _hook_input_search_text(hook_input_text: str) -> str:
@@ -2566,6 +2602,10 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
         data.get("input"),
         data.get("tool_input"),
         data.get("parameters"),
+        data.get("tool_uses"),
+        data.get("toolUse"),
+        data.get("tool_calls"),
+        data.get("calls"),
     )
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
@@ -2575,19 +2615,132 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
             if nested:
                 return nested
         if isinstance(candidate, list) and candidate:
-            return " ".join(str(item) for item in candidate)
+            nested_values: list[str] = []
+            scalar_values: list[str] = []
+            for item in candidate:
+                if isinstance(item, dict):
+                    nested = _hook_input_command(item, "")
+                    if nested:
+                        nested_values.append(nested)
+                elif isinstance(item, list):
+                    nested = _hook_input_command({"args": item}, "")
+                    if nested:
+                        nested_values.append(nested)
+                elif str(item or "").strip():
+                    scalar_values.append(str(item))
+            if nested_values:
+                return " ".join(nested_values)
+            if scalar_values:
+                return " ".join(scalar_values)
     return fallback_text
 
 
+def _hook_command_payload(data: dict[str, object]) -> dict[str, object]:
+    payloads = _hook_direct_command_payloads(data)
+    if not payloads:
+        return data
+    if len(payloads) == 1:
+        return payloads[0]
+    return _combined_hook_command_payload(payloads)
+
+
+def _hook_direct_command_payloads(value: object, context: dict[str, object] | None = None) -> list[dict[str, object]]:
+    context = context or {}
+    if isinstance(value, list):
+        payloads: list[dict[str, object]] = []
+        for item in value:
+            payloads.extend(_hook_direct_command_payloads(item, context))
+        return payloads
+    if not isinstance(value, dict):
+        return []
+    local_context = _merge_hook_payload_context(context, _hook_payload_context(value))
+    if _hook_payload_has_direct_command(value):
+        return [_merge_hook_payload_context(local_context, value)]
+    payloads: list[dict[str, object]] = []
+    for key in ("arguments", "parameters", "tool_input", "input", "tool_uses", "toolUse", "tool_calls", "calls"):
+        item = value.get(key)
+        if isinstance(item, (dict, list)):
+            payloads.extend(_hook_direct_command_payloads(item, local_context))
+    return payloads
+
+
+def _hook_payload_has_direct_command(payload: dict[str, object]) -> bool:
+    for key in ("command", "shell_command", "cmd", "args"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, list) and any(str(item or "").strip() for item in value):
+            return True
+    for key in ("input", "patch", "tool_input", "arguments"):
+        value = payload.get(key)
+        if isinstance(value, str) and "*** Begin Patch" in value:
+            return True
+    return False
+
+
+def _hook_payload_context(payload: dict[str, object]) -> dict[str, object]:
+    context: dict[str, object] = {}
+    for key in (
+        "toolName",
+        "tool_name",
+        "tool",
+        "recipient_name",
+        "name",
+        "cwd",
+        "workdir",
+        "working_directory",
+        "workingDirectory",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            context[key] = value
+    return context
+
+
+def _merge_hook_payload_context(context: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
+    if not context:
+        return dict(payload)
+    merged = dict(payload)
+    for key, value in context.items():
+        merged.setdefault(key, value)
+    return merged
+
+
+def _combined_hook_command_payload(payloads: list[dict[str, object]]) -> dict[str, object]:
+    commands = _dedupe_nonempty([_hook_input_command(payload, "") for payload in payloads])
+    combined: dict[str, object] = {"command": "; ".join(commands)}
+    common_workdir = _common_hook_workdir(payloads)
+    if common_workdir:
+        combined["workdir"] = common_workdir
+    return combined
+
+
+def _common_hook_workdir(payloads: list[dict[str, object]]) -> str:
+    workdirs = [_hook_workdir_value(payload) for payload in payloads]
+    if not workdirs or any(not workdir for workdir in workdirs):
+        return ""
+    normalized = {_normalize_hook_path(workdir).casefold() for workdir in workdirs}
+    return workdirs[0] if len(normalized) == 1 else ""
+
+
 def _hook_tool_intent(data: dict[str, object], text: str, *, inventory: Inventory | None = None) -> HookToolIntent:
-    command = _hook_input_command(data, text)
-    write_target_paths = _hook_write_target_paths(data, command, inventory=inventory)
-    paths = _hook_input_paths(data, text, command=command, write_target_paths=write_target_paths, inventory=inventory)
+    command_payload = _hook_command_payload(data)
+    payload_text = text if command_payload is data else _stringify_jsonish(command_payload)
+    command = _hook_input_command(command_payload, payload_text)
+    write_target_paths = _hook_write_target_paths(command_payload, command, inventory=inventory)
+    paths = _hook_input_paths(
+        command_payload,
+        payload_text,
+        command=command,
+        write_target_paths=write_target_paths,
+        inventory=inventory,
+    )
     return HookToolIntent(
         command=command,
         paths=paths,
-        write_command=_hook_write_command(data, command),
+        write_command=_hook_write_command(command_payload, command),
         write_target_paths=write_target_paths,
+        payload=command_payload,
     )
 
 
@@ -2799,6 +2952,12 @@ def _hook_workdir_value(data: dict[str, object]) -> str:
             nested = _hook_workdir_value(value)
             if nested:
                 return nested
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    nested = _hook_workdir_value(item)
+                    if nested:
+                        return nested
     return ""
 
 
@@ -3315,25 +3474,44 @@ def _first_mlh_owner_route_evidence_path(inventory: Inventory, paths: list[str])
 
 
 def _is_bounded_mlh_read_tool_request(data: dict[str, object]) -> bool:
-    candidates = (data.get("toolName"), data.get("tool_name"), data.get("tool"))
-    for candidate in candidates:
-        lowered = str(candidate or "").strip().casefold()
+    for lowered in _hook_tool_names(data):
         if lowered.endswith(BOUNDED_MLH_READ_TOOL_SUFFIXES):
             return True
     return False
 
 
 def _hook_tool_name(data: dict[str, object]) -> str:
-    for key in ("toolName", "tool_name", "tool", "name"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip().casefold()
-    return ""
+    names = _hook_tool_names(data)
+    return names[0] if names else ""
+
+
+def _hook_tool_names(data: dict[str, object]) -> list[str]:
+    names: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key in ("toolName", "tool_name", "tool", "recipient_name", "name"):
+                item = value.get(key)
+                if isinstance(item, str) and item.strip():
+                    names.append(item.strip().casefold())
+            for key in ("tool_uses", "toolUse", "tool_calls", "calls", "arguments", "parameters", "tool_input", "input"):
+                item = value.get(key)
+                if isinstance(item, (dict, list)):
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(data)
+    return _dedupe_nonempty(names)
 
 
 def _is_subagent_delegation_tool_request(data: dict[str, object]) -> bool:
-    tool_name = _hook_tool_name(data)
-    return bool(tool_name) and any(tool_name.endswith(marker) or marker in tool_name for marker in READ_ONLY_SUBAGENT_DELEGATION_TOOLS)
+    return any(
+        tool_name.endswith(marker) or marker in tool_name
+        for tool_name in _hook_tool_names(data)
+        for marker in READ_ONLY_SUBAGENT_DELEGATION_TOOLS
+    )
 
 
 def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
