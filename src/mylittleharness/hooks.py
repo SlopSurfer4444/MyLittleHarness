@@ -495,6 +495,13 @@ POWERSHELL_SPLAT_INVOCATION_RE = re.compile(
 )
 POWERSHELL_ARRAY_ASSIGNMENT_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*@\((.*?)\)\s*;?", re.DOTALL)
 POWERSHELL_SCALAR_ASSIGNMENT_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"])(.*?)\2\s*;?", re.DOTALL)
+POWERSHELL_HOOK_SIMULATION_COMMAND_FIELD_RE = re.compile(
+    r"\bcommand\s*=\s*(?:\$([A-Za-z_][A-Za-z0-9_]*)|(['\"])(.*?)\2)",
+    re.IGNORECASE | re.DOTALL,
+)
+POWERSHELL_HOOK_SIMULATION_EXECUTION_RE = re.compile(
+    r"(?i)(?:^|[;\|\s])(?:iex|invoke-expression|start-process)\b|(?:^|[;\|\s])&\s*(?:\$|['\"]|\w)"
+)
 POST_CLOSEOUT_COMMIT_MESSAGE_OPTIONS = {"-m", "--message", "-F", "--file"}
 POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS = {
     "-a",
@@ -1698,6 +1705,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_read_only_product_source_vcs_inspection = _is_read_only_product_source_vcs_inspection_command(
         inventory, command, paths
     )
+    allow_read_only_hook_simulation = _is_read_only_hook_diagnostic_simulation_command(command)
+    block_unsafe_hook_simulation_payload = _has_unsafe_hook_diagnostic_simulation_payload(command)
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(command_data))
@@ -1708,6 +1717,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         or _is_read_only_git_inspection_command(command)
         or _is_read_only_mlh_inspection_command(command)
         or allow_read_only_mlh_report
+        or allow_read_only_hook_simulation
         or _is_bounded_mlh_read_tool_request(data)
         or allow_read_only_product_source_smoke
         or allow_read_only_product_source_inspection
@@ -1828,6 +1838,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "blocked opaque shell payload such as PowerShell -EncodedCommand; use a visible reviewed "
                     "command or a first-class MLH dry-run route instead"
                 ),
+            )
+        )
+    if block_unsafe_hook_simulation_payload:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-unsafe-hook-simulation-payload",
+                (
+                    "blocked PowerShell hook diagnostic wrapper because the simulated command payload is "
+                    "executable, mutating, or not a recognized read-only diagnostic; keep hook simulations as inert "
+                    "read-only data or run the direct read-only command"
+                ),
+                paths[0] if paths else None,
             )
         )
     if _looks_like_generated_cache_write(paths, write_command):
@@ -2110,6 +2133,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "info",
                 "hooks-policy-allow-read-only-mlh-report",
                 "allowed read-only MLH report/list command; this hook output remains advisory and cannot approve route mutation",
+            )
+        )
+    if allow_read_only_hook_simulation:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-hook-diagnostic-simulation",
+                (
+                    "allowed PowerShell hook diagnostic wrapper because the simulated command payload is inert "
+                    "read-only data for a pre/post tool-use hook run; executable payloads and lifecycle mutation "
+                    "intent remain blocked"
+                ),
+                paths[0] if paths else None,
             )
         )
     if allow_read_only_product_source_smoke and any(_is_under_configured_product_root(inventory, path) for path in paths):
@@ -3918,6 +3954,72 @@ def _is_read_only_shell_wrapper_command(command: str) -> bool:
         or _is_read_only_git_inspection_command(nested)
         or _is_read_only_mlh_inspection_command(nested)
         for nested in nested_commands
+    )
+
+
+def _is_read_only_hook_diagnostic_simulation_command(command: str) -> bool:
+    payload_commands = _hook_diagnostic_simulation_payload_commands(command)
+    return bool(payload_commands) and not _has_unsafe_hook_diagnostic_simulation_payload(command)
+
+
+def _has_unsafe_hook_diagnostic_simulation_payload(command: str) -> bool:
+    payload_commands = _hook_diagnostic_simulation_payload_commands(command)
+    if not payload_commands:
+        return False
+    if _looks_like_write_command(command):
+        return True
+    if POWERSHELL_HOOK_SIMULATION_EXECUTION_RE.search(_command_without_shell_literal_payloads(command or "")):
+        return True
+    return any(not _is_read_only_hook_diagnostic_payload_command(payload) for payload in payload_commands)
+
+
+def _hook_diagnostic_simulation_payload_commands(command: str) -> list[str]:
+    if not _is_mlh_hook_diagnostic_run_command(command):
+        return []
+    scalars, _arrays, _remainder = _powershell_literal_assignments(_command_prefix_before_first_mlh_invocation(command))
+    payload_commands: list[str] = []
+    for match in POWERSHELL_HOOK_SIMULATION_COMMAND_FIELD_RE.finditer(command or ""):
+        variable = str(match.group(1) or "").casefold()
+        literal = str(match.group(3) or "")
+        if variable:
+            candidate = scalars.get(variable, "")
+            if candidate:
+                payload_commands.append(candidate)
+        elif literal:
+            payload_commands.append(literal)
+    return _dedupe_nonempty(payload_commands)
+
+
+def _command_prefix_before_first_mlh_invocation(command: str) -> str:
+    match = re.search(
+        r"\b(?:my" + "littleharness|python\s+-m\s+my" + "littleharness|py\s+-m\s+my" + "littleharness)\b",
+        command or "",
+        re.IGNORECASE,
+    )
+    return (command or "")[: match.start()] if match else (command or "")
+
+
+def _is_mlh_hook_diagnostic_run_command(command: str) -> bool:
+    policy_command = _mlh_policy_command(command)
+    if _mlh_cli_subcommand(policy_command) != "hooks":
+        return False
+    tokens = [_clean_token(token) for token in _shell_tokens(policy_command)]
+    for index, token in enumerate(tokens):
+        if token == "--run" and index + 1 < len(tokens):
+            return tokens[index + 1] in {HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE}
+        if token.startswith("--run="):
+            return token.partition("=")[2] in {HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE}
+    return False
+
+
+def _is_read_only_hook_diagnostic_payload_command(command: str) -> bool:
+    if _looks_like_write_command(command) or _looks_like_git_stage_or_commit(command.casefold()):
+        return False
+    return (
+        _is_read_only_source_discovery_command(command)
+        or _is_read_only_git_inspection_command(command)
+        or _is_read_only_mlh_inspection_command(command)
+        or _is_read_only_mlh_report_command(command)
     )
 
 

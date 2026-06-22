@@ -38143,6 +38143,93 @@ class CliTests(unittest.TestCase):
                 {finding["code"] for finding in payload["findings"]},
             )
 
+    def test_hooks_allow_only_inert_read_only_powershell_hook_simulation_payloads(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        def simulation_command(event: str, inner_command: str, suffix: str = "") -> str:
+            return (
+                f"$cmd = '{inner_command}'; "
+                "$payload = @{toolName='shell_command'; command=$cmd} | ConvertTo-Json -Compress; "
+                f"$payload | mylittleharness --root . hooks --run {event} --json"
+                f"{suffix}"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            read_only_inner = (
+                "git check-ignore -v "
+                "project/verification/agent-runs/roadmap-list-json-read-only-cli-report-route-2026-06-22.md"
+            )
+
+            for event in ("pre-tool-use", "post-tool-use"):
+                with self.subTest(event=event):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": simulation_command(event, read_only_inner)}),
+                    )
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-read-only-hook-diagnostic-simulation", codes)
+                    self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", codes)
+                    self.assertNotIn("hooks-policy-block-unsafe-hook-simulation-payload", codes)
+
+            unsafe_cases = (
+                ("iex", simulation_command("pre-tool-use", read_only_inner, "; iex $cmd")),
+                ("invoke-expression", simulation_command("pre-tool-use", read_only_inner, "; Invoke-Expression $cmd")),
+                ("call-operator", simulation_command("pre-tool-use", read_only_inner, "; & $cmd")),
+                ("start-process", simulation_command("pre-tool-use", read_only_inner, "; Start-Process $cmd")),
+                (
+                    "redirect-payload",
+                    simulation_command("pre-tool-use", "git show HEAD > project/project-state.md"),
+                ),
+                (
+                    "write-payload",
+                    simulation_command("pre-tool-use", "Set-Content project/project-state.md bad"),
+                ),
+                (
+                    "lifecycle-mutation-payload",
+                    simulation_command("pre-tool-use", "mylittleharness --root . writeback --apply --docs-decision not-needed"),
+                ),
+                ("outer-write", simulation_command("pre-tool-use", read_only_inner, "; Set-Content scratch.txt bad")),
+            )
+            for label, command in unsafe_cases:
+                with self.subTest(label=label):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-unsafe-hook-simulation-payload", codes)
+                    self.assertNotIn("hooks-policy-allow-read-only-hook-diagnostic-simulation", codes)
+
+    def test_hooks_pre_tool_allows_multifile_read_only_powershell_route_note_wrapper(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            command = (
+                "powershell -NoProfile -Command "
+                "\"Get-Content "
+                "project/plan-incubation/powershell-nested-read-only-hook-simulation-overblock.md, "
+                "project/plan-incubation/roadmap-list-json-read-only-hook-overblock.md\""
+            )
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": command}),
+            )
+            codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", codes)
+
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
