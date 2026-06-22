@@ -3899,6 +3899,10 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return False
     pathspecs = [] if _has_shell_command_separator(command) else _git_stage_pathspecs(command)
     normalized = _normalized_route_produced_lifecycle_paths(inventory, pathspecs or paths)
+    if not _has_shell_command_separator(command) and _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+        inventory, pathspecs
+    ):
+        return True
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
         return bool(_coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs))
     if all(_is_existing_lifecycle_route_file(inventory, path) for path in paths):
@@ -4568,6 +4572,11 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
         allowed.add(active_plan_rel)
     if last_archive_rel:
         allowed.add(last_archive_rel)
+        allowed.update(
+            path
+            for path in normalized
+            if _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
+        )
     allowed.update(path for path in normalized if path.startswith("project/archive/plans/"))
     if any(path not in allowed for path in normalized):
         return False
@@ -4870,9 +4879,18 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
     last_archive_rel = _last_archived_plan_rel_path(inventory)
     if not last_archive_rel or not _is_deferred_archive_plan_route_path(last_archive_rel):
         return set()
-    expected = {state_rel, roadmap_rel, last_archive_rel}
-    expected_with_tombstone = {state_rel, roadmap_rel, last_archive_rel, ACTIVE_PLAN_ROUTE_PATH}
-    if normalized != expected and normalized != expected_with_tombstone:
+    required = {state_rel, roadmap_rel, last_archive_rel}
+    optional = {ACTIVE_PLAN_ROUTE_PATH}
+    if not required <= normalized:
+        return set()
+    extra = normalized - required - optional
+    if extra and not all(
+        _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel) for path in extra
+    ):
+        return set()
+    if ACTIVE_PLAN_ROUTE_PATH in normalized and not _is_post_closeout_active_plan_tombstone_path(
+        inventory, ACTIVE_PLAN_ROUTE_PATH
+    ):
         return set()
     if not _is_reviewed_post_closeout_archive_plan_file(inventory, last_archive_rel):
         return set()
@@ -5584,12 +5602,39 @@ def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: st
     )
 
 
+def _is_reviewed_post_closeout_source_incubation_file(inventory: Inventory, path: str, archive_rel: str) -> bool:
+    if not _is_reviewed_meta_feedback_incubation_file(inventory, path):
+        return False
+    if not _is_reviewed_roadmap_promoted_incubation_file(inventory, path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    expected_archive = _normalize_hook_path(archive_rel).casefold()
+    relationship_fields = ("related_plan", "archived_plan", "implemented_by")
+    if any(_normalize_hook_path(str(data.get(field) or "")).casefold() != expected_archive for field in relationship_fields):
+        return False
+    docs_decision = str(data.get("docs_decision") or "").strip().casefold()
+    verification_summary = str(data.get("verification_summary") or "").strip()
+    return docs_decision in {"updated", "not-needed", "uncertain"} and bool(verification_summary)
+
+
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
         "post-closeout-route-package,worker-run-receipt-refs,retention-receipt-refs,verification/decision-evidence-package,"
         "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
-        "roadmap-promotion-package,meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
+        "roadmap-promotion-package,post-closeout-source-incubation-relationship-package,"
+        "meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
         "delegated-neighbor-bootstrap-scaffold"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)

@@ -33028,6 +33028,52 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_route_package_with_source_incubation_relationship(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- " + " ".join((state_rel, roadmap_rel, archive_rel, note_rel)),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_blocks_post_closeout_source_incubation_wrong_archive_relationship(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(
+                root, archive_rel, archived_plan="project/archive/plans/other-closeout.md"
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- " + " ".join((state_rel, roadmap_rel, archive_rel, note_rel)),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+
     def test_hooks_pre_tool_allows_exact_post_closeout_local_vcs_staging_and_commit(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -33317,6 +33363,43 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return state_rel, roadmap_rel, archive_rel
+
+    def _write_reviewed_source_incubation_relationship_fixture(
+        self, root: Path, archive_rel: str, *, archived_plan: str | None = None
+    ) -> str:
+        note_rel = "project/" + "plan-incubation/delegation-read-navigation-prompt-overblock.md"
+        relationship_rel = archived_plan or archive_rel
+        (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / note_rel).write_text(
+            "---\n"
+            'topic: "delegation-read-navigation-prompt-overblock"\n'
+            'status: "incubating"\n'
+            'created: "2026-06-20"\n'
+            'updated: "2026-06-22"\n'
+            'source: "MyLittleHarness incubation route"\n'
+            'related_roadmap: "project/roadmap.md"\n'
+            'related_roadmap_item: "dogfood-hook-delegation-overblock-fidelity"\n'
+            'promoted_to: "project/roadmap.md"\n'
+            f'related_plan: "{relationship_rel}"\n'
+            f'archived_plan: "{relationship_rel}"\n'
+            f'implemented_by: "{relationship_rel}"\n'
+            'verification_summary: "Archive readiness passed with focused hook regression tests."\n'
+            'docs_decision: "not-needed"\n'
+            "---\n"
+            "# delegation-read-navigation-prompt-overblock\n\n"
+            "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+            "- `signal_type`: `agent-operability-hook-analysis`\n"
+            "- `friction_signature`: `source-incubation-closeout`\n"
+            "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+            "## Entries\n\n"
+            "[MLH-Fix-Candidate]\n"
+            "hook_classification: overblocked\n"
+            "blocked_surface: hook route staging overblock\n"
+            "safe_boundary: evidence only; cannot approve lifecycle, archive, roadmap, staging, commit, push, or release.\n"
+            "authority_boundary: evidence only; cannot approve lifecycle, archive, roadmap, staging, commit, push, or release.\n",
+            encoding="utf-8",
+        )
+        return note_rel
 
     def _write_reviewed_worker_receipt_checkpoint_fixture(self, root: Path) -> tuple[str, str, str]:
         receipt_rel = "project/" + "verification/worker-run-receipts/launch-1-worker-1.json"
@@ -35324,6 +35407,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", partial_codes)
             self.assertIn("next_safe_command=", partial_messages)
             self.assertIn(archive_rel, partial_messages)
+
+    def test_hooks_pre_tool_allows_active_route_checkpoint_with_source_incubation_relationship(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state_rel = "project/" + "project-state.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            archive_rel = "project/" + "archive/plans/active-closeout.md"
+            state_path = root / state_rel
+            archive = root / archive_rel
+            archive.parent.mkdir(parents=True)
+            (root / roadmap_rel).write_text("# Roadmap\n", encoding="utf-8")
+            archive.write_text("# Active Closeout\n", encoding="utf-8")
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                .replace('phase_status: "complete"', f'phase_status: "complete"\nlast_archived_plan: "{archive_rel}"')
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- phase_status: complete\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", state_rel, roadmap_rel, archive_rel, note_rel]),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
     def test_hooks_pre_tool_allows_split_route_produced_lifecycle_artifact_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
