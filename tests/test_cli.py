@@ -6799,6 +6799,7 @@ class CliTests(unittest.TestCase):
             self.assertIn('model_id: "gpt-test"', record_text)
             self.assertIn("src/changed.py sha256=", record_text)
             self.assertFalse((root / ".mylittleharness/generated").exists())
+            record_rel = "project/verification/" + "agent-runs/run-1.md"
 
             duplicate_dry_run = io.StringIO()
             with redirect_stdout(duplicate_dry_run):
@@ -6808,6 +6809,31 @@ class CliTests(unittest.TestCase):
             self.assertIn("agent-run-record-refresh-current", duplicate_rendered)
             self.assertNotIn("agent-run-record-refused", duplicate_rendered)
             self.assertNotIn("would create route project/verification/agent-runs/run-1.md", duplicate_rendered)
+
+            metadata_refresh_args = [
+                *common_args,
+                "--handoff-ref",
+                "project/verification/handoffs/fanin.json",
+                "--claim-ref",
+                "project/verification/work-claims/fanin.json",
+            ]
+            metadata_dry_run = io.StringIO()
+            with redirect_stdout(metadata_dry_run):
+                self.assertEqual(main([*metadata_refresh_args, "--dry-run"]), 0)
+            metadata_dry_rendered = metadata_dry_run.getvalue()
+            self.assertIn("agent-run-record-refresh-dry-run", metadata_dry_rendered)
+            self.assertIn(f"would refresh route {record_rel}", metadata_dry_rendered)
+
+            metadata_apply = io.StringIO()
+            with redirect_stdout(metadata_apply):
+                self.assertEqual(main([*metadata_refresh_args, "--apply"]), 0)
+            metadata_apply_rendered = metadata_apply.getvalue()
+            refreshed_metadata_text = record_path.read_text(encoding="utf-8")
+            self.assertIn("agent-run-record-refreshed", metadata_apply_rendered)
+            self.assertIn('  - "project/verification/handoffs/run-1.json"', refreshed_metadata_text)
+            self.assertIn('  - "project/verification/handoffs/fanin.json"', refreshed_metadata_text)
+            self.assertIn('  - "project/verification/work-claims/claim-1.json"', refreshed_metadata_text)
+            self.assertIn('  - "project/verification/work-claims/fanin.json"', refreshed_metadata_text)
 
             clean_check = io.StringIO()
             with redirect_stdout(clean_check):
@@ -6825,7 +6851,6 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             self.assertIn("check-agent-run-record-stale", stale_check.getvalue())
 
-            record_rel = "project/verification/" + "agent-runs/run-1.md"
             changed_rel = "src/" + "changed.py"
             refresh_dry_run = io.StringIO()
             with redirect_stdout(refresh_dry_run):
@@ -15133,6 +15158,10 @@ class CliTests(unittest.TestCase):
             claim_data = json.loads(claim_path.read_text(encoding="utf-8"))
             claim_data["status"] = "active"
             claim_path.write_text(json.dumps(claim_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            handoff_path = root / "project/verification/handoffs/handoff-1.json"
+            handoff_data = json.loads(handoff_path.read_text(encoding="utf-8"))
+            handoff_data["status"] = "pending"
+            handoff_path.write_text(json.dumps(handoff_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             before = snapshot_tree(root)
             args = _fan_in_gate_writeback_args(root)
 
@@ -15144,8 +15173,19 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("writeback-fan-in-evidence-missing", rendered)
             self.assertIn("released-work-claim", rendered)
-            self.assertIn("fan_in_evidence=missing:released-work-claim", rendered)
+            self.assertIn("accepted-handoff", rendered)
+            self.assertIn("fan_in_evidence=missing:released-work-claim,accepted-handoff", rendered)
             self.assertIn("claim status is active, not released", rendered)
+            self.assertIn("handoff status is pending, not accepted", rendered)
+            self.assertIn(
+                f"mylittleharness --root {root.as_posix()} claim --dry-run --action release --claim-id claim-1",
+                rendered,
+            )
+            self.assertIn(
+                f"mylittleharness --root {root.as_posix()} handoff --dry-run --action accept --handoff-id handoff-1",
+                rendered,
+            )
+            self.assertNotIn("closeout identity:", rendered)
 
     def test_writeback_refuses_fan_in_with_stale_agent_run_source_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -31837,6 +31877,65 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
 
+    def test_hooks_pre_tool_handles_nested_codex_delegation_wrapper_and_actual_command(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "<codex_delegation><source_thread_id>thread-1</source_thread_id><input>"
+                "Coordination steering: read/navigation context only. Read AGENTS.md, "
+                ".codex/project-workflow.toml, project/project-state.md, and dashboard/check first. "
+                f"Use product source {product_ref} only as navigation context. "
+                "Do not run writeback --apply, do not use apply_patch, do not stage, commit, push, "
+                "release, or bypass hooks.</input></codex_delegation>"
+            )
+            safe_input = {
+                "toolName": "multi_tool_use.parallel",
+                "tool_uses": [
+                    {
+                        "recipient_name": "codex_app.send_message_to_thread",
+                        "parameters": {"thread_id": "thread-1", "input": prompt},
+                    }
+                ],
+            }
+            mutation_input = {
+                "toolName": "multi_tool_use.parallel",
+                "tool_uses": [
+                    {
+                        "recipient_name": "codex_app.send_message_to_thread",
+                        "parameters": {"thread_id": "thread-1", "input": prompt},
+                    },
+                    {
+                        "recipient_name": "functions.shell_command",
+                        "parameters": {
+                            "workdir": str(root),
+                            "command": "Set-Content project/project-state.md shortcut",
+                        },
+                    },
+                ],
+            }
+
+            safe_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(safe_input))
+            mutation_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(mutation_input))
+
+            safe_codes = {finding["code"] for finding in safe_payload["findings"]}
+            mutation_codes = {finding["code"] for finding in mutation_payload["findings"]}
+            self.assertFalse(safe_payload["block"])
+            self.assertTrue(
+                {
+                    "hooks-policy-allow-delegation-prompt-context",
+                    "hooks-policy-allow-read-only-subagent-delegation",
+                    "hooks-policy-warn-reviewed-local-vcs-delegation",
+                }
+                & safe_codes
+            )
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", safe_codes)
+            self.assertTrue(mutation_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", mutation_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", mutation_codes)
+
     def test_hooks_pre_tool_allows_guarded_live_provider_handoff_context(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -36879,6 +36978,87 @@ class CliTests(unittest.TestCase):
             self.assertTrue(broad_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", broad_codes)
+
+    def test_hooks_pre_tool_gives_split_steps_for_route_produced_lifecycle_evidence_package(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            note_rel = "project/" + "plan-incubation/lifecycle-evidence-package-staging-split-guidance.md"
+            archive_rel = "project/" + "archive/plans/hook-ux-closeout.md"
+            agent_run_rel = "project/" + "verification/agent-runs/hook-ux-run.md"
+            claim_rel = "project/" + "verification/work-claims/hook-ux-claim.json"
+            handoff_rel = "project/" + "verification/handoffs/hook-ux-handoff.json"
+            (root / "project/roadmap.md").write_text("# Roadmap\n", encoding="utf-8")
+            for rel, text in (
+                (archive_rel, "# Hook UX Closeout\n"),
+                (agent_run_rel, "---\nrecord_type: \"agent-run\"\n---\n# Agent Run\n"),
+                (claim_rel, "{}\n"),
+                (handoff_rel, "{}\n"),
+            ):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / note_rel).write_text(
+                "---\n"
+                'topic: "lifecycle-evidence-package-staging-split-guidance"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-23"\n'
+                'updated: "2026-06-23"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# lifecycle-evidence-package-staging-split-guidance\n\n"
+                "## Meta-feedback Cluster\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                "- `canonical_id`: `lifecycle-evidence-package-staging-split-guidance`\n"
+                "- `signal_type`: `route-ux-friction`\n"
+                "- `expected_owner_command`: `meta-feedback`\n"
+                "- `affected_routes`: `[\"hooks\", \"evidence\", \"writeback\"]`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+                "[MLH-Fix-Candidate] hook blocked_surface: mixed lifecycle/evidence git add package "
+                "containing a route-produced incubation prompt-like note, project-state, roadmap, archived plan, "
+                "claim, handoff, and ignored agent-run evidence. false_positive_shape: legal route-produced "
+                "mixed package was guided toward prompt moving instead of split-step staging.\n"
+                "safe_boundary: feedback only; no lifecycle closeout, archive, staging, commit, push, or bypass approval.\n"
+                "authority_boundary: operating-memory capture only; exact staging still requires reviewed commands.\n",
+                encoding="utf-8",
+            )
+
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": " ".join(
+                            [
+                                "git",
+                                "add",
+                                "--",
+                                note_rel,
+                                "project/project-state.md",
+                                "project/roadmap.md",
+                                archive_rel,
+                                agent_run_rel,
+                                claim_rel,
+                                handoff_rel,
+                            ]
+                        ),
+                    }
+                ),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertIn("stage one route-produced incubation note at a time", messages)
+            self.assertIn("git -C <actual-root> add -- <one-incubation-note>", messages)
+            self.assertIn("git -C <actual-root> add -f -- <ignored-route-artifact>", messages)
+            self.assertIn("git -C <actual-root> diff --cached --check", messages)
+            self.assertNotIn("move-non-incubation-prompt", messages)
 
     def test_hooks_pre_tool_allows_tracked_existing_incubation_note_with_prompt_language_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

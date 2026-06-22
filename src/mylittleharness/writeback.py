@@ -2225,6 +2225,7 @@ def acceptance_evidence_findings(
         product_diff_proof=product_diff_scope_proof(inventory, closeout_values),
     )
     if fan_in_gate.activated and fan_in_gate.missing:
+        terminal_guidance = _fan_in_terminal_state_guidance(inventory.root, fan_in_gate)
         findings.append(
             Finding(
                 severity,
@@ -2232,7 +2233,7 @@ def acceptance_evidence_findings(
                 (
                     f"{completion_reason} activates fan-in evidence ({_completion_gate_sample(fan_in_gate.reasons)}) "
                     f"but is missing repo-visible evidence: {', '.join(fan_in_gate.missing)}; record matching "
-                    "work-claim, handoff, and agent-run evidence before confident closeout. Ordinary single-agent "
+                    f"work-claim, handoff, and agent-run evidence before confident closeout.{terminal_guidance} Ordinary single-agent "
                     "low-blast plans do not require fan-in evidence, and present records do not approve worker "
                     "cleanup, archive, staging, commit, or next-plan opening"
                 ),
@@ -4336,6 +4337,73 @@ def _writeback_incubation_archive_retry_findings(plan: RelationshipUpdatePlan) -
             )
         )
     return findings
+
+
+def _fan_in_terminal_state_guidance(root: Path, gate: FanInEvidenceGate) -> str:
+    if not gate.missing:
+        return ""
+    commands: list[str] = []
+    root_arg = root.as_posix()
+    for claim_id in _fan_in_blocker_record_ids(gate.blockers, "project/verification/work-claims/"):
+        commands.append(
+            mlh_command(
+                "claim",
+                "--dry-run",
+                "--action",
+                "release",
+                "--claim-id",
+                claim_id,
+                "--release-condition",
+                safe_double_quoted("handoff accepted and agent-run evidence recorded"),
+                root=root_arg,
+            )
+        )
+    for handoff_id in _fan_in_blocker_record_ids(gate.blockers, "project/verification/handoffs/"):
+        commands.append(
+            mlh_command(
+                "handoff",
+                "--dry-run",
+                "--action",
+                "accept",
+                "--handoff-id",
+                handoff_id,
+                "--accepted-by",
+                "coordinator",
+                "--acceptance-note",
+                safe_double_quoted("released claim and agent-run evidence reviewed"),
+                root=root_arg,
+            )
+        )
+    if "agent-run" in gate.missing or "fresh-agent-run" in gate.missing:
+        commands.append(
+            mlh_command(
+                "evidence",
+                "--record",
+                "--dry-run",
+                "--record-id",
+                "<agent-run-id>",
+                "--claim-ref",
+                "<released-work-claim-ref>",
+                "--handoff-ref",
+                "<accepted-handoff-ref>",
+                root=root_arg,
+            )
+        )
+    if not commands:
+        return ""
+    return " Next safe terminal-state command(s): " + "; ".join(commands) + "; then rerun writeback --dry-run."
+
+
+def _fan_in_blocker_record_ids(blockers: tuple[str, ...], prefix: str) -> tuple[str, ...]:
+    ids: list[str] = []
+    for blocker in blockers:
+        if not blocker.startswith(prefix):
+            continue
+        rel_path = blocker.split(":", 1)[0]
+        record_id = Path(rel_path).stem
+        if record_id and record_id not in ids:
+            ids.append(record_id)
+    return tuple(ids)
 
 
 def _writeback_incubation_archive_retry_command(plan: RelationshipUpdatePlan, report) -> str:

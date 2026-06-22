@@ -303,6 +303,11 @@ SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE = re.compile(
     r"mlhd\s+run-once\s+--apply\b"
     r")"
 )
+SUBAGENT_DELEGATION_NEGATED_BYPASS_TAIL_RE = re.compile(
+    r"(?i)\b(?:do\s+not|don't|must\s+not|should\s+not|never|no|without)\b"
+    r"(?:(?!\b(?:then|after|afterward|now|immediately)\b)[^\n\r.;]){0,180}"
+    r"(?:,|\bor\b)\s+bypass(?:\s+[-\w]+){0,3}\b"
+)
 SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE = re.compile(
     r"(?i)\b(?:do\s+not|don't|no|without)\s+"
     r"(?:"
@@ -2234,7 +2239,6 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     if (
         _is_subagent_delegation_tool_request(data)
-        and _is_subagent_delegation_only_request(data)
         and _subagent_delegation_forbidden_shortcut(text)
         and not allow_reviewed_local_vcs_delegation
         and not allow_delegation_prompt_context
@@ -3640,6 +3644,7 @@ def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
 
 def _scrub_negated_subagent_delegation_guardrails(text: str) -> str:
     scrubbed = SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE.sub(" ", str(text or ""))
+    scrubbed = SUBAGENT_DELEGATION_NEGATED_BYPASS_TAIL_RE.sub(" ", scrubbed)
     return SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
 
 
@@ -7382,6 +7387,8 @@ def _hook_lifecycle_markdown_shortcut_next_safe_command(inventory: Inventory, pa
 
 def _hook_lifecycle_markdown_path_next_safe_command(inventory: Inventory, path: str) -> str:
     rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
+    if _is_reviewed_meta_feedback_incubation_file(inventory, rel):
+        return _hook_lifecycle_evidence_package_split_step_next_safe_command()
     if _looks_like_incubation_prompt_source(inventory, rel):
         return mlh_command(
             "memory-hygiene",
@@ -7393,6 +7400,16 @@ def _hook_lifecycle_markdown_path_next_safe_command(inventory: Inventory, path: 
             _operator_prompt_target_for_source(rel),
         )
     return _hook_route_next_safe_command(inventory, path)
+
+
+def _hook_lifecycle_evidence_package_split_step_next_safe_command() -> str:
+    return (
+        "stage one route-produced incubation note at a time, then stage lifecycle/evidence/archive artifacts "
+        "as separate exact groups: git -C <actual-root> add -- <one-incubation-note>; "
+        "git -C <actual-root> add -- project/project-state.md project/roadmap.md "
+        "<work-claim-ref> <handoff-ref>; git -C <actual-root> add -f -- <ignored-route-artifact>; "
+        "git -C <actual-root> diff --cached --check; git -C <actual-root> commit -F <message-file>"
+    )
 
 
 def _incubation_prompt_move_source_from_command(inventory: Inventory, command: str) -> str | None:

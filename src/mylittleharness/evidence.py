@@ -1120,6 +1120,7 @@ class AgentRunRecordRefreshPlan:
     current_text: str
     updated_text: str
     source_hashes: tuple[str, ...]
+    refreshed_ref_fields: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1244,7 +1245,7 @@ def agent_run_record_dry_run_findings(inventory: Inventory, request: AgentRunRec
     target_rel = _agent_run_record_target_rel(request)
     target = inventory.root / target_rel
     if target.exists() and target.is_file():
-        refresh_plan, refresh_findings = _agent_run_record_refresh_plan(inventory.root, target_rel, severity="warn")
+        refresh_plan, refresh_findings = _agent_run_record_refresh_plan(inventory.root, target_rel, severity="warn", request=request)
         findings.extend(refresh_findings)
         if refresh_plan is None:
             findings.append(Finding("info", "agent-run-record-validation-posture", "dry-run refused before apply; fix the existing agent run evidence record before refreshing source hashes"))
@@ -1286,7 +1287,7 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
     target_rel = _agent_run_record_target_rel(request)
     target = inventory.root / target_rel
     if target.exists() and target.is_file():
-        refresh_plan, refresh_findings = _agent_run_record_refresh_plan(inventory.root, target_rel, severity="error")
+        refresh_plan, refresh_findings = _agent_run_record_refresh_plan(inventory.root, target_rel, severity="error", request=request)
         findings.extend(refresh_findings)
         if refresh_plan is None:
             findings.append(Finding("info", "agent-run-record-validation-posture", "apply refused before refreshing evidence"))
@@ -2209,7 +2210,7 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
                 Finding(
                     "info",
                     "agent-run-record-refresh-target",
-                    "agent run record already exists; same --record-id will refresh source_hashes on the existing evidence record only",
+                    "agent run record already exists; same --record-id will refresh source_hashes and merge supplied input_refs, handoff_refs, and claim_refs on the existing evidence record",
                     target_rel,
                 )
             )
@@ -5760,7 +5761,7 @@ def _agent_run_record_target_rel(request: AgentRunRecordRequest) -> str:
     return f"{AGENT_RUN_RECORD_PREFIX}{request.record_id}.md"
 
 
-def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -> tuple[AgentRunRecordRefreshPlan | None, list[Finding]]:
+def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str, *, request: AgentRunRecordRequest | None = None) -> tuple[AgentRunRecordRefreshPlan | None, list[Finding]]:
     target = root / target_rel
     try:
         current_text = target.read_text(encoding="utf-8")
@@ -5797,14 +5798,35 @@ def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -
             )
         ]
 
+    updated_text = current_text
+    refreshed_ref_fields: list[str] = []
+    if request is not None:
+        for field, requested_refs in (
+            ("input_refs", request.input_refs),
+            ("handoff_refs", request.handoff_refs),
+            ("claim_refs", request.claim_refs),
+        ):
+            clean_requested_refs = tuple(ref.replace("\\", "/").strip() for ref in requested_refs if ref.replace("\\", "/").strip())
+            if not clean_requested_refs:
+                continue
+            existing_refs = _frontmatter_string_list(data.get(field))
+            merged_refs = _merge_root_relative_refs(existing_refs, clean_requested_refs)
+            source_refs = _merge_root_relative_refs(source_refs, clean_requested_refs)
+            if merged_refs != existing_refs:
+                updated_text = _replace_frontmatter_list(updated_text, field, merged_refs)
+                refreshed_ref_fields.append(field)
+
     source_hashes, hash_findings = _source_hash_entries_for_refs(root, source_refs)
-    updated_text = _replace_agent_run_source_hashes(current_text, source_hashes)
-    plan = AgentRunRecordRefreshPlan(target_rel, current_text, updated_text, tuple(source_hashes))
+    updated_text = _replace_agent_run_source_hashes(updated_text, source_hashes)
+    plan = AgentRunRecordRefreshPlan(target_rel, current_text, updated_text, tuple(source_hashes), tuple(refreshed_ref_fields))
+    ref_phrase = ""
+    if refreshed_ref_fields:
+        ref_phrase = f" and supplied {', '.join(refreshed_ref_fields)}"
     findings = [
         Finding(
             "info",
             "agent-run-record-refresh-target",
-            f"refresh source_hashes for existing agent run evidence record: {target_rel}",
+            f"refresh source_hashes{ref_phrase} for existing agent run evidence record: {target_rel}",
             target_rel,
         )
     ]
@@ -5822,12 +5844,15 @@ def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -
 
 
 def _agent_run_record_refresh_route_findings(plan: AgentRunRecordRefreshPlan, *, apply: bool) -> list[Finding]:
+    refresh_scope = "source_hashes"
+    if plan.refreshed_ref_fields:
+        refresh_scope = f"source_hashes and supplied {', '.join(plan.refreshed_ref_fields)}"
     if plan.current_text == plan.updated_text:
         return [
             Finding(
                 "info",
                 "agent-run-record-refresh-current",
-                "agent run evidence record source hashes are already current; no route write is needed",
+                f"agent run evidence record {refresh_scope} are already current; no route write is needed",
                 plan.rel_path,
             )
         ]
@@ -5837,7 +5862,7 @@ def _agent_run_record_refresh_route_findings(plan: AgentRunRecordRefreshPlan, *,
     after_bytes = len(plan.updated_text.encode("utf-8"))
     prefix = "refreshed" if apply else "would refresh"
     return [
-        Finding("info", "agent-run-record-refreshed" if apply else "agent-run-record-refresh-dry-run", f"{prefix} source_hashes for existing agent run evidence record: {plan.rel_path}", plan.rel_path),
+        Finding("info", "agent-run-record-refreshed" if apply else "agent-run-record-refresh-dry-run", f"{prefix} {refresh_scope} for existing agent run evidence record: {plan.rel_path}", plan.rel_path),
         Finding(
             "info",
             "agent-run-record-route-write",
@@ -5845,6 +5870,18 @@ def _agent_run_record_refresh_route_findings(plan: AgentRunRecordRefreshPlan, *,
             plan.rel_path,
         ),
     ]
+
+
+def _merge_root_relative_refs(existing_refs: tuple[str, ...], requested_refs: tuple[str, ...]) -> tuple[str, ...]:
+    merged = list(existing_refs)
+    for requested_ref in requested_refs:
+        clean_ref = requested_ref.replace("\\", "/").strip()
+        if not clean_ref:
+            continue
+        if any(_same_root_relative_path(clean_ref, existing_ref) for existing_ref in merged):
+            continue
+        merged.append(clean_ref)
+    return tuple(merged)
 
 
 def _replace_agent_run_source_hashes(text: str, source_hashes: Iterable[str]) -> str:
