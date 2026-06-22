@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -285,6 +286,12 @@ def product_diff_write_scope_findings(
     values = closeout_values or {}
     disclosed = _closeout_disclaims_out_of_scope_product_diff(values, out_of_scope)
     sample = _sample_text(out_of_scope)
+    exact = _exact_path_list(out_of_scope)
+    out_of_scope_fingerprint = str(scope.get("out_of_scope_fingerprint") or "")
+    dirty_set_fingerprint = str(scope.get("dirty_set_fingerprint") or "")
+    fingerprint_detail = (
+        f"out_of_scope_fingerprint={out_of_scope_fingerprint}; dirty_set_fingerprint={dirty_set_fingerprint}; exact out_of_scope_paths={exact}"
+    )
     allowed_sample = _sample_text(allowed_paths)
     completion = completion_reason or "active plan read-only posture"
     if completion_reason and not disclosed:
@@ -293,9 +300,10 @@ def product_diff_write_scope_findings(
             f"{code_prefix}-product-diff-write-scope-blocked",
             (
                 f"{completion} would accept out-of-scope product dirty diff path(s): {sample}; "
+                f"{fingerprint_detail}; "
                 f"allowed active plan target_artifacts/write_scope: {allowed_sample}. "
                 "Record residual risk/carry-forward that explicitly leaves these paths unaccepted, "
-                "or narrow the actual product diff before closeout."
+                "or narrow the actual product diff before closeout; rerun dry-run if the fingerprint changes before apply."
             ),
             source,
         )
@@ -310,6 +318,7 @@ def product_diff_write_scope_findings(
                 f"{code_prefix}-product-diff-write-scope-disclosed",
                 (
                     f"{completion} sees out-of-scope product dirty diff path(s): {sample}; "
+                    f"{fingerprint_detail}; "
                     "closeout evidence explicitly leaves those paths unaccepted, so this route does not silently accept them"
                 ),
                 source,
@@ -321,6 +330,7 @@ def product_diff_write_scope_findings(
             f"{code_prefix}-product-diff-write-scope",
             (
                 f"actual product dirty diff exceeds active plan target_artifacts/write_scope: {sample}; "
+                f"{fingerprint_detail}; "
                 f"allowed_scope={allowed_sample}; read-only diagnostics do not accept, split, discard, or revert these changes"
             ),
             source,
@@ -353,6 +363,8 @@ def product_diff_scope_proof(inventory: Inventory, closeout_values: dict[str, st
     proof["dirty_paths"] = dirty_paths
     proof["out_of_scope"] = out_of_scope
     proof["allowed_paths"] = tuple(str(path) for path in proof.get("allowed_paths", ()) if str(path))
+    proof["dirty_set_fingerprint"] = _path_set_fingerprint(dirty_paths)
+    proof["out_of_scope_fingerprint"] = _path_set_fingerprint(out_of_scope)
     return proof
 
 
@@ -421,6 +433,8 @@ def _product_diff_scope(inventory: Inventory) -> dict[str, object] | None:
         "dirty_paths": dirty_paths,
         "out_of_scope": out_of_scope,
         "allowed_paths": allowed_paths,
+        "dirty_set_fingerprint": _path_set_fingerprint(dirty_paths),
+        "out_of_scope_fingerprint": _path_set_fingerprint(out_of_scope),
     }
 
 
@@ -627,6 +641,17 @@ def _sample_text(values: Sequence[str], limit: int = CHANGED_SAMPLE_LIMIT) -> st
     if len(items) > limit:
         sample += f", +{len(items) - limit} more"
     return sample
+
+
+def _path_set_fingerprint(values: Sequence[str]) -> str:
+    normalized = tuple(sorted(_normalize_product_rel(value) for value in values if _normalize_product_rel(value)))
+    payload = "\n".join(normalized).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _exact_path_list(values: Sequence[str]) -> str:
+    normalized = tuple(_normalize_product_rel(value) for value in values if _normalize_product_rel(value))
+    return _sample_text(normalized, limit=max(CHANGED_SAMPLE_LIMIT, len(normalized)))
 
 
 def _git_top_level(root: Path, runner: GitRunner | None) -> str | None:

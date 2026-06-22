@@ -104,6 +104,7 @@ from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_
 from .reporting import RouteWriteEvidence, route_write_findings
 from .root_boundary import (
     PRODUCT_SOURCE_FIXTURE,
+    product_source_ref_target,
     record_id_conflict,
     root_relative_path_conflict,
     source_path_boundary_violation,
@@ -859,7 +860,7 @@ def _coordination_agent_run_identity_findings(root: Path, code_prefix: str) -> l
             if not _coordination_string_list(data.get(field)):
                 findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", f"agent run record missing required list field: {field}", rel_path))
         source_refs = _coordination_agent_run_source_refs(data)
-        source_hash_refs = _coordination_source_hash_refs(data.get("source_hashes"), rel_path, code_prefix)
+        source_hash_refs = _coordination_source_hash_refs(root, data.get("source_hashes"), rel_path, code_prefix)
         findings.extend(source_hash_refs[1])
         for source_ref in sorted(source_refs - source_hash_refs[0]):
             findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-missing", f"agent run record source_hashes does not bind source ref: {source_ref}", rel_path))
@@ -966,7 +967,7 @@ def _coordination_source_hash_required(rel_path: str) -> bool:
     )
 
 
-def _coordination_source_hash_refs(value: object, rel_path: str, code_prefix: str) -> tuple[set[str], list[Finding]]:
+def _coordination_source_hash_refs(root: Path, value: object, rel_path: str, code_prefix: str) -> tuple[set[str], list[Finding]]:
     refs: set[str] = set()
     findings: list[Finding] = []
     if value not in (None, "") and not isinstance(value, list):
@@ -978,7 +979,8 @@ def _coordination_source_hash_refs(value: object, rel_path: str, code_prefix: st
             continue
         source_ref = _coordination_normalize_ref(match.group(1))
         refs.add(source_ref)
-        conflict = "" if _coordination_is_product_source_ref(source_ref) else root_relative_path_conflict(source_ref)
+        product_target = product_source_ref_target(root, source_ref)
+        conflict = product_target.conflict if product_target is not None else root_relative_path_conflict(source_ref)
         if conflict:
             findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-malformed", f"source_hashes path {conflict}: {source_ref}", rel_path))
     return refs, findings

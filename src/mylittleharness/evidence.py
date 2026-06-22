@@ -15,7 +15,15 @@ from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
 from .parsing import Frontmatter, parse_frontmatter
-from .root_boundary import record_id_conflict, root_relative_path_conflict, source_path_boundary_violation
+from .root_boundary import (
+    PRODUCT_SOURCE_REF_PREFIX,
+    product_source_ref_rel as shared_product_source_ref_rel,
+    product_source_ref_target as shared_product_source_ref_target,
+    product_source_root_from_state as shared_product_source_root_from_state,
+    record_id_conflict,
+    root_relative_path_conflict,
+    source_path_boundary_violation,
+)
 from .writeback import (
     WritebackFact,
     acceptance_evidence_findings,
@@ -60,7 +68,6 @@ AGENT_RUN_RETIREMENT_SUMMARY_REL = "project/verification/agent-run-retirement-su
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
 AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD = 8
 AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
-PRODUCT_SOURCE_REF_PREFIX = "product-source:"
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
 WORKER_RUN_RECEIPT_REFRESH_TOKEN_PREFIX = "wrr-"
@@ -5920,29 +5927,11 @@ def _is_product_source_ref(value: str) -> bool:
 
 
 def _product_source_ref_rel(value: str) -> str:
-    text = str(value or "").replace("\\", "/").strip()
-    if not text.casefold().startswith(PRODUCT_SOURCE_REF_PREFIX):
-        return ""
-    rel = text[len(PRODUCT_SOURCE_REF_PREFIX) :].strip().lstrip("/")
-    return rel
+    return shared_product_source_ref_rel(value)
 
 
 def _product_source_root_from_state(root: Path) -> Path | None:
-    state_path = root / "project/project-state.md"
-    try:
-        frontmatter = parse_frontmatter(state_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return None
-    value = str(frontmatter.data.get("product_source_root") or "").strip()
-    if not value:
-        return None
-    try:
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        return candidate.resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None
+    return shared_product_source_root_from_state(root)
 
 
 def _product_source_ref_findings(root: Path, field: str, value: str, severity: str) -> list[Finding]:
@@ -5978,25 +5967,10 @@ def _product_source_ref_for_absolute_path(root: Path, value: str) -> str:
 
 
 def _product_source_ref_target(root: Path, value: str) -> tuple[str, Path, str] | None:
-    rel = _product_source_ref_rel(value)
-    if not rel:
+    target = shared_product_source_ref_target(root, value)
+    if target is None:
         return None
-    ref_label = f"{PRODUCT_SOURCE_REF_PREFIX}{rel}"
-    conflict = _root_relative_path_conflict(rel)
-    product_root = _product_source_root_from_state(root)
-    if product_root is None:
-        return ref_label, root / rel, "product_source_root is not configured"
-    if conflict:
-        return ref_label, product_root / rel, conflict
-    try:
-        path = (product_root / rel).resolve()
-    except (OSError, RuntimeError, ValueError):
-        return ref_label, product_root / rel, "could not be resolved"
-    try:
-        path.relative_to(product_root)
-    except (OSError, RuntimeError, ValueError):
-        return ref_label, path, "escapes configured product_source_root"
-    return ref_label, path, ""
+    return target.ref_label, target.path, target.conflict
 
 
 def _agent_run_record_boundary_findings(code_prefix: str = "agent-run-record") -> list[Finding]:

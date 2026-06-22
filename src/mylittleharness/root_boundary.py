@@ -9,6 +9,7 @@ LIVE_OPERATING_ROOT = "live_operating_root"
 PRODUCT_SOURCE_FIXTURE = "product_source_fixture"
 FALLBACK_OR_ARCHIVE = "fallback_or_archive"
 AMBIGUOUS_ROOT = "ambiguous"
+PRODUCT_SOURCE_REF_PREFIX = "product-source:"
 
 PRODUCT_SOURCE_OPERATOR_LANE_STEPS = (
     "open a live operating-root plan that declares product-source target_artifacts",
@@ -43,6 +44,14 @@ class BoundaryViolation:
     message: str
     path: Path
     rel_path: str
+
+
+@dataclass(frozen=True)
+class ProductSourceRefTarget:
+    ref_label: str
+    rel_path: str
+    path: Path
+    conflict: str = ""
 
 
 def product_source_operator_lane_summary() -> str:
@@ -98,6 +107,71 @@ def same_resolved_path(first: Path | str, second: Path | str) -> bool:
 def normalize_path_ref(value: object, *, strip_outer_slashes: bool = False) -> str:
     normalized = str(value or "").strip().replace("\\", "/")
     return normalized.strip("/") if strip_outer_slashes else normalized
+
+
+def product_source_ref_rel(value: object) -> str:
+    normalized = normalize_path_ref(value)
+    if not normalized.casefold().startswith(PRODUCT_SOURCE_REF_PREFIX):
+        return ""
+    return normalized[len(PRODUCT_SOURCE_REF_PREFIX) :].strip().lstrip("/")
+
+
+def is_product_source_ref(value: object) -> bool:
+    return bool(product_source_ref_rel(value))
+
+
+def product_source_root_from_state(root: Path | str) -> Path | None:
+    root_path = absolute_path(root)
+    state_path = root_path / "project/project-state.md"
+    try:
+        text = state_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    raw = _frontmatter_scalar(text, "product_source_root")
+    if not raw:
+        return None
+    try:
+        candidate = Path(raw.replace("\\\\", "\\")).expanduser()
+        if not candidate.is_absolute():
+            candidate = root_path / candidate
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def product_source_ref_target(root: Path | str, value: object) -> ProductSourceRefTarget | None:
+    rel = product_source_ref_rel(value)
+    if not rel:
+        return None
+    ref_label = f"{PRODUCT_SOURCE_REF_PREFIX}{rel}"
+    conflict = root_relative_path_conflict(rel)
+    product_root = product_source_root_from_state(root)
+    if product_root is None:
+        return ProductSourceRefTarget(ref_label, rel, absolute_path(root) / rel, "product_source_root is not configured")
+    if conflict:
+        return ProductSourceRefTarget(ref_label, rel, product_root / rel, conflict)
+    try:
+        target = (product_root / rel).resolve(strict=False)
+        target.relative_to(product_root)
+    except (OSError, RuntimeError, ValueError):
+        return ProductSourceRefTarget(ref_label, rel, product_root / rel, "escapes configured product_source_root")
+    return ProductSourceRefTarget(ref_label, rel, target, "")
+
+
+def _frontmatter_scalar(text: str, key: str) -> str:
+    if not text.startswith("---"):
+        return ""
+    lines = text.splitlines()
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return ""
+        if not line.startswith(f"{key}:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        return value.strip()
+    return ""
 
 
 def windows_path_reference_reason(value: object, *, allow_uri: bool = False, allow_rooted: bool = False) -> str | None:

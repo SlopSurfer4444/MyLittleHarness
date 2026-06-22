@@ -12,7 +12,12 @@ from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_tran
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
-from .root_boundary import record_id_conflict, root_relative_path_conflict, source_path_boundary_violation
+from .root_boundary import (
+    product_source_ref_target,
+    record_id_conflict,
+    root_relative_path_conflict,
+    source_path_boundary_violation,
+)
 
 
 WORK_CLAIM_SCHEMA = "mylittleharness.work-claim.v1"
@@ -1265,31 +1270,40 @@ def _fan_in_source_hash_blockers(root: Path, data: dict[str, object]) -> list[st
         expected_missing = bool(match.group(3))
         expected_unreadable = bool(match.group(4))
         expected_invalid = bool(match.group(5))
-        conflict = _root_relative_path_conflict(source_rel)
-        if conflict:
-            blockers.append(f"source hash path {conflict}: {source_rel}")
-            continue
+        product_target = product_source_ref_target(root, source_rel)
+        source_label = source_rel
         source_path = root / source_rel
+        if product_target is not None:
+            source_label = product_target.ref_label
+            source_path = product_target.path
+            if product_target.conflict:
+                blockers.append(f"source hash product-source path {product_target.conflict}: {product_target.ref_label}")
+                continue
+        else:
+            conflict = _root_relative_path_conflict(source_rel)
+            if conflict:
+                blockers.append(f"source hash path {conflict}: {source_rel}")
+                continue
         if expected_missing:
             if source_path.exists():
-                blockers.append(f"source hash recorded missing path now exists: {source_rel}")
+                blockers.append(f"source hash recorded missing path now exists: {source_label}")
             continue
         if expected_unreadable or expected_invalid:
-            blockers.append(f"source hash entry records degraded evidence for {source_rel}")
+            blockers.append(f"source hash entry records degraded evidence for {source_label}")
             continue
         if not source_path.exists():
-            blockers.append(f"source hash target is now missing: {source_rel}")
+            blockers.append(f"source hash target is now missing: {source_label}")
             continue
         if not source_path.is_file():
-            blockers.append(f"source hash target is no longer a regular file: {source_rel}")
+            blockers.append(f"source hash target is no longer a regular file: {source_label}")
             continue
         try:
             current_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
         except OSError as exc:
-            blockers.append(f"source hash target is now unreadable: {source_rel}: {exc}")
+            blockers.append(f"source hash target is now unreadable: {source_label}: {exc}")
             continue
         if expected_hash and current_hash.lower() != expected_hash.lower():
-            blockers.append(f"source hash mismatch for {source_rel}: expected={expected_hash[:12]} current={current_hash[:12]}")
+            blockers.append(f"source hash mismatch for {source_label}: expected={expected_hash[:12]} current={current_hash[:12]}")
     return blockers
 
 

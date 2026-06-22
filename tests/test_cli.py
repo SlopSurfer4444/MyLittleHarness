@@ -15078,6 +15078,86 @@ class CliTests(unittest.TestCase):
             self.assertIn("fresh-agent-run", rendered)
             self.assertIn("source hash mismatch", rendered)
 
+    def test_writeback_accepts_fan_in_product_source_agent_run_source_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            product_path = product_root / "src/work.py"
+            product_path.parent.mkdir(parents=True)
+            product_path.write_text("def work():\n    return 'product-source'\n", encoding="utf-8")
+            product_hash = hashlib.sha256(product_path.read_bytes()).hexdigest()
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"\n---',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            _write_fan_in_gate_plan(root, fan_in_required=True)
+            _write_fan_in_coordination_evidence(root, "delegated-slice")
+            agent_run_path = root / "project/verification/agent-runs/run-1.md"
+            agent_run_text = agent_run_path.read_text(encoding="utf-8")
+            agent_run_text = agent_run_text.replace('  - "src/work.py"\n', '  - "product-source:src/work.py"\n')
+            agent_run_text = agent_run_text.replace(
+                re.search(r'  - "src/work.py sha256=[a-f0-9]+"\n', agent_run_text).group(0),
+                f'  - "product-source:src/work.py sha256={product_hash}"\n',
+            )
+            agent_run_path.write_text(agent_run_text, encoding="utf-8")
+            (root / "src/work.py").write_text("def work():\n    return 'operator-root'\n", encoding="utf-8")
+            before = snapshot_tree(root)
+            args = _fan_in_gate_writeback_args(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main([*args[:3], "--dry-run", *args[3:]])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertNotIn("writeback-fan-in-evidence-missing", rendered)
+            self.assertNotIn("Windows alternate data stream", rendered)
+
+    def test_writeback_rejects_fan_in_product_source_ads_source_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            product_path = product_root / "src/work.py"
+            product_path.parent.mkdir(parents=True)
+            product_path.write_text("def work():\n    return 'product-source'\n", encoding="utf-8")
+            product_hash = hashlib.sha256(product_path.read_bytes()).hexdigest()
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"\n---',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            _write_fan_in_gate_plan(root, fan_in_required=True)
+            _write_fan_in_coordination_evidence(root, "delegated-slice")
+            agent_run_path = root / "project/verification/agent-runs/run-1.md"
+            agent_run_text = agent_run_path.read_text(encoding="utf-8")
+            agent_run_text = agent_run_text.replace(
+                re.search(r'  - "src/work.py sha256=[a-f0-9]+"\n', agent_run_text).group(0),
+                f'  - "product-source:src/work.py:ads sha256={product_hash}"\n',
+            )
+            agent_run_path.write_text(agent_run_text, encoding="utf-8")
+            before = snapshot_tree(root)
+            args = _fan_in_gate_writeback_args(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main([*args[:3], "--dry-run", *args[3:]])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-fan-in-evidence-missing", rendered)
+            self.assertIn("source hash product-source path must not use Windows alternate data stream syntax", rendered)
+
     def test_writeback_activates_fan_in_from_high_blast_observed_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="pending")
@@ -15941,6 +16021,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("product_source_boundary=out-of-scope", rendered)
             self.assertIn("docs/out.md", rendered)
             self.assertIn("src/allowed.py", rendered)
+            self.assertIn("out_of_scope_fingerprint=", rendered)
+            self.assertIn("dirty_set_fingerprint=", rendered)
+            self.assertIn("exact out_of_scope_paths=docs/out.md", rendered)
 
     def test_writeback_refuses_out_of_scope_product_diff_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -15978,6 +16061,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("writeback-completion-gate-packet", rendered)
             self.assertIn("product_source_boundary=out-of-scope", rendered)
             self.assertIn("docs/out.md", rendered)
+            self.assertIn("out_of_scope_fingerprint=", rendered)
+            self.assertIn("dirty_set_fingerprint=", rendered)
+            self.assertIn("exact out_of_scope_paths=docs/out.md", rendered)
 
     def test_writeback_refuses_product_diff_root_equal_to_operating_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -16309,6 +16395,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("writeback-product-diff-write-scope-disclosed", rendered)
             self.assertIn("writeback-completion-gate-packet", rendered)
             self.assertIn("product_source_boundary=disclosed-out-of-scope", rendered)
+            self.assertIn("out_of_scope_fingerprint=", rendered)
+            self.assertIn("exact out_of_scope_paths=docs/out.md", rendered)
             self.assertIn('phase_status: "complete"', state_path.read_text(encoding="utf-8"))
 
     def test_product_diff_disclosure_accepts_not_accepted_by_closeout_phrase(self) -> None:
