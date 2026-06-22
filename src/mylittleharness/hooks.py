@@ -4799,7 +4799,7 @@ def _coherent_verification_decision_checkpoint_paths(inventory: Inventory, paths
         return set()
     if not all(_is_reviewed_verification_decision_file(inventory, path, verification_paths) for path in decision_paths):
         return set()
-    if not all(_is_reviewed_verification_checkpoint_file(inventory, path) for path in verification_paths):
+    if not all(_is_reviewed_decision_backed_verification_checkpoint_file(inventory, path) for path in verification_paths):
         return set()
     return paths
 
@@ -5235,6 +5235,14 @@ def _is_reviewed_verification_checkpoint_file(inventory: Inventory, path: str) -
     return _route_evidence_text_has_non_authority_boundary(encoded)
 
 
+def _is_reviewed_decision_backed_verification_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    if _is_reviewed_verification_checkpoint_file(inventory, path):
+        return True
+    if _verification_checkpoint_path_class(path) != "queue-runner-fixtures":
+        return False
+    return _is_decision_backed_queue_runner_fixture_file(inventory, path)
+
+
 def _is_reviewed_queue_runner_fixture_file(inventory: Inventory, path: str) -> bool:
     route_path = _hook_route_file_path(inventory, path)
     if route_path is None:
@@ -5256,6 +5264,22 @@ def _is_reviewed_queue_runner_fixture_file(inventory: Inventory, path: str) -> b
         and "applied write" in content
     )
     return has_safety_boundary and (has_explicit_proof or has_scoped_write_smoke)
+
+
+def _is_decision_backed_queue_runner_fixture_file(inventory: Inventory, path: str) -> bool:
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    content = text.casefold()
+    if not content.strip():
+        return False
+    return "queue runner" in content and "proof" in content
 
 
 def _is_reviewed_post_closeout_archive_plan_file(inventory: Inventory, path: str) -> bool:

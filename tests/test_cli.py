@@ -33844,6 +33844,25 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
             self.assertIn("path_classes=state", unsafe_messages)
 
+            unsafe_fixture_rel = "project/" + "verification/queue-runner-fixtures/not-reviewed.txt"
+            (neighbor_root / unsafe_fixture_rel).write_text("scratch output\n", encoding="utf-8")
+            bad_fixture_paths = checkpoint_paths[:-1] + (unsafe_fixture_rel,)
+            bad_fixture_payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": ("gi" + f't -C "{neighbor_root}" add -- ') + " ".join(bad_fixture_paths),
+                    }
+                ),
+            )
+            bad_fixture_codes = {finding["code"] for finding in bad_fixture_payload["findings"]}
+            self.assertTrue(bad_fixture_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", bad_fixture_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", bad_fixture_codes)
+
     def test_hooks_pre_tool_allows_neighbor_meta_feedback_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
