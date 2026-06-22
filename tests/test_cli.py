@@ -33142,6 +33142,86 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_exact_archived_source_incubation_tombstone_stage(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            _state_rel, _roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            note_path = root / note_rel
+            archive_note_rel = (
+                "project/"
+                + "archive/reference/incubation/2026-06-22-delegation-read-navigation-prompt-overblock.md"
+            )
+            archive_note_path = root / archive_note_rel
+            archive_note_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_text = note_path.read_text(encoding="utf-8")
+            archive_text = archive_text.replace('status: "incubating"\n', 'status: "implemented"\n', 1)
+            archive_text = archive_text.replace(
+                'promoted_to: "project/roadmap.md"\n',
+                (
+                    'promoted_to: "project/roadmap.md"\n'
+                    f'source_incubation: "{note_rel}"\n'
+                    f'archived_to: "{archive_note_rel}"\n'
+                ),
+                1,
+            )
+            archive_text += "\nnon-authority archive reference only; cannot approve lifecycle or local VCS decisions.\n"
+            archive_note_path.write_text(archive_text, encoding="utf-8")
+            note_path.unlink()
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {note_rel}",
+                }
+            )
+
+            def reports_deleted_path(_root: Path, path: str) -> bool:
+                return Path(path).as_posix().casefold() == note_rel.casefold()
+
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_blocks_exact_source_incubation_tombstone_without_archive_reference(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            _state_rel, _roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            (root / note_rel).unlink()
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {note_rel}",
+                }
+            )
+
+            def reports_deleted_path(_root: Path, path: str) -> bool:
+                return Path(path).as_posix().casefold() == note_rel.casefold()
+
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+
     def test_hooks_pre_tool_blocks_post_closeout_source_incubation_tombstone_without_archive_reference(
         self,
     ) -> None:

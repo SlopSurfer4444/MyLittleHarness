@@ -1908,7 +1908,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "info",
                 "hooks-policy-allow-post-closeout-local-vcs-staging",
                 (
-                    "allowed exact local VCS staging of reviewed existing files after plan_status=none; "
+                    "allowed exact local VCS staging of reviewed existing files or route-owned tombstones after plan_status=none; "
                     "directories, wildcards, generated/runtime caches, broad add, commit, push, reset, clean, "
                     "and amend remain outside this allowance"
                 ),
@@ -3177,7 +3177,10 @@ def _path_policy_findings(
             continue
         if allow_post_closeout_lifecycle_route_stage and _is_post_closeout_lifecycle_route_stage_path(inventory, rel):
             continue
-        if allow_post_closeout_local_vcs_stage and _is_exact_post_closeout_stage_file(inventory, rel):
+        if allow_post_closeout_local_vcs_stage and (
+            _is_exact_post_closeout_stage_file(inventory, rel)
+            or _is_post_closeout_source_incubation_tombstone_path(inventory, rel)
+        ):
             continue
         if _is_lifecycle_authority_path(rel):
             findings.append(
@@ -4303,7 +4306,7 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
             return True
         return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in normalized)
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
-        return False
+        return bool(_coherent_archived_source_incubation_tombstone_stage_paths(inventory, pathspecs))
     return all(_is_exact_post_closeout_stage_file(inventory, pathspec) for pathspec in pathspecs)
 
 
@@ -4339,6 +4342,48 @@ def _coherent_post_closeout_lifecycle_vcs_stage_paths(
         return set()
     combined = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, tuple(staged_paths) + tuple(paths))
     return combined if combined and normalized_current <= combined else set()
+
+
+def _coherent_archived_source_incubation_tombstone_stage_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    normalized: set[str] = set()
+    for path in paths:
+        rel = _hook_route_rel_path(inventory, path)
+        clean = _normalize_hook_path(rel).casefold() if rel else ""
+        if not clean or not _is_post_closeout_source_incubation_tombstone_path(inventory, clean):
+            return set()
+        normalized.add(clean)
+    archive_references = _source_incubation_archive_references_for_tombstones(inventory, normalized)
+    if not archive_references:
+        return set()
+    if not all(
+        _has_archive_reference_for_incubation_source(inventory, source_path, archive_references)
+        for source_path in normalized
+    ):
+        return set()
+    return normalized
+
+
+def _source_incubation_archive_references_for_tombstones(inventory: Inventory, source_paths: set[str]) -> set[str]:
+    references: set[str] = set()
+    for path in _git_staged_paths(inventory):
+        clean = _normalize_hook_path(path).casefold()
+        if _is_reviewed_memory_hygiene_archive_reference_file(inventory, clean):
+            references.add(clean)
+    archive_dir = inventory.root / "project" / "archive" / "reference" / "incubation"
+    for candidate in archive_dir.glob("*.md"):
+        try:
+            clean = _normalize_hook_path(candidate.relative_to(inventory.root).as_posix()).casefold()
+        except ValueError:
+            continue
+        if _is_reviewed_memory_hygiene_archive_reference_file(inventory, clean):
+            references.add(clean)
+    return {
+        reference
+        for reference in references
+        if any(_has_archive_reference_for_incubation_source(inventory, source_path, {reference}) for source_path in source_paths)
+    }
 
 
 def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object], command: str) -> ReviewedLocalVcsCheckpoint:
