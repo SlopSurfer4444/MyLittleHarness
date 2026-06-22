@@ -35663,6 +35663,106 @@ class CliTests(unittest.TestCase):
                 self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
                 self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_active_plan_product_source_target_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            (product_root / "src" / "mylittleharness").mkdir(parents=True)
+            (product_root / "tests").mkdir()
+            (product_root / "project").mkdir()
+            (product_root / "src" / "mylittleharness" / "hooks.py").write_text("# hooks\n", encoding="utf-8")
+            (product_root / "tests" / "test_cli.py").write_text("def test_cli():\n    assert True\n", encoding="utf-8")
+            (product_root / "project" / "project-state.md").write_text("unrelated product state\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project" / "implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "product-source-active-plan-target-staging-hook-predicate"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/hooks.py"\n'
+                '  - "tests/test_cli.py"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+            stage_command = "git " + "add -- src/mylittleharness/hooks.py tests/test_cli.py"
+            test_stage_command = "git " + "add -- tests/test_cli.py"
+            allowed_inputs = {
+                "workdir_exact": {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": test_stage_command,
+                },
+                "git_c_exact": {
+                    "toolName": "shell_command",
+                    "command": "git " + f'-C "{product_root}" add -- src/mylittleharness/hooks.py tests/test_cli.py',
+                },
+                "json_arguments": {
+                    "toolName": "functions.shell_command",
+                    "arguments": json.dumps({"workdir": str(product_root), "command": stage_command}),
+                },
+                "tool_uses": {
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"workdir": str(product_root), "command": stage_command},
+                        }
+                    ]
+                },
+            }
+            blocked_inputs = {
+                "unrelated_product_state": {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "add -- project/project-state.md",
+                },
+                "broad_add": {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "add .",
+                },
+            }
+
+            for name, hook_input in allowed_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps(hook_input),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+                    self.assertIn("within active-plan target_artifacts", messages)
+
+            for name, hook_input in blocked_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps(hook_input),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+
     def test_hooks_pre_tool_allows_live_product_source_main_push_when_active_phase_complete(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

@@ -1978,12 +1978,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             )
         )
     if allow_product_source_vcs_stage:
+        stage_context = (
+            "within active-plan target_artifacts"
+            if _has_active_plan(inventory)
+            else "after plan_status=none"
+        )
         findings.append(
             Finding(
                 "info",
                 "hooks-policy-allow-product-source-vcs-staging",
                 (
-                    "allowed exact Git staging from the configured product_source_root workdir after plan_status=none; "
+                    "allowed exact Git staging from the configured product_source_root workdir "
+                    f"{stage_context}; "
                     "operating-root lifecycle files, broad add, wildcards, directories, commit, push, reset, and clean "
                     "remain outside this allowance"
                 ),
@@ -4350,7 +4356,7 @@ def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, comma
 
 
 def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
-    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+    if _has_shell_command_separator(command):
         return False
     base_root, product_root = _product_source_vcs_roots(inventory, data, command)
     if base_root is None or product_root is None:
@@ -4361,6 +4367,16 @@ def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, o
     pathspecs = _git_stage_pathspecs(command)
     if not pathspecs:
         return False
+    if _has_active_plan(inventory):
+        return all(
+            _is_exact_active_plan_product_source_stage_file(
+                inventory,
+                pathspec,
+                base_root=base_root,
+                boundary_root=product_root,
+            )
+            for pathspec in pathspecs
+        )
     return all(
         _is_exact_post_closeout_stage_file(
             inventory,
@@ -4370,6 +4386,30 @@ def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, o
         )
         for pathspec in pathspecs
     )
+
+
+def _is_exact_active_plan_product_source_stage_file(
+    inventory: Inventory,
+    pathspec: str,
+    *,
+    base_root: Path,
+    boundary_root: Path,
+) -> bool:
+    if not _is_exact_post_closeout_stage_file(
+        inventory,
+        pathspec,
+        base_root=base_root,
+        boundary_root=boundary_root,
+    ):
+        return False
+    try:
+        candidate = Path(_clean_hook_path_token(pathspec)).expanduser()
+        if not candidate.is_absolute():
+            candidate = base_root / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return _is_active_plan_target_artifact(inventory, str(resolved))
 
 
 def _is_product_source_vcs_commit_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
