@@ -12846,14 +12846,22 @@ def _changed_route_metadata_findings(inventory: Inventory) -> list[Finding]:
         for field in profile.recovery_fields:
             if _frontmatter_value_present(data.get(field)):
                 continue
+            severity = "warn"
+            message = (
+                f"{surface.rel_path} changed {route_id} route is missing recovery metadata field "
+                f"{field}; later agents may need manual graph reconstruction; advisory only"
+            )
+            if _changed_route_metadata_is_pre_roadmap_fix_candidate(surface, route_id, field):
+                severity = "info"
+                message = (
+                    f"{surface.rel_path} changed incubation fix-candidate route is intentionally pre-roadmap and "
+                    f"missing {field}; no related_plan repair is needed until roadmap promotion or active-plan ownership"
+                )
             findings.append(
                 Finding(
-                    "warn",
+                    severity,
                     f"route-metadata-changed-{field.replace('_', '-')}",
-                    (
-                        f"{surface.rel_path} changed {route_id} route is missing recovery metadata field "
-                        f"{field}; later agents may need manual graph reconstruction; advisory only"
-                    ),
+                    message,
                     surface.rel_path,
                     None,
                     route_id=route_id,
@@ -12873,6 +12881,18 @@ def _changed_route_metadata_findings(inventory: Inventory) -> list[Finding]:
             )
         )
     return findings
+
+
+def _changed_route_metadata_is_pre_roadmap_fix_candidate(surface: Surface, route_id: str, field: str) -> bool:
+    if route_id != "incubation" or field != "related_plan":
+        return False
+    data = surface.frontmatter.data
+    if _frontmatter_value_present(data.get("related_plan")) or _frontmatter_value_present(data.get("promoted_to")):
+        return False
+    text = surface.content.casefold()
+    if "[mlh-fix-candidate]" not in text:
+        return False
+    return any(marker in text for marker in ("pre-roadmap", "roadmap promotion requires", "not accepted work yet", "out-of-plan"))
 
 
 def _root_has_local_git_metadata(root: Path) -> bool:
@@ -13813,7 +13833,7 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
         if conflict:
             errors.append(Finding("error", "intake-refused", f"--source-member must be a root-relative route path: {conflict}", source_member))
     if not apply and request.target and not advice.apply_allowed:
-        errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}", request.target))
+        errors.append(Finding("error", "intake-refused", _intake_ambiguous_target_message(request, advice), request.target))
     if apply:
         if inventory.root_kind == "product_source_fixture":
             errors.append(Finding("error", "intake-refused", "target is a product-source compatibility fixture; intake --apply is refused", request.target or None))
@@ -13824,7 +13844,7 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
         if not request.target:
             errors.append(Finding("error", "intake-refused", "--target is required with --apply"))
         if not advice.apply_allowed:
-            errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}"))
+            errors.append(Finding("error", "intake-refused", _intake_ambiguous_target_message(request, advice)))
 
     if request.target:
         errors.extend(_intake_target_errors(inventory, request, advice, apply))
@@ -13833,6 +13853,17 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
     if apply and errors:
         errors.extend(_intake_incubation_fallback_findings(request, advice))
     return errors
+
+
+def _intake_ambiguous_target_message(request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
+    message = f"input is ambiguous: {advice.reason}"
+    if request.target and classify_memory_route(request.target).route_id == "verification":
+        return (
+            f"{message}; target is verification evidence, so keep the refusal but use the first-class evidence route "
+            "for durable proof, for example `mylittleharness --root <root> evidence`, or rewrite the note as plain "
+            "verification evidence before `intake --dry-run --target project/verification/<name>.md`"
+        )
+    return message
 
 
 def _intake_target_errors(inventory: Inventory, request: IntakeRequest, advice: IntakeRouteAdvice, apply: bool) -> list[Finding]:

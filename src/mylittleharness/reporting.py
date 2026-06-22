@@ -475,6 +475,11 @@ def operator_diagnostics_for_report(
             "requires_explicit_command": bool(first_route.requires_explicit_command) if first_route else False,
         },
         "stable_json_paths": (
+            "summary.errors",
+            "summary.warnings",
+            "summary.infos",
+            "summary.counts",
+            "summary.next_safe_command",
             "operator_diagnostics.counts",
             "operator_diagnostics.first_attention",
             "operator_diagnostics.next_safe.command",
@@ -506,15 +511,32 @@ def compact_summary_for_report(
     work_result_outcome: str = "",
 ) -> dict[str, object]:
     warnings = [finding for finding in findings if finding.severity == "warn"]
+    errors = [finding for finding in findings if finding.severity == "error"]
+    infos = [finding for finding in findings if finding.severity == "info"]
     nonblocking_warnings = [finding for finding in warnings if _is_nonblocking_warning(finding)]
     known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
+    next_safe_summary = _next_safe_route_summary(findings)
     return {
         "schema": "mylittleharness.compact-report-summary.v1",
         "command": command,
         "status": result,
         "work_result_outcome": work_result_outcome,
         "finding_count": len(findings),
+        "errors": len(errors),
+        "warnings": len(warnings),
+        "infos": len(infos),
         "section_count": len(sections or []),
+        "counts": {
+            "findings": len(findings),
+            "errors": len(errors),
+            "warnings": len(warnings),
+            "infos": len(infos),
+            "sections": len(sections or []),
+            "suggestions": len(suggestions),
+            "blocking_warnings": len(warnings) - len(nonblocking_warnings),
+            "nonblocking_warnings": len(nonblocking_warnings),
+            "known_environment_warnings": len(known_environment_warnings),
+        },
         "severity_counts": _severity_counts(findings),
         "section_summaries": _section_summaries(sections or []),
         "outcomes": {
@@ -536,7 +558,8 @@ def compact_summary_for_report(
                 "change exit codes, or approve lifecycle, archive, roadmap, Git, provider, cache, or release actions"
             ),
         },
-        "next_safe_routes": _next_safe_route_summary(findings),
+        "next_safe_command": str(next_safe_summary.get("first_command") or ""),
+        "next_safe_routes": next_safe_summary,
         "command_actions": {
             "count": len(command_actions_for_report(findings)),
         },

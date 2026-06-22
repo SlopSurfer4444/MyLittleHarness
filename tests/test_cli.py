@@ -844,6 +844,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.compact-report-summary.v1", summary["schema"])
             self.assertEqual("check", summary["command"])
             self.assertEqual("ok", summary["status"])
+            self.assertEqual(summary["severity_counts"]["error"], summary["errors"])
+            self.assertEqual(summary["severity_counts"]["warn"], summary["warnings"])
+            self.assertEqual(summary["severity_counts"]["info"], summary["infos"])
+            self.assertEqual(summary["finding_count"], summary["counts"]["findings"])
+            self.assertEqual(summary["warnings"], summary["counts"]["warnings"])
             self.assertEqual(0, summary["outcomes"]["timeout"]["count"])
             self.assertEqual(0, summary["outcomes"]["skipped"]["count"])
             self.assertEqual(0, summary["outcomes"]["not_checked"]["count"])
@@ -5466,6 +5471,12 @@ class CliTests(unittest.TestCase):
                 "This note needs human classification.",
                 "project/plan-incubation/unclear.md",
                 "input is ambiguous",
+            ),
+            (
+                "ambiguous verification target",
+                "Decision: keep provider routing unchanged.\nResearch import: provider notes were reviewed.",
+                "project/verification/provider-probe.md",
+                "target is verification evidence",
             ),
         )
         for label, text, target, expected in cases:
@@ -41429,6 +41440,44 @@ class CliTests(unittest.TestCase):
             self.assertTrue(all(finding.severity in {"info", "warn"} for finding in changed))
             self.assertTrue(any("cannot approve closeout" in finding.message for finding in changed))
 
+    def test_check_treats_pre_roadmap_fix_candidate_related_plan_gap_as_informational(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / ".git").mkdir()
+            note = root / "project/plan-incubation/pre-roadmap-fix-candidate.md"
+            note.parent.mkdir(parents=True, exist_ok=True)
+            note.write_text(
+                "---\n"
+                'topic: "pre-roadmap-fix-candidate"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# Pre-roadmap Fix Candidate\n\n"
+                "[MLH-Fix-Candidate]\n"
+                "This is intentional pre-roadmap operating memory; roadmap promotion requires explicit review.\n",
+                encoding="utf-8",
+            )
+            posture = VcsPosture(
+                root=root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                changed_paths=(VcsChangedPath("M", "project/plan-incubation/pre-roadmap-fix-candidate.md"),),
+            )
+
+            with patch("mylittleharness.checks.probe_vcs", return_value=posture):
+                findings = validation_findings(load_inventory(root))
+
+            related_plan = [
+                finding
+                for finding in findings
+                if finding.code == "route-metadata-changed-related-plan"
+                and finding.source == "project/plan-incubation/pre-roadmap-fix-candidate.md"
+            ]
+            self.assertEqual(1, len(related_plan))
+            self.assertEqual("info", related_plan[0].severity)
+            self.assertIn("intentionally pre-roadmap", related_plan[0].message)
+            self.assertIn("no related_plan repair is needed", related_plan[0].message)
+
     def test_check_reports_changed_route_frontmatter_gap_without_route_class_bleed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -41687,6 +41736,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("mylittleharness.operator-diagnostics.v1", diagnostics["schema"])
             self.assertEqual("check --quick", diagnostics["command"])
             self.assertEqual(payload["summary"]["severity_counts"]["warn"], diagnostics["counts"]["warnings"])
+            self.assertEqual(payload["summary"]["warnings"], diagnostics["counts"]["warnings"])
+            self.assertIn("summary.counts", diagnostics["stable_json_paths"])
+            self.assertIn("summary.next_safe_command", diagnostics["stable_json_paths"])
             self.assertIn("operator_diagnostics.next_safe.command", diagnostics["stable_json_paths"])
             self.assertFalse(diagnostics["boundary"]["approves_lifecycle"])
 
