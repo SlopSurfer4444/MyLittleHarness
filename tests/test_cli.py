@@ -36071,6 +36071,87 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
 
+    def test_hooks_pre_tool_allows_exact_route_created_meta_feedback_note_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            note_rel = "project/" + "plan-incubation/roadmap-list-json-read-only-hook-overblock.md"
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / note_rel).write_text(
+                "---\n"
+                'topic: "roadmap-list-json-read-only-hook-overblock"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-22"\n'
+                'updated: "2026-06-22"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# Roadmap List Json Read Only Hook Overblock\n\n"
+                "## Provenance\n\n"
+                "- Source: MyLittleHarness incubation route\n\n"
+                "## Meta-feedback Cluster\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                "- `canonical_id`: `roadmap-list-json-read-only-hook-overblock`\n"
+                "- `signal_type`: `agent-operability-hook-analysis`\n"
+                "- `expected_owner_command`: `hooks, read-only roadmap inventory/report, and meta-feedback`\n"
+                "- `affected_routes`: `[\"evidence\", \"meta-feedback\", \"roadmap\"]`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+                "## Entries\n\n"
+                "### 2026-06-22\n\n"
+                "[MLH-Fix-Candidate] Hook policy classified read-only roadmap list JSON as mutating. "
+                "Exact payload: functions.shell_command command=mylittleharness --root "
+                "C:\\AIDev\\Workspaces\\repos\\MyLittleHarness-dev roadmap --list --json, "
+                "workdir=C:\\AIDev\\Workspaces\\repos\\MyLittleHarness-dev, timeout_ms=20000. "
+                "Expected behavior: allow read-only roadmap list/report JSON without --dry-run/--apply "
+                "while keeping roadmap mutation routes gated.\n\n"
+                "Meta-feedback intake fields:\n"
+                "- signal_type: agent-operability-hook-analysis\n"
+                "- hook_event: pre-tool-use\n"
+                "- blocked_surface: mylittleharness roadmap --list --json\n"
+                "- intended_route: read-only roadmap inventory/report\n"
+                "- hook_classification: overblocked\n"
+                "- false_positive_shape: read-only roadmap --list --json was blocked as MLH mutating command without explicit dry-run/apply\n"
+                "- safe_boundary: evidence only; exact staging of this route-created note does not approve lifecycle movement, archive, roadmap mutation, staging of unrelated paths, commit, push, release, provider routing, or cache truth.\n"
+                "- authority_boundary: operating-memory capture only; roadmap promotion requires explicit roadmap review; no automatic lifecycle movement, closeout, archive, staging, commit, push, or next-plan opening.\n",
+                encoding="utf-8",
+            )
+
+            exact_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": " ".join(["git", "add", "--", note_rel])}),
+            )
+            broad_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": "git add -- project/plan-incubation",
+                    }
+                ),
+            )
+
+            exact_codes = {finding["code"] for finding in exact_payload["findings"]}
+            broad_codes = {finding["code"] for finding in broad_payload["findings"]}
+            self.assertFalse(exact_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", exact_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", exact_codes)
+            self.assertTrue(broad_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", broad_codes)
+
     def test_hooks_pre_tool_blocks_partial_or_unpromoted_roadmap_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

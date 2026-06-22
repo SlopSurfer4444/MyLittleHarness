@@ -3404,6 +3404,7 @@ def _path_policy_findings(
         if allow_post_closeout_local_vcs_stage and (
             _is_exact_post_closeout_stage_file(inventory, rel)
             or _is_post_closeout_source_incubation_tombstone_path(inventory, rel)
+            or _is_reviewed_meta_feedback_checkpoint_stage_file(inventory, rel)
         ):
             continue
         if _is_lifecycle_authority_path(rel):
@@ -4150,7 +4151,10 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
     ):
         return True
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
-        return bool(_coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs))
+        return bool(
+            _coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs)
+            or _coherent_meta_feedback_checkpoint_paths(inventory, normalized)
+        )
     if all(_is_existing_lifecycle_route_file(inventory, path) for path in paths):
         return True
     if _has_shell_command_separator(command):
@@ -4638,7 +4642,10 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
             return True
         return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in normalized)
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
-        return bool(_coherent_archived_source_incubation_tombstone_stage_paths(inventory, pathspecs))
+        return bool(
+            _coherent_archived_source_incubation_tombstone_stage_paths(inventory, pathspecs)
+            or _coherent_meta_feedback_checkpoint_paths(inventory, normalized)
+        )
     return all(_is_exact_post_closeout_stage_file(inventory, pathspec) for pathspec in pathspecs)
 
 
@@ -5964,6 +5971,18 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
         or (("cannot approve" in content or "no approval" in content) and "lifecycle" in content)
     )
     return has_route_provenance and has_meta_feedback_cluster and has_fix_candidate and has_hook_blocker_scope and has_boundary
+
+
+def _is_reviewed_meta_feedback_checkpoint_stage_file(inventory: Inventory, path: str) -> bool:
+    state = inventory.state
+    if not state or not state.exists:
+        return False
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return False
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return False
+    return _is_reviewed_meta_feedback_incubation_file(inventory, path)
 
 
 def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: str) -> bool:
