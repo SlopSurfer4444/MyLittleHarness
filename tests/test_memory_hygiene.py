@@ -806,6 +806,64 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("--move-non-incubation-prompt", rendered)
             self.assertIn("project/operator-prompts/launch-prompt.md", rendered)
 
+    def test_check_does_not_route_canonical_tracker_to_prompt_move(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/plan-incubation/online-services-admin-tracker.md").write_text(
+                "# Online Services Admin Tracker\n\n"
+                "| Service | Status | Total |\n"
+                "| --- | --- | --- |\n"
+                "| mail | active | 100 |\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "validation"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertIn("lifecycle markdown artifact has no frontmatter", rendered)
+            self.assertNotIn("operator prompt artifact", rendered)
+            self.assertNotIn("--move-non-incubation-prompt", rendered)
+
+    def test_prompt_artifact_move_refuses_canonical_tracker_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/office-current-procurement-bom.md"
+            (root / source_rel).write_text(
+                "# Office Current Procurement BOM\n\n"
+                "| Item | Vendor | Status | Price |\n"
+                "| --- | --- | --- | --- |\n"
+                "| UPS | vendor | ordered | 100 |\n"
+                "\nOperator note: keep this tracker current.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--move-non-incubation-prompt",
+                        "--source",
+                        source_rel,
+                        "--target",
+                        "project/operator-prompts/office-current-procurement-bom.md",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("does not look like a launch, handoff, or operator prompt artifact", rendered)
+            self.assertNotIn("would delete route", rendered)
+            self.assertNotIn("mhp-", rendered)
+
     def test_archive_list_apply_refuses_stale_token_when_source_becomes_live(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

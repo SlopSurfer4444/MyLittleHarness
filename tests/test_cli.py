@@ -31133,6 +31133,18 @@ class CliTests(unittest.TestCase):
                     "--stop-condition verification-failed --context-budget compact --required-output evidence "
                     f"--evidence-ref {agent_run_ref} --claim-ref {claim_ref}"
                 ),
+                "claim": (
+                    "mylittleharness --root . claim --dry-run --action release "
+                    "--claim-id hook-policy-claim "
+                    f'--release-condition "fan-in refs {agent_run_ref} and {claim_ref}; coordination evidence only"'
+                ),
+                "task-session": (
+                    "mylittleharness --root . task-session --dry-run --session-id hook-policy-session "
+                    '--objective "fan-in receipt for hook policy" --execution-slice hook-policy '
+                    "--runtime-owner codex --runtime-backend local-shell "
+                    f"--read-context project/implementation-plan.md --evidence-ref {agent_run_ref} "
+                    f"--claim-ref {claim_ref} --handoff-ref project/verification/handoffs/hook-policy-handoff.json"
+                ),
                 "suggest": f'mylittleharness --root . suggest --intent "closeout evidence {verification_ref}"',
             }
 
@@ -34751,6 +34763,78 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
             self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
             self.assertIn("memory-hygiene/archive-reference-package", unsafe_messages)
+
+    def test_hooks_pre_tool_allows_exact_memory_hygiene_prompt_move_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            source_rel = "project/" + "plan-incubation/launch-prompt.md"
+            target_rel = "project/" + "operator-prompts/launch-prompt.md"
+            target_path = neighbor_root / target_rel
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.prompt-artifact.v1"\n'
+                'status: "active"\n'
+                'artifact_type: "operator-prompt"\n'
+                f'source_route: "{source_rel}"\n'
+                f'source_sha256: "{"a" * 64}"\n'
+                'moved_by: "memory-hygiene --move-non-incubation-prompt"\n'
+                'authority: "operator prompt artifact only; does not approve lifecycle, archive, staging, commit, rollback, or future mutations"\n'
+                'proposal_token: "mhp-0123456789abcdef"\n'
+                'created: "2026-06-22"\n'
+                'last_reviewed: "2026-06-22"\n'
+                "---\n\n"
+                "# Launch Prompt\n\nContinue from the packet.\n",
+                encoding="utf-8",
+            )
+            state_path = neighbor_root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                )
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- docs_decision: not-needed\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            stage_command = "gi" + "t add -- "
+            cases = {
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(neighbor_root),
+                    "command": stage_command + f"{target_rel} {source_rel}",
+                },
+                "git_c": {
+                    "toolName": "shell_command",
+                    "command": ("gi" + f't -C "{neighbor_root}" add -- {target_rel} {source_rel}'),
+                },
+            }
+
+            for name, hook_data in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+            target_only_payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "workdir": str(neighbor_root), "command": stage_command + target_rel}),
+            )
+            target_only_codes = {finding["code"] for finding in target_only_payload["findings"]}
+            self.assertTrue(target_only_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", target_only_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", target_only_codes)
 
     def test_hooks_pre_tool_blocks_unreviewed_incubation_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

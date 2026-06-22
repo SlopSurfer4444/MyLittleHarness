@@ -334,6 +334,7 @@ GIT_OPTIONS_WITH_VALUES = {
     "--work-tree",
 }
 MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
+    "claim",
     "cleanup",
     "handoff",
     "intake",
@@ -347,6 +348,7 @@ MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
     "retention",
     "roadmap",
     "suggest",
+    "task-session",
     "transition",
     "writeback",
 }
@@ -5414,6 +5416,33 @@ def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[
     archive_reference_paths = {
         path for path in normalized if _is_memory_hygiene_archive_reference_path(path)
     }
+    operator_prompt_paths = {
+        path for path in normalized if _is_memory_hygiene_operator_prompt_path(path)
+    }
+    if operator_prompt_paths:
+        if archive_reference_paths:
+            return set()
+        incubation_paths = {path for path in normalized if _is_meta_feedback_incubation_route_path(path)}
+        if not incubation_paths or normalized != operator_prompt_paths | incubation_paths:
+            return set()
+        missing_incubation_paths = {
+            path
+            for path in incubation_paths
+            if not _memory_hygiene_checkpoint_file_exists(inventory, path)
+        }
+        if missing_incubation_paths != incubation_paths:
+            return set()
+        if not all(
+            _is_reviewed_memory_hygiene_operator_prompt_file(inventory, path)
+            for path in operator_prompt_paths
+        ):
+            return set()
+        if any(
+            not _has_operator_prompt_for_incubation_source(inventory, source_path, operator_prompt_paths)
+            for source_path in incubation_paths
+        ):
+            return set()
+        return normalized
     if not archive_reference_paths:
         return set()
     anchor_paths = {
@@ -5509,6 +5538,7 @@ def _is_memory_hygiene_checkpoint_route_path(path: str) -> bool:
         or _is_deferred_archive_plan_route_path(rel)
         or _is_deferred_research_route_path(rel)
         or _is_memory_hygiene_verification_route_path(rel)
+        or _is_memory_hygiene_operator_prompt_path(rel)
     )
 
 
@@ -5525,6 +5555,12 @@ def _is_source_incubation_route_path(path: str) -> bool:
 def _is_memory_hygiene_verification_route_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.startswith("project/verification/") and rel.endswith((".md", ".json"))
+
+
+def _is_memory_hygiene_operator_prompt_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    suffix = rel.removeprefix("project/operator-prompts/")
+    return rel.startswith("project/operator-prompts/") and rel.endswith(".md") and "/" not in suffix
 
 
 def _has_archive_reference_for_incubation_source(
@@ -5557,6 +5593,61 @@ def _has_archive_reference_for_incubation_source(
         if source_rel in text.casefold():
             return True
     return False
+
+
+def _has_operator_prompt_for_incubation_source(
+    inventory: Inventory, source_path: str, operator_prompt_paths: set[str]
+) -> bool:
+    source_rel = _normalize_hook_path(source_path).casefold()
+    for operator_prompt_path in operator_prompt_paths:
+        route_path = _hook_route_file_path(inventory, operator_prompt_path)
+        if route_path is None:
+            continue
+        try:
+            text = route_path.read_text(encoding="utf-8")
+            frontmatter = parse_frontmatter(text)
+        except (OSError, UnicodeDecodeError):
+            continue
+        data = frontmatter.data if frontmatter.has_frontmatter and not frontmatter.errors else {}
+        candidate = _hook_route_rel_path(inventory, str(data.get("source_route") or "")).casefold()
+        if candidate == source_rel:
+            return True
+    return False
+
+
+def _is_reviewed_memory_hygiene_operator_prompt_file(inventory: Inventory, path: str) -> bool:
+    if not _is_memory_hygiene_operator_prompt_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    source_route = _hook_route_rel_path(inventory, str(data.get("source_route") or "")).casefold()
+    authority = str(data.get("authority") or "").casefold()
+    source_sha = str(data.get("source_sha256") or "").strip().casefold()
+    proposal_token = str(data.get("proposal_token") or "").strip().casefold()
+    return (
+        str(data.get("schema") or "").strip() == "mylittleharness.prompt-artifact.v1"
+        and str(data.get("status") or "").strip().casefold() == "active"
+        and str(data.get("artifact_type") or "").strip().casefold() == "operator-prompt"
+        and str(data.get("moved_by") or "").strip().casefold() == "memory-hygiene --move-non-incubation-prompt"
+        and _is_meta_feedback_incubation_route_path(source_route)
+        and re.fullmatch(r"[0-9a-f]{64}", source_sha) is not None
+        and re.fullmatch(r"mhp-[0-9a-f]{16}", proposal_token) is not None
+        and "does not approve" in authority
+        and "lifecycle" in authority
+        and "staging" in authority
+        and "commit" in authority
+    )
 
 
 def _is_reviewed_memory_hygiene_archive_reference_file(inventory: Inventory, path: str) -> bool:

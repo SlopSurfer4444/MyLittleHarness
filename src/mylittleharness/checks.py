@@ -11461,6 +11461,8 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
 
 
 def _surface_looks_like_operator_prompt(surface: Surface) -> bool:
+    if _surface_looks_like_canonical_tracker(surface):
+        return False
     normalized = f"{surface.rel_path}\n{surface.content[:4000]}".casefold()
     markers = (
         "prompt",
@@ -11474,6 +11476,43 @@ def _surface_looks_like_operator_prompt(surface: Surface) -> bool:
         "follow the packet",
     )
     return any(marker in normalized for marker in markers)
+
+
+def _surface_looks_like_canonical_tracker(surface: Surface) -> bool:
+    return _path_and_text_look_like_canonical_tracker(surface.rel_path, surface.content)
+
+
+def _path_and_text_look_like_canonical_tracker(rel_path: str, text: str) -> bool:
+    name = Path(rel_path).name.casefold()
+    path_markers = (
+        "order-status",
+        "procurement-bom",
+        "admin-tracker",
+        "actual-purchases",
+        "purchase-tracking",
+        "procurement",
+        "tracker",
+        "bom",
+    )
+    if not any(marker in name for marker in path_markers):
+        return False
+    normalized = text[:4000].casefold()
+    content_markers = (
+        "|",
+        "status",
+        "vendor",
+        "seller",
+        "invoice",
+        "price",
+        "total",
+        "order",
+        "procurement",
+        "purchase",
+        "service",
+        "license",
+        "qty",
+    )
+    return sum(1 for marker in content_markers if marker in normalized) >= 2
 
 
 def _operator_prompt_move_dry_run_command(source_rel: str) -> str:

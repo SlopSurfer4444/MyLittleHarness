@@ -1005,6 +1005,8 @@ def _prompt_artifact_target_errors(inventory: Inventory, target_rel: str, target
 
 
 def _looks_like_prompt_artifact(source_rel: str, text: str) -> bool:
+    if _looks_like_canonical_tracker(source_rel, text):
+        return False
     normalized = f"{source_rel}\n{text[:4000]}".casefold()
     markers = (
         "prompt",
@@ -1018,6 +1020,39 @@ def _looks_like_prompt_artifact(source_rel: str, text: str) -> bool:
         "follow the packet",
     )
     return any(marker in normalized for marker in markers)
+
+
+def _looks_like_canonical_tracker(source_rel: str, text: str) -> bool:
+    name = Path(source_rel).name.casefold()
+    path_markers = (
+        "order-status",
+        "procurement-bom",
+        "admin-tracker",
+        "actual-purchases",
+        "purchase-tracking",
+        "procurement",
+        "tracker",
+        "bom",
+    )
+    if not any(marker in name for marker in path_markers):
+        return False
+    normalized = text[:4000].casefold()
+    content_markers = (
+        "|",
+        "status",
+        "vendor",
+        "seller",
+        "invoice",
+        "price",
+        "total",
+        "order",
+        "procurement",
+        "purchase",
+        "service",
+        "license",
+        "qty",
+    )
+    return sum(1 for marker in content_markers if marker in normalized) >= 2
 
 
 def _prompt_artifact_target_text(
@@ -1035,6 +1070,7 @@ def _prompt_artifact_target_text(
         "source_route": source_rel,
         "source_sha256": source_hash,
         "moved_by": "memory-hygiene --move-non-incubation-prompt",
+        "authority": "operator prompt artifact only; does not approve lifecycle, archive, staging, commit, rollback, or future mutations",
         "created": created,
         "last_reviewed": created,
     }
