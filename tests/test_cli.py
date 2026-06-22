@@ -18998,6 +18998,83 @@ class CliTests(unittest.TestCase):
             second_block = roadmap_text.split("### Batch Roadmap Two", 1)[1]
             self.assertIn('- `dependencies`: `["batch-roadmap-one"]`', second_block)
 
+    def test_roadmap_add_many_allows_shared_source_incubation_without_duplicate_relationship_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            source_rel = "project/plan-incubation/shared-roadmap-source.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "Shared Roadmap Source"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# Shared Roadmap Source\n",
+                encoding="utf-8",
+            )
+            manifest = root / "roadmap-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "batch-shared-source-one",
+                                "title": "Batch Shared Source One",
+                                "status": "accepted",
+                                "order": 65,
+                                "dependency": "minimal-roadmap-mutation-rail",
+                                "source_incubation": source_rel,
+                                "target_artifacts": ["src/mylittleharness/roadmap.py"],
+                                "verification_summary": "Shared source batch item one passed.",
+                                "docs_decision": "not-needed",
+                            },
+                            {
+                                "item_id": "batch-shared-source-two",
+                                "title": "Batch Shared Source Two",
+                                "status": "accepted",
+                                "order": 66,
+                                "dependency": "batch-shared-source-one",
+                                "source_incubation": source_rel,
+                                "target_artifacts": ["tests/test_cli.py"],
+                                "verification_summary": "Shared source batch item two passed.",
+                                "docs_decision": "not-needed",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--apply", "--action", "add-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0, rendered)
+            self.assertNotIn("batch would write relationship target more than once", rendered)
+            self.assertEqual(1, rendered.count("roadmap-relationship-sync"))
+            self.assertEqual(1, rendered.count(f"wrote route {source_rel}"))
+            self.assertIn("roadmap-related-incubation-source", rendered)
+            self.assertIn("source incubation already claimed earlier in this roadmap batch", rendered)
+
+            after = snapshot_tree(root)
+            changed = sorted(rel for rel in after if before.get(rel) != after.get(rel))
+            self.assertEqual(["project/plan-incubation/shared-roadmap-source.md", "project/roadmap.md"], changed)
+            source_text = source_path.read_text(encoding="utf-8")
+            self.assertIn('related_roadmap: "project/roadmap.md"', source_text)
+            self.assertIn('related_roadmap_item: "batch-shared-source-one"', source_text)
+            self.assertIn('promoted_to: "project/roadmap.md"', source_text)
+
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            first_block = roadmap_text.split("### Batch Shared Source One", 1)[1].split("### Batch Shared Source Two", 1)[0]
+            second_block = roadmap_text.split("### Batch Shared Source Two", 1)[1]
+            self.assertIn(f"- `source_incubation`: `{source_rel}`", first_block)
+            self.assertNotIn("- `related_incubation`:", first_block)
+            self.assertIn(f"- `related_incubation`: `{source_rel}`", second_block)
+            self.assertNotIn(f"- `source_incubation`: `{source_rel}`", second_block)
+
     def test_roadmap_update_many_dry_run_reports_batch_closeout_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -20569,6 +20646,49 @@ class CliTests(unittest.TestCase):
             self.assertIn("- `slice_dependencies`: `[]`", target_block)
             self.assertNotIn("- `related_incubation`:", target_block)
             self.assertNotIn("- `related_plan`:", target_block)
+
+    def test_roadmap_update_clear_field_with_new_list_values_replaces_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            roadmap_path = root / "project/roadmap.md"
+            before_block, target_block = roadmap_path.read_text(encoding="utf-8").split("### Minimal Roadmap Mutation Rail", 1)
+            target_block = target_block.replace(
+                "- `target_artifacts`: `[]`\n",
+                '- `target_artifacts`: `["src/mylittleharness/old.py"]`\n',
+                1,
+            )
+            roadmap_path.write_text(before_block + "### Minimal Roadmap Mutation Rail" + target_block, encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "update",
+                        "--item-id",
+                        "minimal-roadmap-mutation-rail",
+                        "--clear-field",
+                        "target-artifacts",
+                        "--target-artifact",
+                        "src/mylittleharness/roadmap.py",
+                        "--target-artifact",
+                        "tests/test_cli.py",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0, rendered)
+            self.assertNotIn("cannot be combined with a new value for the same field", rendered)
+            self.assertIn("change field: target_artifacts", rendered)
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            target_block = roadmap_text.split("### Minimal Roadmap Mutation Rail", 1)[1]
+            self.assertIn('- `target_artifacts`: `["src/mylittleharness/roadmap.py", "tests/test_cli.py"]`', target_block)
+            self.assertNotIn("src/mylittleharness/old.py", target_block)
 
     def test_roadmap_update_apply_is_idempotent_without_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

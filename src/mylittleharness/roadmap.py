@@ -2696,7 +2696,9 @@ def _roadmap_batch_plan(
     plans: list[RoadmapPlan] = []
     current_text = original_text
     current_target_existed = target_existed
+    claimed_source_incubations: set[str] = set()
     for request in requests:
+        source_incubation_rel = _normalize_rel(request.source_incubation)
         plan, request_errors = _roadmap_plan_from_text(
             inventory,
             request,
@@ -2705,6 +2707,7 @@ def _roadmap_batch_plan(
             allowed_missing_paths=allowed_missing_paths or set(),
             allow_empty_items=not current_target_existed and request.action == "add",
             target_existed=current_target_existed,
+            batch_claimed_source_incubations=claimed_source_incubations,
         )
         if request_errors:
             return None, request_errors
@@ -2712,6 +2715,8 @@ def _roadmap_batch_plan(
         plans.append(plan)
         current_text = plan.updated_text
         current_target_existed = True
+        if source_incubation_rel:
+            claimed_source_incubations.add(source_incubation_rel)
 
     duplicate_relationship_errors = _batch_relationship_target_errors(tuple(plans))
     if duplicate_relationship_errors:
@@ -2773,6 +2778,7 @@ def _roadmap_plan_from_text(
     allowed_missing_paths: set[str],
     allow_empty_items: bool = False,
     target_existed: bool = True,
+    batch_claimed_source_incubations: set[str] | None = None,
 ) -> tuple[RoadmapPlan | None, list[Finding]]:
     parse_result = _parse_roadmap_items_for_sync(text, allow_empty_items=allow_empty_items)
     if parse_result[1]:
@@ -2817,11 +2823,15 @@ def _roadmap_plan_from_text(
     source_incubation_field: str | None = request.source_incubation if request.source_incubation else None
     related_incubation_field: str | None = "" if request.source_incubation else None
     if request.source_incubation:
+        source_incubation_rel = _normalize_rel(request.source_incubation)
         source_missing_but_allowed = (
-            _normalize_rel(request.source_incubation) in allowed_missing_paths
+            source_incubation_rel in allowed_missing_paths
             and not (inventory.root / request.source_incubation).exists()
         )
-        related_incubation_reason = _reused_source_incubation_reason(inventory, request.source_incubation, request.item_id)
+        if source_incubation_rel in (batch_claimed_source_incubations or set()) and not source_missing_but_allowed:
+            related_incubation_reason = "source incubation already claimed earlier in this roadmap batch"
+        else:
+            related_incubation_reason = _reused_source_incubation_reason(inventory, request.source_incubation, request.item_id)
         if related_incubation_reason:
             related_incubation_source = request.source_incubation
             related_incubation_field = related_incubation_source
@@ -3888,11 +3898,11 @@ def _updated_item_fields(
         fields[RELATED_INCUBATION_FIELD] = related_incubation
     if request.docs_decision:
         fields["docs_decision"] = request.docs_decision
+    for key in request.clear_fields:
+        fields[key] = _empty_field_value(key)
     for key, values in _list_request_fields(request).items():
         if values:
             fields[key] = list(values)
-    for key in request.clear_fields:
-        fields[key] = _empty_field_value(key)
     for key, value in request.custom_fields:
         fields[key] = value
     return fields
@@ -5182,7 +5192,7 @@ def _clear_field_errors(request: RoadmapRequest) -> list[Finding]:
             continue
         if request.action == "add":
             errors.append(Finding("error", "roadmap-refused", "--clear-field is only valid with --action update", ROADMAP_REL))
-        if _request_field_present(request, field):
+        if _request_field_present(request, field) and field not in _list_request_fields(request):
             errors.append(
                 Finding(
                     "error",
