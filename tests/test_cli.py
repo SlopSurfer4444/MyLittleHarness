@@ -33062,6 +33062,33 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_route_package_with_source_incubation_retarget_only(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(
+                root,
+                archive_rel,
+                retarget_only=True,
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- " + " ".join((state_rel, roadmap_rel, archive_rel, note_rel)),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
     def test_hooks_pre_tool_blocks_post_closeout_source_incubation_wrong_archive_relationship(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -33376,10 +33403,18 @@ class CliTests(unittest.TestCase):
         return state_rel, roadmap_rel, archive_rel
 
     def _write_reviewed_source_incubation_relationship_fixture(
-        self, root: Path, archive_rel: str, *, archived_plan: str | None = None
+        self, root: Path, archive_rel: str, *, archived_plan: str | None = None, retarget_only: bool = False
     ) -> str:
         note_rel = "project/" + "plan-incubation/delegation-read-navigation-prompt-overblock.md"
         relationship_rel = archived_plan or archive_rel
+        relationship_fields = f'related_plan: "{relationship_rel}"\n'
+        if not retarget_only:
+            relationship_fields += (
+                f'archived_plan: "{relationship_rel}"\n'
+                f'implemented_by: "{relationship_rel}"\n'
+                'verification_summary: "Archive readiness passed with focused hook regression tests."\n'
+                'docs_decision: "not-needed"\n'
+            )
         (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
         (root / note_rel).write_text(
             "---\n"
@@ -33391,11 +33426,7 @@ class CliTests(unittest.TestCase):
             'related_roadmap: "project/roadmap.md"\n'
             'related_roadmap_item: "dogfood-hook-delegation-overblock-fidelity"\n'
             'promoted_to: "project/roadmap.md"\n'
-            f'related_plan: "{relationship_rel}"\n'
-            f'archived_plan: "{relationship_rel}"\n'
-            f'implemented_by: "{relationship_rel}"\n'
-            'verification_summary: "Archive readiness passed with focused hook regression tests."\n'
-            'docs_decision: "not-needed"\n'
+            f"{relationship_fields}"
             "---\n"
             "# delegation-read-navigation-prompt-overblock\n\n"
             "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"

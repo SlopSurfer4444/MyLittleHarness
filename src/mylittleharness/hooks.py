@@ -5620,12 +5620,25 @@ def _is_reviewed_post_closeout_source_incubation_file(inventory: Inventory, path
         return False
     data = frontmatter.data
     expected_archive = _normalize_hook_path(archive_rel).casefold()
+    if _is_reviewed_post_closeout_source_incubation_retarget(data, expected_archive):
+        return True
     relationship_fields = ("related_plan", "archived_plan", "implemented_by")
     if any(_normalize_hook_path(str(data.get(field) or "")).casefold() != expected_archive for field in relationship_fields):
         return False
     docs_decision = str(data.get("docs_decision") or "").strip().casefold()
     verification_summary = str(data.get("verification_summary") or "").strip()
     return docs_decision in {"updated", "not-needed", "uncertain"} and bool(verification_summary)
+
+
+def _is_reviewed_post_closeout_source_incubation_retarget(data: dict[str, object], expected_archive: str) -> bool:
+    related_plan = _normalize_hook_path(str(data.get("related_plan") or "")).casefold()
+    if related_plan != expected_archive:
+        return False
+    for field in ("archived_plan", "implemented_by"):
+        value = _normalize_hook_path(str(data.get(field) or "")).casefold()
+        if value and value != expected_archive:
+            return False
+    return True
 
 
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
