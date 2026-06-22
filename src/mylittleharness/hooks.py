@@ -2634,6 +2634,8 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
         data.get("input"),
         data.get("tool_input"),
         data.get("parameters"),
+        data.get("params"),
+        data.get("function"),
         data.get("tool_uses"),
         data.get("toolUse"),
         data.get("tool_calls"),
@@ -2689,7 +2691,18 @@ def _hook_direct_command_payloads(value: object, context: dict[str, object] | No
     if _hook_payload_has_direct_command(value):
         return [_merge_hook_payload_context(local_context, value)]
     payloads: list[dict[str, object]] = []
-    for key in ("arguments", "parameters", "tool_input", "input", "tool_uses", "toolUse", "tool_calls", "calls"):
+    for key in (
+        "arguments",
+        "parameters",
+        "params",
+        "function",
+        "tool_input",
+        "input",
+        "tool_uses",
+        "toolUse",
+        "tool_calls",
+        "calls",
+    ):
         item = value.get(key)
         if isinstance(item, (dict, list)):
             payloads.extend(_hook_direct_command_payloads(item, local_context))

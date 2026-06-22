@@ -35601,6 +35601,68 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-push", exact_main_refspec_push_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", exact_main_refspec_push_codes)
 
+    def test_hooks_pre_tool_allows_openai_wrapped_product_source_staging_without_sibling_workdir_borrow(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            (product_root / "src" / "mylittleharness").mkdir(parents=True)
+            (product_root / "tests").mkdir()
+            (product_root / "src" / "mylittleharness" / "hooks.py").write_text("# hooks\n", encoding="utf-8")
+            (product_root / "tests" / "test_cli.py").write_text("def test_cli():\n    assert True\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            stage_command = "git " + "add -- src/mylittleharness/hooks.py tests/test_cli.py"
+            function_payload = json.dumps(
+                {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "codex_app.create_thread",
+                                "arguments": json.dumps(
+                                    {
+                                        "workdir": str(root),
+                                        "input": "Read-only helper context; do not stage or mutate.",
+                                    }
+                                ),
+                            }
+                        },
+                        {
+                            "function": {
+                                "name": "functions.shell_command",
+                                "arguments": json.dumps({"workdir": str(product_root), "command": stage_command}),
+                            }
+                        },
+                    ]
+                }
+            )
+            params_payload = json.dumps(
+                {
+                    "params": {
+                        "name": "functions.shell_command",
+                        "arguments": json.dumps({"cwd": str(product_root), "command": stage_command}),
+                    }
+                }
+            )
+
+            function_result = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], function_payload)
+            params_result = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], params_payload)
+
+            for checked_payload in (function_result, params_result):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
     def test_hooks_pre_tool_allows_live_product_source_main_push_when_active_phase_complete(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
