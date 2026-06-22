@@ -1731,6 +1731,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_product_source_vcs_push
         and not block_product_source_vcs_push_before_phase_complete
     )
+    block_product_source_publication_push_hidden_workdir = _is_product_source_publication_push_hidden_workdir(
+        inventory, data, command
+    )
     allow_product_source_vcs_finalization = _is_product_source_vcs_finalization_sequence(inventory, data, command)
     allow_product_source_vcs_command = (
         allow_product_source_vcs_stage
@@ -2269,6 +2272,25 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 ),
             )
         )
+    if block_product_source_publication_push_hidden_workdir:
+        product_root = _configured_product_source_root_path(inventory)
+        explicit_command = (
+            f"`git -C {shell_arg(str(product_root))} push origin main`"
+            if product_root is not None
+            else "`git -C <product_source_root> push origin main`"
+        )
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-product-source-vcs-push-hidden-workdir",
+                (
+                    "blocked likely product-source main publication because the hook cannot see a product-source "
+                    "workdir or command-level root switch; rerun the publication with an explicit visible root "
+                    f"switch: {explicit_command}. Generic staging/commit guidance does not apply to this "
+                    "publication form"
+                ),
+            )
+        )
     if (
         _looks_like_git_stage_or_commit(mutation_check_lowered)
         and not allow_apply_patch_intent
@@ -2284,6 +2306,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_reviewed_local_vcs_delegation
         and not block_product_source_vcs_push_before_phase_complete
         and not block_product_source_publication_push_unsafe
+        and not block_product_source_publication_push_hidden_workdir
     ):
         next_safe = _git_mutation_next_safe_command(inventory, data, command)
         if reviewed_local_vcs_checkpoint.blocked_reason:
@@ -4068,6 +4091,30 @@ def _is_product_source_fixture_vcs_push_candidate(
         or any(char in clean for char in "*?[]")
         for clean in operands
     ):
+        return False
+    return _is_ordinary_product_source_main_push_operands(operands)
+
+
+def _is_product_source_publication_push_hidden_workdir(
+    inventory: Inventory, data: dict[str, object], command: str
+) -> bool:
+    if _active_plan_blocks_product_source_vcs_push(inventory) or _has_shell_command_separator(command):
+        return False
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is None:
+        return False
+    workdir = _git_effective_workdir_path(inventory, data, command)
+    if workdir is not None:
+        try:
+            workdir.relative_to(product_root)
+            return False
+        except (OSError, RuntimeError, ValueError):
+            pass
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand != "push" or subcommand_index < 0:
+        return False
+    operands = _product_source_push_operands(tokens[subcommand_index + 1 :])
+    if operands is None:
         return False
     return _is_ordinary_product_source_main_push_operands(operands)
 

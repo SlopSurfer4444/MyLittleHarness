@@ -35241,6 +35241,24 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertIn("phase_status=complete", messages)
 
+            hidden_workdir_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": "git " + "push origin main"}),
+            )
+            hidden_workdir_codes = {finding["code"] for finding in hidden_workdir_payload["findings"]}
+            hidden_workdir_messages = "\n".join(
+                str(finding["message"]) for finding in hidden_workdir_payload["findings"]
+            )
+            self.assertTrue(hidden_workdir_payload["block"])
+            self.assertIn("hooks-policy-block-product-source-vcs-push-hidden-workdir", hidden_workdir_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", hidden_workdir_codes)
+            self.assertIn("git -C", hidden_workdir_messages)
+            self.assertIn(str(product_root), hidden_workdir_messages)
+            self.assertIn("explicit visible root switch", hidden_workdir_messages)
+            self.assertNotIn("stage the coherent route-produced lifecycle set", hidden_workdir_messages)
+
             for name, command in unsafe_inputs.items():
                 with self.subTest(name=name):
                     payload = hook_event_payload(
