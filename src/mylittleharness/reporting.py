@@ -384,13 +384,22 @@ def render_json_report(
     route_manifest: tuple[dict[str, object], ...] | None = None,
 ) -> str:
     work_result = work_result_capsule_for_report(command, result, findings, suggestions)
+    summary = compact_summary_for_report(
+        command,
+        result,
+        findings,
+        suggestions,
+        sections=sections,
+        work_result_outcome=work_result.outcome,
+    )
     payload: dict[str, object] = {
         "schema_version": "mylittleharness.report.v1",
         "command": command,
         "root": str(root),
         "result": {"status": result, "advisory": True},
         "work_result": work_result_to_report_dict(work_result),
-        "summary": compact_summary_for_report(
+        "summary": summary,
+        "operator_diagnostics": operator_diagnostics_for_report(
             command,
             result,
             findings,
@@ -421,6 +430,69 @@ def render_json_report(
     if route_manifest is not None:
         payload["route_manifest"] = list(route_manifest)
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
+
+
+def operator_diagnostics_for_report(
+    command: str,
+    result: str,
+    findings: list[Finding],
+    suggestions: list[str] | tuple[str, ...] = (),
+    *,
+    sections: list[tuple[str, list[Finding]]] | None = None,
+    work_result_outcome: str = "",
+) -> dict[str, object]:
+    warnings = [finding for finding in findings if finding.severity == "warn"]
+    errors = [finding for finding in findings if finding.severity == "error"]
+    nonblocking_warnings = [finding for finding in warnings if _is_nonblocking_warning(finding)]
+    known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
+    next_safe = next_safe_routes_for_report(findings)
+    first_route = next_safe[0] if next_safe else None
+    return {
+        "schema": "mylittleharness.operator-diagnostics.v1",
+        "command": command,
+        "status": result,
+        "work_result_outcome": work_result_outcome,
+        "counts": {
+            "findings": len(findings),
+            "sections": len(sections or []),
+            "suggestions": len(suggestions),
+            "errors": len(errors),
+            "warnings": len(warnings),
+            "blocking_warnings": len(warnings) - len(nonblocking_warnings),
+            "nonblocking_warnings": len(nonblocking_warnings),
+            "known_environment_warnings": len(known_environment_warnings),
+        },
+        "first_attention": _operator_attention_finding(errors, warnings),
+        "warning_codes_sample": _finding_code_sample(warnings),
+        "error_codes_sample": _finding_code_sample(errors),
+        "next_safe": {
+            "count": len(next_safe),
+            "command": first_route.command if first_route else "",
+            "source_code": first_route.source_code if first_route else "",
+            "action_class": first_route.action_class if first_route else "",
+            "write_class": first_route.write_class if first_route else "",
+            "requires_dry_run_review": bool(first_route.requires_dry_run_review) if first_route else False,
+            "requires_explicit_command": bool(first_route.requires_explicit_command) if first_route else False,
+        },
+        "stable_json_paths": (
+            "operator_diagnostics.counts",
+            "operator_diagnostics.first_attention",
+            "operator_diagnostics.next_safe.command",
+            "summary.severity_counts",
+            "summary.warning_classification",
+        ),
+        "boundary": {
+            "advisory": True,
+            "warnings_visible": True,
+            "full_findings_preserved": True,
+            "approves_lifecycle": False,
+            "approves_git": False,
+            "approves_archive": False,
+            "approves_roadmap_done": False,
+            "approves_provider_routing": False,
+            "approves_cache_truth": False,
+        },
+    }
 
 
 def compact_summary_for_report(
@@ -582,6 +654,27 @@ def _not_checked_bucket(report_scope: dict[str, object] | None) -> dict[str, obj
 
 def _finding_code_sample(findings: list[Finding]) -> list[str]:
     return [finding.code for finding in findings[:10]]
+
+
+def _operator_attention_finding(errors: list[Finding], warnings: list[Finding]) -> dict[str, object]:
+    finding = (errors or warnings or [None])[0]
+    if finding is None:
+        return {
+            "present": False,
+            "severity": "",
+            "code": "",
+            "source": "",
+            "line": None,
+            "message": "",
+        }
+    return {
+        "present": True,
+        "severity": finding.severity,
+        "code": finding.code,
+        "source": finding.source or "",
+        "line": finding.line,
+        "message": _plain_text(finding.message, 240),
+    }
 
 
 def _is_known_environment_warning(finding: Finding) -> bool:

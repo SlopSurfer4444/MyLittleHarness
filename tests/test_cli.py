@@ -35400,6 +35400,44 @@ class CliTests(unittest.TestCase):
                     self.assertIn("hooks-policy-block-product-root-path", codes)
                     self.assertNotIn("hooks-policy-allow-read-only-product-source-vcs-inspection", codes)
 
+    def test_hooks_pre_tool_allows_read_only_shell_wrapper_lifecycle_scan_literals(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            command = (
+                "powershell -NoProfile -Command "
+                "\"Select-String -Path project/roadmap.md "
+                "-Pattern 'git add project/project-state.md sk-not-a-secret-example'\""
+            )
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": command}),
+            )
+            codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", codes)
+
+            write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": 'powershell -NoProfile -Command "Set-Content project/project-state.md bad"',
+                    }
+                ),
+            )
+            write_codes = {finding["code"] for finding in write_payload["findings"]}
+            self.assertTrue(write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", write_codes)
+
     def test_hooks_pre_tool_blocks_wrapped_alias_and_runtime_write_forms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -40330,6 +40368,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("explicit-runtime-helper-apply", payload["connectReadiness"]["nextSafeAction"]["action_class"])
             self.assertEqual("disposable-runtime-or-generated-cache-only", payload["connectReadiness"]["nextSafeAction"]["write_class"])
             self.assertFalse(payload["connectReadiness"]["nextSafeAction"]["invoked_by_read_only_surfaces"])
+            self.assertEqual("mylittleharness.operator-diagnostics.v1", payload["operatorDiagnostics"]["schema"])
+            self.assertEqual(payload["summary"]["severity_counts"]["warn"], payload["operatorDiagnostics"]["counts"]["warnings"])
+            self.assertIn("operator_diagnostics.counts", payload["operatorDiagnostics"]["stable_json_paths"])
+            self.assertFalse(payload["operatorDiagnostics"]["boundary"]["approves_git"])
             self.assertIn("docmapStatus", payload["connectReadiness"]["docs"])
             self.assertTrue(payload["connectReadiness"]["docs"]["roleMetadata"]["docmapIsRoutingAid"])
             self.assertIn("spec_status", payload["connectReadiness"]["docs"]["roleMetadata"]["strictSpecPostureFields"])
@@ -41132,6 +41174,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual("check --quick", payload["summary"]["command"])
             self.assertEqual(0, payload["summary"]["outcomes"]["not_checked"]["count"])
             self.assertFalse(payload["summary"]["authority"]["approves_git"])
+            diagnostics = payload["operator_diagnostics"]
+            self.assertEqual("mylittleharness.operator-diagnostics.v1", diagnostics["schema"])
+            self.assertEqual("check --quick", diagnostics["command"])
+            self.assertEqual(payload["summary"]["severity_counts"]["warn"], diagnostics["counts"]["warnings"])
+            self.assertIn("operator_diagnostics.next_safe.command", diagnostics["stable_json_paths"])
+            self.assertFalse(diagnostics["boundary"]["approves_lifecycle"])
 
 
 class EncodingLimitedTextStream:

@@ -1626,6 +1626,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(data))
     allow_read_only_source_paths = (
         _is_read_only_source_discovery_command(command)
+        or _is_read_only_shell_wrapper_command(command)
         or _is_read_only_git_inspection_command(command)
         or _is_read_only_mlh_inspection_command(command)
         or _is_bounded_mlh_read_tool_request(data)
@@ -2182,6 +2183,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_route_produced_lifecycle_commit
         and not allow_product_source_vcs_command
         and not allow_mlh_owner_route_git_literals
+        and not allow_read_only_source_paths
         and not allow_reviewed_local_vcs_checkpoint
         and not allow_reviewed_local_vcs_delegation
     ):
@@ -3510,6 +3512,24 @@ def _is_read_only_source_discovery_command(command: str) -> bool:
             continue
         return _has_read_only_discovery_prefix(tokens[:index])
     return False
+
+
+def _is_read_only_shell_wrapper_command(command: str) -> bool:
+    if _looks_like_write_command(command):
+        return False
+    nested_commands = [
+        nested
+        for nested in _nested_shell_commands_from_tokens(_shell_tokens(command))
+        if nested and nested != "<MLH_ENCODED_COMMAND>"
+    ]
+    if not nested_commands:
+        return False
+    return all(
+        _is_read_only_source_discovery_command(nested)
+        or _is_read_only_git_inspection_command(nested)
+        or _is_read_only_mlh_inspection_command(nested)
+        for nested in nested_commands
+    )
 
 
 def _has_read_only_discovery_prefix(tokens: list[str]) -> bool:

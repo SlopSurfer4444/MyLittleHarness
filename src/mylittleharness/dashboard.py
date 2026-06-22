@@ -26,7 +26,7 @@ from .roadmap import (
     roadmap_portfolio_completion_findings,
     roadmap_portfolio_status,
 )
-from .reporting import add_compact_summary_skipped, command_action_report_dict, compact_summary_for_report
+from .reporting import add_compact_summary_skipped, command_action_report_dict, compact_summary_for_report, operator_diagnostics_for_report
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .safe_commands import safe_item_id
 from .vcs import worktree_coordination_findings
@@ -155,6 +155,12 @@ def dashboard_payload(
         "degraded": projection_mode == "degraded",
         "source_refs": _dashboard_source_refs(inventory, sections),
         "summary": summary,
+        "operatorDiagnostics": operator_diagnostics_for_report(
+            "dashboard --inspect",
+            _dashboard_result_for(findings),
+            findings,
+            sections=sections,
+        ),
         "lifecycle": _lifecycle_payload(inventory),
         "roadmap": _roadmap_payload(inventory),
         "mlhd": mlhd_freshness_payload(inventory),
