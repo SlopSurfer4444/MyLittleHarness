@@ -7633,6 +7633,103 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "check", "--focus", "agents"]), 0)
             self.assertNotIn("check-agents-worker-run-receipt-stale", agents_output.getvalue())
 
+    def test_evidence_fixture_update_updates_existing_queue_runner_fixture_with_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            fixture_rel = "project/verification/queue-runner-fixtures/sample-proof.txt"
+            fixture_path = root / fixture_rel
+            fixture_path.parent.mkdir(parents=True, exist_ok=True)
+            fixture_path.write_text(
+                "Symphony SDK queue runner proof\n"
+                "item: before\n"
+                "No secrets or raw provider payloads belong in this file.\n",
+                encoding="utf-8",
+            )
+            update_text = (
+                "Symphony SDK queue runner proof\n"
+                "item: after\n"
+                "No secrets or raw provider payloads belong in this file.\n"
+            )
+            update_file = Path(tmp) / "reviewed-fixture.txt"
+            update_file.write_text(update_text, encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--fixture-update",
+                            "--dry-run",
+                            "--target",
+                            fixture_rel,
+                            "--text-file",
+                            str(update_file),
+                        ]
+                    ),
+                    0,
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("queue-runner-fixture-update-dry-run", dry_rendered)
+            self.assertIn("queue-runner-fixture-update-route-write", dry_rendered)
+            self.assertIn("queue-runner fixture update is limited to existing", dry_rendered)
+            token_match = re.search(r"--proposal-token (qfix-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--fixture-update",
+                            "--apply",
+                            "--target",
+                            fixture_rel,
+                            "--text-file",
+                            str(update_file),
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            apply_rendered = apply_output.getvalue()
+            self.assertIn("queue-runner-fixture-updated", apply_rendered)
+            self.assertEqual(update_text, fixture_path.read_text(encoding="utf-8"))
+
+            unsafe_output = io.StringIO()
+            with redirect_stdout(unsafe_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "evidence",
+                            "--fixture-update",
+                            "--apply",
+                            "--target",
+                            fixture_rel,
+                            "--text",
+                            "queue runner proof without the safety boundary\n",
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    2,
+                )
+            unsafe_rendered = unsafe_output.getvalue()
+            self.assertIn("queue-runner-fixture-update-refused", unsafe_rendered)
+            self.assertIn("no-secrets and raw provider payload safety boundary", unsafe_rendered)
+            self.assertEqual(update_text, fixture_path.read_text(encoding="utf-8"))
+
     def test_evidence_receipt_refresh_refuses_stale_token_and_authority_overclaim(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -30626,6 +30723,35 @@ class CliTests(unittest.TestCase):
             suggest_rendered = suggest_output.getvalue()
             self.assertIn("refresh-worker-run-receipt-source-hashes", suggest_rendered)
             self.assertIn("evidence --receipt-refresh --dry-run", suggest_rendered)
+
+    def test_hooks_route_queue_runner_fixture_updates_to_evidence_fixture_update(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            fixture_ref = "project/" + "verification/queue-runner-fixtures/sample-proof.txt"
+            owner_preview_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"mylittleharness --root . evidence --fixture-update --dry-run --target {fixture_ref} --text-file -",
+                }
+            )
+            direct_write_input = json.dumps(
+                {"toolName": "shell_command", "command": f"Set-Content {fixture_ref} 'queue runner proof'"}
+            )
+
+            owner_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], owner_preview_input)
+            owner_codes = {finding["code"] for finding in owner_payload["findings"]}
+            self.assertFalse(owner_payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", owner_codes)
+
+            direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
+            direct_codes = {finding["code"] for finding in direct_payload["findings"]}
+            direct_messages = "\n".join(str(finding["message"]) for finding in direct_payload["findings"])
+            self.assertTrue(direct_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_codes)
+            self.assertIn(f"evidence --fixture-update --dry-run --target {fixture_ref} --text-file -", direct_messages)
+            self.assertNotIn("intake --dry-run", direct_messages)
 
     def test_hooks_pre_tool_allows_mlh_owner_route_dry_run_lifecycle_targets(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

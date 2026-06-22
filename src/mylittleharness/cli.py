@@ -92,7 +92,10 @@ from .evidence import (
     evidence_findings,
     make_agent_run_record_request,
     make_evidence_ref_retarget_request,
+    make_queue_runner_fixture_update_request,
     make_worker_run_receipt_refresh_request,
+    queue_runner_fixture_update_apply_findings,
+    queue_runner_fixture_update_dry_run_findings,
     worker_run_receipt_refresh_apply_findings,
     worker_run_receipt_refresh_dry_run_findings,
 )
@@ -904,17 +907,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if command == "evidence":
-        evidence_modes = [bool(args.record), bool(args.receipt_refresh), bool(args.retarget_ref)]
+        evidence_modes = [bool(args.record), bool(args.receipt_refresh), bool(args.retarget_ref), bool(args.fixture_update)]
         if sum(evidence_modes) > 1:
-            parser.error("evidence --record, --receipt-refresh, and --retarget-ref are mutually exclusive")
+            parser.error("evidence --record, --receipt-refresh, --retarget-ref, and --fixture-update are mutually exclusive")
         if args.record and not (args.dry_run or args.apply):
             parser.error("evidence --record requires --dry-run or --apply")
         if args.receipt_refresh and not (args.dry_run or args.apply):
             parser.error("evidence --receipt-refresh requires --dry-run or --apply")
         if args.retarget_ref and not (args.dry_run or args.apply):
             parser.error("evidence --retarget-ref requires --dry-run or --apply")
+        if args.fixture_update and not (args.dry_run or args.apply):
+            parser.error("evidence --fixture-update requires --dry-run or --apply")
+        fixture_text_args = [args.fixture_text is not None, args.fixture_text_file is not None]
+        if any(fixture_text_args) and not args.fixture_update:
+            parser.error("evidence --text/--text-file are only valid with --fixture-update")
+        if args.fixture_update and sum(fixture_text_args) != 1:
+            parser.error("evidence --fixture-update requires exactly one of --text or --text-file")
         if (args.dry_run or args.apply) and not any(evidence_modes):
-            parser.error("evidence --dry-run/--apply are only valid with --record, --receipt-refresh, or --retarget-ref")
+            parser.error("evidence --dry-run/--apply are only valid with --record, --receipt-refresh, --retarget-ref, or --fixture-update")
         if args.record:
             request = make_agent_run_record_request(args)
             report_name = "evidence --record --apply" if args.apply else "evidence --record --dry-run"
@@ -927,6 +937,23 @@ def main(argv: list[str] | None = None) -> int:
             request = make_worker_run_receipt_refresh_request(args)
             report_name = "evidence --receipt-refresh --apply" if args.apply else "evidence --receipt-refresh --dry-run"
             findings = worker_run_receipt_refresh_apply_findings(inventory, request) if args.apply else worker_run_receipt_refresh_dry_run_findings(inventory, request)
+            findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+            result = _result_for(findings)
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            return 2 if args.apply and result == "error" else 0
+        if args.fixture_update:
+            fixture_text = args.fixture_text or ""
+            fixture_source = "--text"
+            if args.fixture_text_file is not None:
+                text_result = _read_text_argument("--text-file", args.fixture_text_file)
+                if text_result[1]:
+                    emit_text(f"mylittleharness: {text_result[1]}", stream=sys.stderr)
+                    return 2
+                fixture_text = text_result[0] or ""
+                fixture_source = f"--text-file {args.fixture_text_file}"
+            request = make_queue_runner_fixture_update_request(args, fixture_text, fixture_source)
+            report_name = "evidence --fixture-update --apply" if args.apply else "evidence --fixture-update --dry-run"
+            findings = queue_runner_fixture_update_apply_findings(inventory, request) if args.apply else queue_runner_fixture_update_dry_run_findings(inventory, request)
             findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
             result = _result_for(findings)
             emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -3074,6 +3101,19 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["Use snapshot inspection as safety-evidence review only; manual rollback and source files remain operator decisions."]
         return ["snapshot inspection completed as a terminal-only read-only report; it did not approve repair, rollback, cleanup, closeout, archive, commit, or lifecycle decision."]
     if command == "evidence":
+        is_fixture_update_dry_run = any(finding.code == "queue-runner-fixture-update-dry-run" for finding in findings)
+        if is_fixture_update_dry_run and any(
+            finding.code == "queue-runner-fixture-update-refused" and finding.severity in {"warn", "error"} for finding in findings
+        ):
+            return ["evidence fixture-update dry-run was refused before any protected queue-runner fixture write preview became reliable."]
+        if is_fixture_update_dry_run:
+            return ["evidence fixture-update dry-run reported the existing queue-runner fixture target, safety boundary, and proposal token without writing files."]
+        if any(finding.code == "queue-runner-fixture-updated" for finding in findings):
+            return ["evidence fixture-update apply updated one existing route-owned queue-runner fixture text file; lifecycle, provider routing, staging, commit, archive, and target acceptance remain explicit."]
+        if any(finding.code == "queue-runner-fixture-update-current" for finding in findings):
+            return ["evidence fixture-update found the existing queue-runner fixture already matches the reviewed text; no route write was needed."]
+        if any(finding.code == "queue-runner-fixture-update-refused" and finding.severity == "error" for finding in findings):
+            return ["evidence fixture-update apply was refused before protected queue-runner fixture text was changed."]
         is_ref_retarget_dry_run = any(finding.code == "evidence-ref-retarget-dry-run" for finding in findings)
         if is_ref_retarget_dry_run and any(
             finding.code == "evidence-ref-retarget-refused" and finding.severity in {"warn", "error"} for finding in findings

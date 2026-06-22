@@ -65,6 +65,8 @@ WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
 WORKER_RUN_RECEIPT_SCHEMA = "mylittleharness.worker-run-receipt.v1"
 WORKER_RUN_RECEIPT_REFRESH_TOKEN_PREFIX = "wrr-"
 EVIDENCE_REF_RETARGET_TOKEN_PREFIX = "eret-"
+QUEUE_RUNNER_FIXTURES_DIR_REL = "project/verification/queue-runner-fixtures"
+QUEUE_RUNNER_FIXTURE_UPDATE_TOKEN_PREFIX = "qfix-"
 CHECKPOINT_PACKAGE_RECEIPTS_DIR_REL = "project/verification/checkpoint-packages"
 CHECKPOINT_PACKAGE_RECEIPT_SCHEMA = "mylittleharness.checkpoint-package-receipt.v1"
 RUNTIME_GUARD_PREFLIGHT_RECEIPT_SCHEMA = "mylittleharness.runtime-guard-preflight-receipt.v1"
@@ -1149,6 +1151,23 @@ class EvidenceRefRetargetPlan:
     target_kind: str
 
 
+@dataclass(frozen=True)
+class QueueRunnerFixtureUpdateRequest:
+    target: str
+    text: str
+    text_source: str
+    proposal_token: str
+
+
+@dataclass(frozen=True)
+class QueueRunnerFixtureUpdatePlan:
+    rel_path: str
+    current_text: str
+    updated_text: str
+    current_target_hash: str
+    proposal_token: str
+
+
 def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
     return AgentRunRecordRequest(
         record_id=str(getattr(args, "record_id", "") or "").strip(),
@@ -1190,6 +1209,15 @@ def make_evidence_ref_retarget_request(args: object) -> EvidenceRefRetargetReque
         target=str(getattr(args, "receipt_target", "") or "").replace("\\", "/").strip(),
         old_ref=str(getattr(args, "old_ref", "") or "").replace("\\", "/").strip(),
         new_ref=str(getattr(args, "new_ref", "") or "").replace("\\", "/").strip(),
+        proposal_token=str(getattr(args, "proposal_token", "") or "").strip(),
+    )
+
+
+def make_queue_runner_fixture_update_request(args: object, text: str, text_source: str) -> QueueRunnerFixtureUpdateRequest:
+    return QueueRunnerFixtureUpdateRequest(
+        target=str(getattr(args, "receipt_target", "") or "").replace("\\", "/").strip(),
+        text=text,
+        text_source=text_source,
         proposal_token=str(getattr(args, "proposal_token", "") or "").strip(),
     )
 
@@ -1482,6 +1510,93 @@ def evidence_ref_retarget_apply_findings(inventory: Inventory, request: Evidence
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "evidence-ref-retarget-backup-cleanup", warning, plan.rel_path))
     findings.extend(_evidence_ref_retarget_boundary_findings())
+    return findings
+
+
+def queue_runner_fixture_update_dry_run_findings(inventory: Inventory, request: QueueRunnerFixtureUpdateRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "queue-runner-fixture-update-dry-run", "queue-runner fixture update proposal only; no files were written"),
+        Finding("info", "queue-runner-fixture-update-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _queue_runner_fixture_update_request_findings(inventory, request, severity="warn")
+    findings.extend(request_findings)
+    if any(finding.severity in {"warn", "error"} for finding in request_findings):
+        findings.append(Finding("info", "queue-runner-fixture-update-validation-posture", "dry-run refused before apply; fix the target and reviewed fixture text before updating route-owned evidence"))
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+
+    plan, plan_findings = _queue_runner_fixture_update_plan(inventory.root, request, severity="warn")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "queue-runner-fixture-update-validation-posture", "dry-run refused before apply; fix the existing route-owned queue-runner fixture"))
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+    findings.extend(_queue_runner_fixture_update_route_findings(plan, apply=False))
+    findings.extend(_queue_runner_fixture_update_boundary_findings())
+    return findings
+
+
+def queue_runner_fixture_update_apply_findings(inventory: Inventory, request: QueueRunnerFixtureUpdateRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "queue-runner-fixture-update-apply", "queue-runner fixture update apply started"),
+        Finding("info", "queue-runner-fixture-update-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _queue_runner_fixture_update_request_findings(inventory, request, severity="error")
+    findings.extend(request_findings)
+    if any(finding.severity == "error" for finding in request_findings):
+        findings.append(Finding("info", "queue-runner-fixture-update-validation-posture", "apply refused before updating queue-runner fixture evidence"))
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+
+    plan, plan_findings = _queue_runner_fixture_update_plan(inventory.root, request, severity="error")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "queue-runner-fixture-update-validation-posture", "apply refused before updating queue-runner fixture evidence"))
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+    if not request.proposal_token:
+        findings.append(
+            Finding(
+                "error",
+                "queue-runner-fixture-update-refused",
+                f"apply requires --proposal-token {plan.proposal_token} from a matching dry-run",
+                plan.rel_path,
+            )
+        )
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+    if request.proposal_token != plan.proposal_token:
+        findings.append(
+            Finding(
+                "error",
+                "queue-runner-fixture-update-refused",
+                "proposal token mismatch; rerun evidence --fixture-update --dry-run because the target fixture or reviewed text changed",
+                plan.rel_path,
+            )
+        )
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+    if plan.current_text == plan.updated_text:
+        findings.extend(_queue_runner_fixture_update_route_findings(plan, apply=True))
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+
+    target = inventory.root / plan.rel_path
+    tmp_path = target.with_name(f".{target.name}.tmp")
+    backup_path = target.with_name(f".{target.name}.bak")
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target, tmp_path, plan.updated_text, backup_path),),
+            root=inventory.root,
+        )
+    except FileTransactionError as exc:
+        findings.append(Finding("error", "queue-runner-fixture-update-refused", f"failed to update queue-runner fixture before apply completed: {exc}", plan.rel_path))
+        findings.extend(_queue_runner_fixture_update_boundary_findings())
+        return findings
+    findings.extend(_queue_runner_fixture_update_route_findings(plan, apply=True))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "queue-runner-fixture-update-backup-cleanup", warning, plan.rel_path))
+    findings.extend(_queue_runner_fixture_update_boundary_findings())
     return findings
 
 
@@ -5145,6 +5260,201 @@ def _evidence_ref_retarget_boundary_findings() -> list[Finding]:
             "evidence-ref-retarget-route",
             "evidence ref retarget is limited to existing agent-run Markdown plus handoff, work-claim, and worker-run receipt JSON records; it creates no runtime, queue, database, cache, adapter state, or provider gateway",
             "project/verification",
+        ),
+    ]
+
+
+def _queue_runner_fixture_update_request_findings(
+    inventory: Inventory,
+    request: QueueRunnerFixtureUpdateRequest,
+    severity: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                severity,
+                "queue-runner-fixture-update-refused",
+                "queue-runner fixture update is live-root only; product fixtures and archive roots remain read-only context",
+            )
+        )
+    if not request.target:
+        findings.append(Finding(severity, "queue-runner-fixture-update-refused", "--target is required for queue-runner fixture update"))
+    if not str(request.text or "").strip():
+        findings.append(Finding(severity, "queue-runner-fixture-update-refused", "--text or --text-file must provide reviewed fixture content"))
+    if not request.target or not str(request.text or "").strip():
+        return findings
+    findings.extend(_queue_runner_fixture_update_target_findings(inventory.root, request.target, severity))
+    findings.extend(_queue_runner_fixture_update_content_findings(request.target, request.text, severity))
+    return findings
+
+
+def _queue_runner_fixture_update_target_findings(root: Path, target_rel: str, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+    conflict = _root_relative_path_conflict(target_rel)
+    if conflict:
+        return [Finding(severity, "queue-runner-fixture-update-refused", f"target {conflict}", target_rel)]
+    prefix = f"{QUEUE_RUNNER_FIXTURES_DIR_REL}/"
+    if not target_rel.startswith(prefix) or not target_rel.endswith(".txt"):
+        return [
+            Finding(
+                severity,
+                "queue-runner-fixture-update-refused",
+                f"target must be an existing {QUEUE_RUNNER_FIXTURES_DIR_REL}/*.txt fixture",
+                target_rel,
+            )
+        ]
+    target = (root / target_rel).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return [Finding(severity, "queue-runner-fixture-update-refused", "target escapes the target root", target_rel)]
+    parent = root.resolve()
+    for part in Path(target_rel).parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            findings.append(Finding(severity, "queue-runner-fixture-update-refused", f"target directory contains a symlink segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+        if parent.exists() and not parent.is_dir():
+            findings.append(Finding(severity, "queue-runner-fixture-update-refused", f"target directory contains a non-directory segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+    if not target.exists():
+        findings.append(Finding(severity, "queue-runner-fixture-update-refused", "target does not exist; fixture update only maintains existing queue-runner proof files", target_rel))
+    elif target.is_symlink():
+        findings.append(Finding(severity, "queue-runner-fixture-update-refused", "target must not be a symlink", target_rel))
+    elif not target.is_file():
+        findings.append(Finding(severity, "queue-runner-fixture-update-refused", "target is not a regular file", target_rel))
+    return findings
+
+
+def _queue_runner_fixture_update_content_findings(target_rel: str, text: str, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+    if "\x00" in text:
+        findings.append(Finding(severity, "queue-runner-fixture-update-refused", "fixture text must be UTF-8 text without NUL bytes", target_rel))
+    content = text.casefold()
+    has_safety_boundary = "no secrets" in content and "raw provider payload" in content
+    has_explicit_proof = ("queue runner" in content or "queue-runner" in content) and "proof" in content
+    has_scoped_write_smoke = "smoke fixture" in content and "live scoped writer" in content and "applied write" in content
+    if not has_safety_boundary:
+        findings.append(
+            Finding(
+                severity,
+                "queue-runner-fixture-update-refused",
+                "fixture text must explicitly state the no-secrets and raw provider payload safety boundary",
+                target_rel,
+            )
+        )
+    if not (has_explicit_proof or has_scoped_write_smoke):
+        findings.append(
+            Finding(
+                severity,
+                "queue-runner-fixture-update-refused",
+                "fixture text must be reviewed queue-runner proof or an accepted live scoped-writer smoke fixture",
+                target_rel,
+            )
+        )
+    return findings
+
+
+def _queue_runner_fixture_update_plan(
+    root: Path,
+    request: QueueRunnerFixtureUpdateRequest,
+    severity: str,
+) -> tuple[QueueRunnerFixtureUpdatePlan | None, list[Finding]]:
+    target = root / request.target
+    try:
+        current_text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, [Finding(severity, "queue-runner-fixture-update-refused", f"queue-runner fixture could not be read before update: {exc}", request.target)]
+    updated_text = request.text.replace("\r\n", "\n").replace("\r", "\n")
+    if not updated_text.endswith("\n"):
+        updated_text += "\n"
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    proposal_token = _queue_runner_fixture_update_token(request.target, current_hash, updated_text)
+    return (
+        QueueRunnerFixtureUpdatePlan(
+            rel_path=request.target,
+            current_text=current_text,
+            updated_text=updated_text,
+            current_target_hash=current_hash,
+            proposal_token=proposal_token,
+        ),
+        [
+            Finding(
+                "info",
+                "queue-runner-fixture-update-target",
+                f"update existing queue-runner fixture text: {request.target}",
+                request.target,
+            )
+        ],
+    )
+
+
+def _queue_runner_fixture_update_token(target_rel: str, current_hash: str, updated_text: str) -> str:
+    payload = "\n".join((target_rel, current_hash, hashlib.sha256(updated_text.encode("utf-8")).hexdigest()))
+    return f"{QUEUE_RUNNER_FIXTURE_UPDATE_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _queue_runner_fixture_update_route_findings(plan: QueueRunnerFixtureUpdatePlan, *, apply: bool) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "queue-runner-fixture-update-token",
+            (
+                f"current target sha256={plan.current_target_hash}; proposal_token={plan.proposal_token}; "
+                f"apply with: mylittleharness --root <root> evidence --fixture-update --apply --target {plan.rel_path} "
+                f"--text-file <reviewed-fixture-text-or-stdin> --proposal-token {plan.proposal_token}"
+            ),
+            plan.rel_path,
+        )
+    ]
+    if plan.current_text == plan.updated_text:
+        findings.append(
+            Finding(
+                "info",
+                "queue-runner-fixture-update-current",
+                f"queue-runner fixture {plan.rel_path} already matches reviewed text; no route write is needed",
+                plan.rel_path,
+            )
+        )
+        return findings
+    before_hash = _short_hash(plan.current_text)
+    after_hash = _short_hash(plan.updated_text)
+    before_bytes = len(plan.current_text.encode("utf-8"))
+    after_bytes = len(plan.updated_text.encode("utf-8"))
+    prefix = "updated" if apply else "would update"
+    findings.extend(
+        [
+            Finding(
+                "info",
+                "queue-runner-fixture-updated" if apply else "queue-runner-fixture-update-dry-run",
+                f"{prefix} existing queue-runner fixture text: {plan.rel_path}",
+                plan.rel_path,
+            ),
+            Finding(
+                "info",
+                "queue-runner-fixture-update-route-write",
+                f"{prefix} route {plan.rel_path}; before_hash={before_hash}; after_hash={after_hash}; before_bytes={before_bytes}; after_bytes={after_bytes}; source-bound write evidence is independent of Git tracking",
+                plan.rel_path,
+            ),
+        ]
+    )
+    return findings
+
+
+def _queue_runner_fixture_update_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "queue-runner-fixture-update-boundary",
+            "queue-runner fixture update maintains only one existing route-owned fixture text file; it cannot approve lifecycle, archive, roadmap status, provider routing, staging, commit, or acceptance",
+            QUEUE_RUNNER_FIXTURES_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "queue-runner-fixture-update-route",
+            f"queue-runner fixture update is limited to existing {QUEUE_RUNNER_FIXTURES_DIR_REL}/*.txt proof files and creates no runtime, queue, provider gateway, secret store, raw payload, or hidden state",
+            QUEUE_RUNNER_FIXTURES_DIR_REL,
         ),
     ]
 

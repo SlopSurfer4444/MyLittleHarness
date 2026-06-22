@@ -3406,6 +3406,7 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
         return not _looks_like_write_command(command) and (
             _is_mlh_evidence_record_route_command(policy_command)
             or _is_mlh_evidence_receipt_refresh_route_command(policy_command)
+            or _is_mlh_evidence_fixture_update_route_command(policy_command)
         )
     if subcommand == "retention" and "scan" in tokens:
         return not _looks_like_write_command(command)
@@ -3455,6 +3456,18 @@ def _is_mlh_evidence_receipt_refresh_route_command(command: str) -> bool:
         _mlh_cli_subcommand(lowered) == "evidence"
         and not _looks_like_write_command(command)
         and "--receipt-refresh" in tokens
+        and (_has_mlh_option_value(command, "--target") or tokens.intersection({"--help", "-h"}))
+        and _has_mlh_review_mode_token(command)
+    )
+
+
+def _is_mlh_evidence_fixture_update_route_command(command: str) -> bool:
+    lowered = command.casefold()
+    tokens = _mlh_command_token_set(command)
+    return (
+        _mlh_cli_subcommand(lowered) == "evidence"
+        and not _looks_like_write_command(command)
+        and "--fixture-update" in tokens
         and (_has_mlh_option_value(command, "--target") or tokens.intersection({"--help", "-h"}))
         and _has_mlh_review_mode_token(command)
     )
@@ -6266,6 +6279,8 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
             "--residual-risk",
             "<risk>",
         )
+    if _verification_checkpoint_path_class(rel) == "queue-runner-fixtures":
+        return mlh_command("evidence", "--fixture-update", "--dry-run", "--target", rel, "--text-file", "-")
     if _is_roadmap_path(rel) or route_id == "roadmap":
         return mlh_command("roadmap", "--dry-run", "--action", "update", "--item-id", "<id>")
     if route_id == "state":
