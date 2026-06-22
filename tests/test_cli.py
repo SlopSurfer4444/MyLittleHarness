@@ -33114,12 +33114,20 @@ class CliTests(unittest.TestCase):
                     ],
                 }
             )
+            pipeline_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": command + " | ConvertFrom-Json | Select-Object -ExpandProperty result",
+                }
+            )
 
             direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_input)
             arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], arguments_input)
             parallel_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], parallel_input)
+            pipeline_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], pipeline_input)
 
-            for checked_payload in (direct_payload, arguments_payload, parallel_payload):
+            for checked_payload in (direct_payload, arguments_payload, parallel_payload, pipeline_payload):
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
                 self.assertFalse(checked_payload["block"])
                 self.assertIn("hooks-policy-allow-read-only-mlh-report", finding_codes)
@@ -33144,15 +33152,30 @@ class CliTests(unittest.TestCase):
                     "command": "mylittleharness --root . roadmap --list --json --action add",
                 }
             )
+            write_pipeline_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": "mylittleharness --root . roadmap --list --json | Set-Content project/roadmap.md",
+                }
+            )
 
             mutation_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], mutation_input)
             mixed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], mixed_input)
+            write_pipeline_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], write_pipeline_input
+            )
 
             for checked_payload in (mutation_payload, mixed_payload):
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
                 self.assertTrue(checked_payload["block"])
                 self.assertIn("hooks-policy-block-mlh-mutation-without-mode", finding_codes)
                 self.assertNotIn("hooks-policy-allow-read-only-mlh-report", finding_codes)
+
+            write_pipeline_codes = {finding["code"] for finding in write_pipeline_payload["findings"]}
+            self.assertTrue(write_pipeline_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", write_pipeline_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-mlh-report", write_pipeline_codes)
 
     def test_hooks_pre_tool_allows_read_only_product_source_python_smoke(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

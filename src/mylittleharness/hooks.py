@@ -135,6 +135,16 @@ READ_ONLY_MLH_REPORT_COMMAND_OPTIONS = {
 READ_ONLY_MLH_REPORT_ALLOWED_OPTIONS = {
     "roadmap": {"--list", "--json", "--root", "--config", "--config-path"},
 }
+READ_ONLY_MLH_REPORT_PIPELINE_VALUE_OPTIONS = {
+    "select-object": {"-expandproperty", "-first", "-last", "-property", "-skip"},
+}
+READ_ONLY_MLH_REPORT_PIPELINE_FLAG_OPTIONS = {
+    "select-object": {"-unique"},
+}
+READ_ONLY_MLH_REPORT_PIPELINE_COMMANDS = {
+    "convertfrom-json",
+    "select-object",
+}
 READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS = {
     "--apply",
     "--build",
@@ -4049,7 +4059,7 @@ def _is_read_only_mlh_report_command(command: str) -> bool:
         return False
     if _has_unresolved_mlh_splat_invocation(command):
         return False
-    policy_command = _mlh_policy_command(command)
+    policy_command = _mlh_policy_command(_strip_read_only_mlh_report_pipeline(command))
     subcommands = _mlh_cli_subcommands(policy_command)
     if not subcommands:
         return False
@@ -4071,6 +4081,54 @@ def _is_read_only_mlh_report_subcommand(command: str, subcommand: str) -> bool:
         return False
     args = _mlh_subcommand_argument_tokens(command, subcommand)
     return _mlh_report_args_are_read_only(args, allowed_options)
+
+
+def _strip_read_only_mlh_report_pipeline(command: str) -> str:
+    tokens = _shell_tokens(command)
+    if "|" not in tokens:
+        return command
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "|":
+            segments.append([])
+            continue
+        segments[-1].append(token)
+    if len(segments) < 2 or not segments[0] or any(not segment for segment in segments[1:]):
+        return command
+    if not all(_is_read_only_mlh_report_pipeline_segment(segment) for segment in segments[1:]):
+        return command
+    return " ".join(segments[0])
+
+
+def _is_read_only_mlh_report_pipeline_segment(tokens: list[str]) -> bool:
+    command_name = _clean_token(tokens[0]).casefold()
+    if command_name not in READ_ONLY_MLH_REPORT_PIPELINE_COMMANDS:
+        return False
+    if command_name == "convertfrom-json":
+        return len(tokens) == 1
+    value_options = READ_ONLY_MLH_REPORT_PIPELINE_VALUE_OPTIONS.get(command_name, set())
+    flag_options = READ_ONLY_MLH_REPORT_PIPELINE_FLAG_OPTIONS.get(command_name, set())
+    index = 1
+    while index < len(tokens):
+        token = _clean_token(tokens[index]).casefold()
+        if not token:
+            index += 1
+            continue
+        if token in value_options:
+            if index + 1 >= len(tokens):
+                return False
+            value = _clean_token(tokens[index + 1])
+            if not value or value.startswith("-"):
+                return False
+            index += 2
+            continue
+        if token in flag_options:
+            index += 1
+            continue
+        if token.startswith("-"):
+            return False
+        index += 1
+    return True
 
 
 def _mlh_subcommand_argument_tokens(command: str, subcommand: str) -> list[str]:
