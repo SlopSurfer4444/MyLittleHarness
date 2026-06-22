@@ -35221,6 +35221,7 @@ class CliTests(unittest.TestCase):
             }
             unsafe_inputs = {
                 "force": "git " + "push --force origin main",
+                "plain_non_main": "git " + "push origin dev",
                 "wrong_target": "git " + "push origin HEAD:refs/heads/dev",
                 "tag": "git " + "push origin refs/tags/v1.0.0",
             }
@@ -35252,6 +35253,70 @@ class CliTests(unittest.TestCase):
                     self.assertTrue(payload["block"])
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+
+    def test_hooks_pre_tool_allows_product_root_main_push_from_product_source_fixture(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            product_root = Path(tmp) / "product"
+            (product_root / ".codex").mkdir(parents=True)
+            (product_root / "project").mkdir()
+            (product_root / "AGENTS.md").write_text("# Product contract\n", encoding="utf-8")
+            (product_root / ".codex" / "project-workflow.toml").write_text(
+                'workflow = "workflow-core"\n',
+                encoding="utf-8",
+            )
+            (product_root / "project" / "project-state.md").write_text(
+                "---\n"
+                'root_role: "product-source"\n'
+                'plan_status: "none"\n'
+                'active_plan: ""\n'
+                "---\n"
+                "# Product State\n",
+                encoding="utf-8",
+            )
+
+            allowed_inputs = {
+                "no_workdir": {"toolName": "shell_command", "command": "git " + "push origin main"},
+                "workdir": {
+                    "toolName": "shell_command",
+                    "workdir": str(product_root),
+                    "command": "git " + "push origin main",
+                },
+                "cwd": {
+                    "toolName": "shell_command",
+                    "cwd": str(product_root),
+                    "command": "git " + "push origin HEAD:refs/heads/main",
+                },
+            }
+            unsafe_inputs = {
+                "force": "git " + "push --force origin main",
+                "non_main": "git " + "push origin dev",
+                "tag_only": "git " + "push origin refs/tags/v1.0.0",
+            }
+
+            for name, hook_data in allowed_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(product_root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_data))
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+            for name, command in unsafe_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(product_root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-product-source-vcs-push-unsafe", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("ordinary non-force main publication push", messages)
 
     def test_hooks_pre_tool_guides_live_product_source_main_push_before_active_phase_complete(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

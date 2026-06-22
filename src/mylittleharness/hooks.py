@@ -1716,11 +1716,20 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     )
     block_product_source_vcs_push_before_phase_complete = (
         _active_plan_blocks_product_source_vcs_push(inventory)
-        and _is_product_source_vcs_push_candidate(inventory, data, command)
+        and (
+            _is_product_source_vcs_push_candidate(inventory, data, command)
+            or _is_product_source_fixture_vcs_push_candidate(inventory, data, command)
+        )
     )
     allow_product_source_vcs_push = (
         allow_product_source_release_publication_push
         or _is_product_source_vcs_push_command(inventory, data, command)
+        or _is_product_source_fixture_vcs_push_command(inventory, data, command)
+    )
+    block_product_source_publication_push_unsafe = (
+        _is_product_source_fixture_vcs_push_context(inventory, data, command)
+        and not allow_product_source_vcs_push
+        and not block_product_source_vcs_push_before_phase_complete
     )
     allow_product_source_vcs_finalization = _is_product_source_vcs_finalization_sequence(inventory, data, command)
     allow_product_source_vcs_command = (
@@ -1974,7 +1983,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "info",
                 "hooks-policy-allow-product-source-vcs-push",
                 (
-                    "allowed ordinary non-force Git push from the configured product_source_root workdir after "
+                    "allowed ordinary non-force Git push from the configured product_source_root or product-source root after "
                     "plan_status=none or active phase_status=complete; force, mirror, delete, broad refspec, "
                     "operating-root lifecycle mutation, release, and future lifecycle decisions remain unapproved"
                 ),
@@ -2247,6 +2256,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
+    if block_product_source_publication_push_unsafe:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-product-source-vcs-push-unsafe",
+                (
+                    "blocked product-source publication push because the command is not an ordinary non-force "
+                    "main publication push; use the literal product-root command `git push origin main` after "
+                    "review, or a reviewed release-publication route for tag pushes; force, mirror, delete, "
+                    "wildcard, broad refspec, tag-only, all-branch, and non-main publication pushes remain guarded"
+                ),
+            )
+        )
     if (
         _looks_like_git_stage_or_commit(mutation_check_lowered)
         and not allow_apply_patch_intent
@@ -2261,6 +2283,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_reviewed_local_vcs_checkpoint
         and not allow_reviewed_local_vcs_delegation
         and not block_product_source_vcs_push_before_phase_complete
+        and not block_product_source_publication_push_unsafe
     ):
         next_safe = _git_mutation_next_safe_command(inventory, data, command)
         if reviewed_local_vcs_checkpoint.blocked_reason:
@@ -3994,6 +4017,12 @@ def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, ob
     return _is_product_source_vcs_push_candidate(inventory, data, command)
 
 
+def _is_product_source_fixture_vcs_push_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if _active_plan_blocks_product_source_vcs_push(inventory):
+        return False
+    return _is_product_source_fixture_vcs_push_candidate(inventory, data, command)
+
+
 def _is_product_source_vcs_push_candidate(inventory: Inventory, data: dict[str, object], command: str) -> bool:
     if _has_shell_command_separator(command):
         return False
@@ -4016,7 +4045,47 @@ def _is_product_source_vcs_push_candidate(inventory: Inventory, data: dict[str, 
         for clean in operands
     ):
         return False
-    return len(operands) <= 2
+    return _is_ordinary_product_source_main_push_operands(operands)
+
+
+def _is_product_source_fixture_vcs_push_candidate(
+    inventory: Inventory, data: dict[str, object], command: str
+) -> bool:
+    if not _is_product_source_fixture_vcs_push_context(inventory, data, command):
+        return False
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand != "push" or subcommand_index < 0:
+        return False
+    operands = _product_source_push_operands(tokens[subcommand_index + 1 :])
+    if operands is None:
+        return False
+    if _is_exact_release_publication_refspecs(operands):
+        return False
+    if any(
+        clean.startswith("+")
+        or (":" in clean and not _ordinary_product_source_push_refspec_targets_main(clean))
+        or _looks_like_product_source_tag_push_ref(clean)
+        or any(char in clean for char in "*?[]")
+        for clean in operands
+    ):
+        return False
+    return _is_ordinary_product_source_main_push_operands(operands)
+
+
+def _is_product_source_fixture_vcs_push_context(
+    inventory: Inventory, data: dict[str, object], command: str
+) -> bool:
+    if inventory.root_kind != PRODUCT_SOURCE_FIXTURE or _has_shell_command_separator(command):
+        return False
+    workdir = _git_effective_workdir_path(inventory, data, command)
+    if workdir is None:
+        return False
+    try:
+        workdir.relative_to(inventory.root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    subcommand, _tokens, subcommand_index = _git_command_context(command)
+    return subcommand == "push" and subcommand_index >= 0
 
 
 def _is_product_source_release_publication_push_command(
@@ -4075,6 +4144,19 @@ def _is_exact_release_publication_refspecs(operands: list[str]) -> bool:
         and _release_publication_branch_targets_main(operands[1])
         and bool(_release_publication_tag_name(operands[2]))
     )
+
+
+def _is_ordinary_product_source_main_push_operands(operands: list[str]) -> bool:
+    if not operands:
+        return True
+    if len(operands) == 1:
+        return operands[0] in {"origin", "main", "refs/heads/main"} or _ordinary_product_source_push_refspec_targets_main(
+            operands[0]
+        )
+    if len(operands) != 2 or operands[0] != "origin":
+        return False
+    branch = operands[1]
+    return branch in {"main", "refs/heads/main"} or _ordinary_product_source_push_refspec_targets_main(branch)
 
 
 def _ordinary_product_source_push_refspec_targets_main(refspec: str) -> bool:
