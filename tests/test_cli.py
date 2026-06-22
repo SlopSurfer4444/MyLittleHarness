@@ -31723,6 +31723,56 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_real_codex_send_message_delegation_navigation_context(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Continue MLH-dev local main. Read AGENTS.md, .codex/project-workflow.toml, "
+                "project/project-state.md, project/roadmap.md, and dashboard/check state first. "
+                f"Use product source {product_ref} only as navigation context until a legal MLH plan route "
+                "declares target artifacts. Use archive through legal route and make exact commits only after "
+                "route closeout. Preserve unrelated dirty work. No push, no release, no provider routing, "
+                "and do not bypass hooks."
+            )
+            arguments_input = json.dumps(
+                {
+                    "toolName": "codex_app.send_message_to_thread",
+                    "arguments": json.dumps({"thread_id": "thread-1", "input": prompt}),
+                }
+            )
+            parallel_input = json.dumps(
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "codex_app.send_message_to_thread",
+                            "parameters": {"thread_id": "thread-1", "input": prompt},
+                        }
+                    ],
+                }
+            )
+
+            arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], arguments_input)
+            parallel_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], parallel_input)
+
+            for checked_payload in (arguments_payload, parallel_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertTrue(
+                    {
+                        "hooks-policy-allow-delegation-prompt-context",
+                        "hooks-policy-allow-read-only-subagent-delegation",
+                        "hooks-policy-warn-reviewed-local-vcs-delegation",
+                    }
+                    & finding_codes
+                )
+                self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
     def test_hooks_pre_tool_blocks_real_codex_nested_unsafe_delegation_prompt(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -33037,6 +33087,72 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(checked_payload["block"])
                 self.assertIn("hooks-policy-block-product-root-mlh-mutation", finding_codes)
                 self.assertNotIn("hooks-policy-allow-read-only-product-source-inspection", finding_codes)
+
+    def test_hooks_pre_tool_allows_read_only_roadmap_list_json_report_payloads(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            command = "mylittleharness --root . roadmap --list --json"
+            direct_input = json.dumps(
+                {"toolName": "functions.shell_command", "workdir": str(root), "command": command}
+            )
+            arguments_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "arguments": json.dumps({"workdir": str(root), "command": command}),
+                }
+            )
+            parallel_input = json.dumps(
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"workdir": str(root), "command": command},
+                        }
+                    ],
+                }
+            )
+
+            direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_input)
+            arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], arguments_input)
+            parallel_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], parallel_input)
+
+            for checked_payload in (direct_payload, arguments_payload, parallel_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-read-only-mlh-report", finding_codes)
+                self.assertNotIn("hooks-policy-block-mlh-mutation-without-mode", finding_codes)
+
+    def test_hooks_pre_tool_keeps_roadmap_mutation_without_mode_blocked(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            mutation_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": "mylittleharness --root . roadmap --action add --item-id new-work",
+                }
+            )
+            mixed_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": "mylittleharness --root . roadmap --list --json --action add",
+                }
+            )
+
+            mutation_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], mutation_input)
+            mixed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], mixed_input)
+
+            for checked_payload in (mutation_payload, mixed_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertTrue(checked_payload["block"])
+                self.assertIn("hooks-policy-block-mlh-mutation-without-mode", finding_codes)
+                self.assertNotIn("hooks-policy-allow-read-only-mlh-report", finding_codes)
 
     def test_hooks_pre_tool_allows_read_only_product_source_python_smoke(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

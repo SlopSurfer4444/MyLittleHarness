@@ -129,6 +129,12 @@ READ_ONLY_PRODUCT_SOURCE_INSPECTION_COMMANDS = {
     "status",
     "validate",
 }
+READ_ONLY_MLH_REPORT_COMMAND_OPTIONS = {
+    "roadmap": {"--list"},
+}
+READ_ONLY_MLH_REPORT_ALLOWED_OPTIONS = {
+    "roadmap": {"--list", "--json", "--root", "--config", "--config-path"},
+}
 READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS = {
     "--apply",
     "--build",
@@ -1684,11 +1690,13 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(command_data))
+    allow_read_only_mlh_report = _is_read_only_mlh_report_command(command)
     allow_read_only_source_paths = (
         _is_read_only_source_discovery_command(command)
         or _is_read_only_shell_wrapper_command(command)
         or _is_read_only_git_inspection_command(command)
         or _is_read_only_mlh_inspection_command(command)
+        or allow_read_only_mlh_report
         or _is_bounded_mlh_read_tool_request(data)
         or allow_read_only_product_source_smoke
         or allow_read_only_product_source_inspection
@@ -2079,6 +2087,14 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else None,
             )
         )
+    if allow_read_only_mlh_report:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-mlh-report",
+                "allowed read-only MLH report/list command; this hook output remains advisory and cannot approve route mutation",
+            )
+        )
     if allow_read_only_product_source_smoke and any(_is_under_configured_product_root(inventory, path) for path in paths):
         findings.append(
             Finding(
@@ -2232,7 +2248,11 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     blocked_scope[0] if blocked_scope else out_of_scope[0],
                 )
             )
-    if _looks_like_unsafe_mlh_mutation(mutation_check_lowered) and not _has_explicit_mlh_review_mode(mutation_check_lowered):
+    if (
+        _looks_like_unsafe_mlh_mutation(mutation_check_lowered)
+        and not _has_explicit_mlh_review_mode(mutation_check_lowered)
+        and not _is_read_only_mlh_report_command(mutation_check_command)
+    ):
         findings.append(
             Finding(
                 "error",
@@ -4022,6 +4042,78 @@ def _is_read_only_mlh_inspection_command(command: str) -> bool:
     return bool(subcommands) and all(
         subcommand in READ_ONLY_PRODUCT_SOURCE_INSPECTION_COMMANDS for subcommand in subcommands
     )
+
+
+def _is_read_only_mlh_report_command(command: str) -> bool:
+    if _looks_like_write_command(command) or _looks_like_git_stage_or_commit(command.casefold()):
+        return False
+    if _has_unresolved_mlh_splat_invocation(command):
+        return False
+    policy_command = _mlh_policy_command(command)
+    subcommands = _mlh_cli_subcommands(policy_command)
+    if not subcommands:
+        return False
+    return all(_is_read_only_mlh_report_subcommand(policy_command, subcommand) for subcommand in subcommands)
+
+
+def _is_read_only_mlh_report_subcommand(command: str, subcommand: str) -> bool:
+    subcommand = str(subcommand or "").casefold()
+    required = READ_ONLY_MLH_REPORT_COMMAND_OPTIONS.get(subcommand)
+    allowed_options = READ_ONLY_MLH_REPORT_ALLOWED_OPTIONS.get(subcommand)
+    if not required or not allowed_options:
+        return False
+    tokens = _mlh_command_token_set(command)
+    if not tokens.intersection(required):
+        return False
+    if tokens.intersection(READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS):
+        return False
+    if tokens.intersection({"--action", "--apply", "--dry-run", "--items-file", "--item-id"}):
+        return False
+    args = _mlh_subcommand_argument_tokens(command, subcommand)
+    return _mlh_report_args_are_read_only(args, allowed_options)
+
+
+def _mlh_subcommand_argument_tokens(command: str, subcommand: str) -> list[str]:
+    tokens = _shell_tokens(_mlh_policy_command(command))
+    for index, token in enumerate(tokens):
+        if not _is_mlh_executable_token(token) and not (
+            _is_python_executable_token(token)
+            and index + 2 < len(tokens)
+            and _clean_token(tokens[index + 1]) == "-m"
+            and _clean_token(tokens[index + 2]) == "my" + "littleharness"
+        ):
+            continue
+        start = index + (3 if _is_python_executable_token(token) else 1)
+        cursor = start
+        while cursor < len(tokens):
+            clean = _clean_token(tokens[cursor])
+            if clean in {"--root", "--config", "--config-path"}:
+                cursor += 2
+                continue
+            if clean.startswith(("--root=", "--config=", "--config-path=")):
+                cursor += 1
+                continue
+            if clean.startswith("-"):
+                cursor += 1
+                continue
+            if clean == subcommand:
+                return [_clean_token(item) for item in tokens[cursor + 1 :] if _clean_token(item)]
+            break
+    return []
+
+
+def _mlh_report_args_are_read_only(args: list[str], allowed_options: set[str]) -> bool:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        option_name = token.split("=", 1)[0]
+        if option_name not in allowed_options:
+            return False
+        if option_name in {"--root", "--config", "--config-path"} and "=" not in token:
+            index += 2
+            continue
+        index += 1
+    return True
 
 
 def _is_read_only_product_source_smoke_command(inventory: Inventory, command: str) -> bool:
