@@ -3913,8 +3913,10 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
 
 
 def _is_post_closeout_lifecycle_route_stage_path(inventory: Inventory, path: str) -> bool:
-    return _is_existing_lifecycle_route_file(inventory, path) or _is_post_closeout_active_plan_tombstone_path(
-        inventory, path
+    return (
+        _is_existing_lifecycle_route_file(inventory, path)
+        or _is_post_closeout_active_plan_tombstone_path(inventory, path)
+        or _is_post_closeout_source_incubation_tombstone_path(inventory, path)
     )
 
 
@@ -4884,8 +4886,16 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
     if not required <= normalized:
         return set()
     extra = normalized - required - optional
+    reviewed_source_archives = {
+        path
+        for path in extra
+        if _is_memory_hygiene_archive_reference_path(path)
+        and _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
+    }
     if extra and not all(
-        _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel) for path in extra
+        _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
+        or _is_post_closeout_source_incubation_tombstone_path(inventory, path, reviewed_source_archives)
+        for path in extra
     ):
         return set()
     if ACTIVE_PLAN_ROUTE_PATH in normalized and not _is_post_closeout_active_plan_tombstone_path(
@@ -5121,6 +5131,11 @@ def _is_memory_hygiene_checkpoint_route_path(path: str) -> bool:
 def _is_memory_hygiene_archive_reference_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.startswith("project/archive/reference/incubation/") and rel.endswith(".md")
+
+
+def _is_source_incubation_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return _is_meta_feedback_incubation_route_path(rel) or _is_memory_hygiene_archive_reference_path(rel)
 
 
 def _is_memory_hygiene_verification_route_path(path: str) -> bool:
@@ -5575,7 +5590,7 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
 
 
 def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: str) -> bool:
-    if not _is_meta_feedback_incubation_route_path(path):
+    if not _is_source_incubation_route_path(path):
         return False
     route_path = _hook_route_file_path(inventory, path)
     if route_path is None:
@@ -5603,8 +5618,6 @@ def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: st
 
 
 def _is_reviewed_post_closeout_source_incubation_file(inventory: Inventory, path: str, archive_rel: str) -> bool:
-    if not _is_reviewed_meta_feedback_incubation_file(inventory, path):
-        return False
     if not _is_reviewed_roadmap_promoted_incubation_file(inventory, path):
         return False
     route_path = _hook_route_file_path(inventory, path)
@@ -5613,10 +5626,24 @@ def _is_reviewed_post_closeout_source_incubation_file(inventory: Inventory, path
     try:
         if not route_path.is_file() or route_path.is_symlink():
             return False
-        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
     except (OSError, UnicodeDecodeError):
         return False
     if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    body = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :]).casefold()
+    if "mylittleharness-meta-feedback-cluster v1" not in body:
+        return False
+    if "[mlh-fix-candidate" not in body:
+        return False
+    has_boundary = (
+        "safe_boundary" in body
+        or "authority_boundary" in body
+        or "non-authority" in body
+        or "cannot approve" in body
+    )
+    if not has_boundary:
         return False
     data = frontmatter.data
     expected_archive = _normalize_hook_path(archive_rel).casefold()
@@ -5923,6 +5950,9 @@ def _normalized_post_closeout_lifecycle_route_checkpoint_paths(
         if _is_post_closeout_active_plan_tombstone_path(inventory, clean):
             normalized.add(clean)
             continue
+        if _is_post_closeout_source_incubation_tombstone_path(inventory, clean):
+            normalized.add(clean)
+            continue
         return set()
     return normalized
 
@@ -5945,6 +5975,22 @@ def _is_post_closeout_active_plan_tombstone_path(inventory: Inventory, path: str
     if _is_existing_lifecycle_route_file(inventory, clean):
         return False
     return _git_reports_deleted_path_for_root(inventory.root, clean)
+
+
+def _is_post_closeout_source_incubation_tombstone_path(
+    inventory: Inventory, path: str, archive_reference_paths: set[str] | None = None
+) -> bool:
+    rel = _hook_route_rel_path(inventory, path)
+    clean = _normalize_hook_path(rel).casefold() if rel else ""
+    if not _is_meta_feedback_incubation_route_path(clean):
+        return False
+    if _is_existing_lifecycle_route_file(inventory, clean):
+        return False
+    if not _git_reports_deleted_path_for_root(inventory.root, clean):
+        return False
+    if archive_reference_paths is None:
+        return True
+    return _has_archive_reference_for_incubation_source(inventory, clean, archive_reference_paths)
 
 
 def _active_plan_rel_path(inventory: Inventory) -> str:
