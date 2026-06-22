@@ -37123,6 +37123,78 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", direct_write_codes)
             self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_write_codes)
 
+    def test_hooks_pre_tool_allows_wrapped_handoff_and_evidence_route_payload_markdown_refs(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            handoff_command = (
+                "mylittleharness --root . handoff --dry-run --action create "
+                "--handoff-id group-e-fanin --worker-id helper --role-id reviewer "
+                "--execution-slice group-e --allowed-route evidence "
+                "--evidence-ref project/verification/agent-runs/group-e-route-metadata-vocabulary.md "
+                "--required-output report"
+            )
+            evidence_command = (
+                "mylittleharness --root . evidence --record --dry-run "
+                "--record-id group-e-fanin --role coder --actor codex --task task "
+                "--assigned-scope scope --runtime local-shell --worktree-id wt "
+                "--status succeeded --stop-reason done --attempt-budget 1/1 "
+                "--output-ref project/verification/agent-runs/group-e-fanin.md "
+                '--residual-risk "mentions unrelated project/project-state.md as prose only"'
+            )
+            hook_input = json.dumps(
+                {
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"command": handoff_command, "workdir": str(root)},
+                        },
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"command": evidence_command, "workdir": str(root)},
+                        },
+                    ]
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_evidence_route_payload_product_root_prose(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_state = (product_root / "project" / "project-state.md").as_posix()
+            command = (
+                "mylittleharness --root . evidence --record --dry-run "
+                "--record-id product-root-prose --role coder --actor codex --task task "
+                "--assigned-scope scope --runtime local-shell --worktree-id wt "
+                "--status succeeded --stop-reason done --attempt-budget 1/1 "
+                "--output-ref project/verification/agent-runs/product-root-prose.md "
+                f'--residual-risk "read-only route payload mentions {product_state} as prose only"'
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "arguments": json.dumps({"command": command, "workdir": str(root)}),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
+
     def test_hooks_pre_tool_allows_retention_route_and_receipt_backed_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
