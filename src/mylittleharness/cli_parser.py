@@ -593,12 +593,14 @@ def build_parser() -> argparse.ArgumentParser:
     roadmap = subparsers.add_parser(
         "roadmap",
         help=argparse.SUPPRESS,
-        description="Advanced mutating command: add, batch-add, batch-update, update, or normalize explicit accepted-work roadmap items.",
+        description="Read roadmap status or mutate accepted-work roadmap items through explicit dry-run/apply rails.",
     )
     roadmap.add_argument("operation", nargs="?", choices=("normalize",), help="Run a whole-roadmap housekeeping operation, such as normalize.")
     roadmap_mode = roadmap.add_mutually_exclusive_group(required=True)
     roadmap_mode.add_argument("--dry-run", action="store_true", help="Preview roadmap item changes without writing files.")
     roadmap_mode.add_argument("--apply", action="store_true", help="Write one bounded roadmap change in an eligible live operating root.")
+    roadmap_mode.add_argument("--list", action="store_true", help="Render a read-only roadmap portfolio report without writing files.")
+    roadmap.add_argument("--json", action="store_true", help="Emit a structured JSON report for roadmap --list.")
     roadmap.add_argument("--action", choices=("add", "add-many", "update", "update-many", "normalize"), help="Roadmap mutation action.")
     roadmap.add_argument("--items-file", dest="items_file", help="Read add-many or update-many roadmap items from a UTF-8 JSON or YAML manifest; use - for stdin.")
     roadmap.add_argument("--item-id", help="Stable roadmap item id to add or update.")

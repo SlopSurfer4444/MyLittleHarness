@@ -338,6 +338,7 @@ class RoadmapPortfolioStatus:
             "blocked_count": len(self.blocked_items),
             "complete": self.is_complete,
             "queued_items": [item.to_dict() for item in self.queued_items],
+            "active_items": [item.to_dict() for item in self.active_items],
             "dependency_ready_items": [item.to_dict() for item in self.dependency_ready_items],
             "blocked_items": [item.to_dict() for item in self.blocked_items],
             "parse_findings": [finding.to_dict() for finding in self.parse_findings],
@@ -2026,6 +2027,75 @@ def roadmap_portfolio_completion_findings(inventory: Inventory) -> list[Finding]
             (
                 "portfolio status is read-only roadmap evidence; it cannot control external goal tools, approve lifecycle, "
                 "archive, stage, commit, push, or force implementation order"
+            ),
+            ROADMAP_REL,
+        )
+    )
+    return findings
+
+
+def roadmap_list_findings(inventory: Inventory) -> list[Finding]:
+    status = roadmap_portfolio_status(inventory)
+    findings = list(status.parse_findings)
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-list-root-posture",
+                f"root kind: {inventory.root_kind}; roadmap --list is a read-only report for eligible live operating roots",
+                ROADMAP_REL,
+            )
+        )
+        return findings
+
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-list-read-only",
+            "roadmap --list is a read-only roadmap portfolio report; no repository files are written",
+            ROADMAP_REL,
+        )
+    )
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-list-summary",
+            (
+                f"items={status.item_count}; queued={len(status.queued_items)}; "
+                f"active={len(status.active_items)}; dependency_ready={len(status.dependency_ready_items)}; "
+                f"blocked={len(status.blocked_items)}; complete={str(status.is_complete).lower()}"
+            ),
+            ROADMAP_REL,
+        )
+    )
+    for item in status.queued_items[:20]:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-list-item",
+                (
+                    f"item={item.item_id}; status={item.status}; readiness={item.readiness}; "
+                    f"order={item.order}; next_safe_command={item.next_safe_command}"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    if len(status.queued_items) > 20:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-list-truncated",
+                f"{len(status.queued_items) - 20} additional queued roadmap item(s) omitted from text findings; JSON result contains the full portfolio",
+                ROADMAP_REL,
+            )
+        )
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-list-boundary",
+            (
+                "roadmap --list output is advisory navigation/report evidence only; it cannot approve roadmap mutation, "
+                "lifecycle movement, archive, staging, commit, push, release, provider routing, or cache truth"
             ),
             ROADMAP_REL,
         )

@@ -214,12 +214,14 @@ from .roadmap import (
     roadmap_apply_findings,
     roadmap_dry_run_findings,
     roadmap_item_fields,
+    roadmap_list_findings,
     roadmap_normalize_apply_findings,
     roadmap_normalize_dry_run_findings,
     roadmap_plan_deliverable_class_blockers,
     roadmap_plan_deliverable_class_next_safe_command,
     roadmap_plan_scope_blockers,
     roadmap_plan_scope_next_safe_command,
+    roadmap_portfolio_status,
 )
 from .semantic import semantic_evaluate_sections, semantic_inspect_sections
 from .tasks import tasks_sections
@@ -1311,6 +1313,37 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "roadmap":
+        if args.list:
+            if args.operation or args.action or args.items_file or args.item_id or _roadmap_item_mutation_args_present(args):
+                parser.error("roadmap --list does not accept roadmap mutation fields")
+            report_name = "roadmap --list"
+            findings = roadmap_list_findings(inventory)
+            result = _result_for(findings)
+            suggestions = _suggestions(command, findings)
+            sections = [("Roadmap", findings)]
+            if args.json:
+                payload = json.loads(
+                    render_json_report(
+                        report_name,
+                        inventory.root,
+                        result,
+                        inventory.sources_for_report(),
+                        findings,
+                        suggestions,
+                        sections,
+                    )
+                )
+                portfolio = roadmap_portfolio_status(inventory).to_dict()
+                payload["roadmap"] = portfolio
+                result_payload = payload.get("result")
+                if isinstance(result_payload, dict):
+                    result_payload["roadmap"] = portfolio
+                emit_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
+            else:
+                emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions))
+            return 0
+        if args.json:
+            parser.error("roadmap --json is only valid with --list")
         normalize_requested = args.operation == "normalize" or args.action == "normalize"
         if normalize_requested:
             if args.operation == "normalize" and args.action not in (None, "normalize"):

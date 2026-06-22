@@ -4957,7 +4957,7 @@ class CliTests(unittest.TestCase):
             (["incubate", "--help"], "Advanced mutating command: create or append explicit future-idea incubation"),
             (["plan", "--help"], "Advanced mutating command: create or replace a deterministic active"),
             (["memory-hygiene", "--help"], "Advanced mutating command: apply explicit research/incubation lifecycle"),
-            (["roadmap", "--help"], "Advanced mutating command: add, batch-add, batch-update, update, or normalize"),
+            (["roadmap", "--help"], "Read roadmap status or mutate accepted-work roadmap items"),
             (["meta-feedback", "--help"], "Advanced mutating command: collect MLH-Fix-Candidate meta-feedback"),
             (["adapter", "--help"], "Advanced diagnostic: inspect or serve optional adapter"),
             (["attach", "--help"], "Compatibility command: preview or apply workflow scaffold attachment"),
@@ -42087,6 +42087,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("cleared active related_plan metadata from source incubation", apply_output.getvalue())
             source_text = source_path.read_text(encoding="utf-8")
             self.assertNotIn('related_plan: "project/implementation-plan.md"', source_text)
+
+    def test_roadmap_list_json_reports_portfolio_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--list", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["command"], "roadmap --list")
+            self.assertFalse(payload["boundary"]["json_output_approves_lifecycle"])
+            self.assertIn("roadmap", payload["result"])
+            self.assertEqual(payload["roadmap"], payload["result"]["roadmap"])
+            self.assertEqual(payload["result"]["roadmap"]["queued_count"], 2)
+            self.assertEqual(payload["result"]["roadmap"]["active_count"], 1)
+            self.assertTrue(any(finding["code"] == "roadmap-list-read-only" for finding in payload["findings"]))
+            self.assertTrue(any(finding["code"] == "roadmap-list-boundary" for finding in payload["findings"]))
+
+    def test_roadmap_list_refuses_mutation_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            write_sample_roadmap(root)
+            before = snapshot_tree(root)
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                main(["--root", str(root), "roadmap", "--list", "--action", "update"])
+
+            self.assertEqual(raised.exception.code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("roadmap --list does not accept roadmap mutation fields", stderr.getvalue())
 
     def test_preflight_orchestrator_workspace_excludes_live_and_product_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
