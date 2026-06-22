@@ -35280,6 +35280,99 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_exact_roadmap_promotion_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            roadmap_rel = "project/" + "roadmap.md"
+            note_rel = "project/" + "plan-incubation/delegation-read-navigation-prompt-overblock.md"
+            (root / roadmap_rel).write_text("# Roadmap\n\n### Promoted\n", encoding="utf-8")
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / note_rel).write_text(
+                "---\n"
+                'topic: "delegation-read-navigation-prompt-overblock"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-20"\n'
+                'updated: "2026-06-22"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                'related_roadmap: "project/roadmap.md"\n'
+                'related_roadmap_item: "dogfood-hook-delegation-overblock-fidelity"\n'
+                'promoted_to: "project/roadmap.md"\n'
+                "---\n"
+                "# delegation-read-navigation-prompt-overblock\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--dry-run", "--", roadmap_rel, note_rel]),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+    def test_hooks_pre_tool_blocks_partial_or_unpromoted_roadmap_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            roadmap_rel = "project/" + "roadmap.md"
+            promoted_rel = "project/" + "plan-incubation/promoted.md"
+            unpromoted_rel = "project/" + "plan-incubation/unpromoted.md"
+            (root / roadmap_rel).write_text("# Roadmap\n", encoding="utf-8")
+            (root / promoted_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / promoted_rel).write_text(
+                "---\n"
+                'topic: "promoted"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                'related_roadmap: "project/roadmap.md"\n'
+                'related_roadmap_item: "dogfood-hook-delegation-overblock-fidelity"\n'
+                'promoted_to: "project/roadmap.md"\n'
+                "---\n"
+                "# promoted\n",
+                encoding="utf-8",
+            )
+            (root / unpromoted_rel).write_text(
+                "---\n"
+                'topic: "unpromoted"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# unpromoted\n",
+                encoding="utf-8",
+            )
+            cases = {
+                "note_without_roadmap": [promoted_rel],
+                "roadmap_with_unpromoted_note": [roadmap_rel, unpromoted_rel],
+                "broad_incubation_directory": [roadmap_rel, "project/plan-incubation"],
+            }
+
+            for name, pathspecs in cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps(
+                            {
+                                "toolName": "shell_command",
+                                "command": " ".join(["git", "add", "--", *pathspecs]),
+                            }
+                        ),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+
     def test_hooks_pre_tool_allows_route_produced_lifecycle_commit_with_coherent_staged_set(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

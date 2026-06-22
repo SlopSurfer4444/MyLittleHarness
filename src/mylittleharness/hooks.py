@@ -431,7 +431,7 @@ POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS = {
     "-p",
 }
 POST_CLOSEOUT_STAGE_BROAD_PATHS = {".", "./", "*", ":/", ":/."}
-GIT_STAGE_EXACT_PATHSPEC_OPTIONS = {"-f", "--force"}
+GIT_STAGE_EXACT_PATHSPEC_OPTIONS = {"-f", "--force", "-n", "--dry-run"}
 POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES = (
     ".git/",
     ".mylittleharness/generated/",
@@ -3832,14 +3832,16 @@ def _is_post_closeout_lifecycle_route_stage_path(inventory: Inventory, path: str
 
 
 def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, command: str) -> bool:
-    if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
-        return False
     if _has_shell_command_separator(command):
         return False
     subcommand, _tokens, _index = _git_command_context(command)
     if subcommand not in {"add", "stage"}:
         return False
     pathspecs = _git_stage_pathspecs(command)
+    if _coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs):
+        return True
+    if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
+        return False
     return bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
 
 
@@ -4605,6 +4607,9 @@ def _is_reviewed_lifecycle_finalization_evidence_file(inventory: Inventory, path
 def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
     if _active_plan_ready_for_route_produced_lifecycle_git(inventory) and _coherent_route_produced_lifecycle_paths(inventory, paths):
         return _normalized_route_produced_lifecycle_paths(inventory, paths)
+    roadmap_promotion_paths = _coherent_roadmap_promotion_checkpoint_paths(inventory, paths)
+    if roadmap_promotion_paths:
+        return roadmap_promotion_paths
     post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
     if post_closeout_route_paths:
         return post_closeout_route_paths
@@ -4873,6 +4878,24 @@ def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, path
     if not archive_sources <= research_paths:
         return set()
     return paths
+
+
+def _coherent_roadmap_promotion_checkpoint_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> set[str]:
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return set()
+    roadmap_rel = "project/" + "roadmap.md"
+    incubation_paths = {path for path in normalized if _is_meta_feedback_incubation_route_path(path)}
+    if roadmap_rel not in normalized or not incubation_paths or normalized != incubation_paths | {roadmap_rel}:
+        return set()
+    if not all(_is_reviewed_roadmap_promoted_incubation_file(inventory, path) for path in incubation_paths):
+        return set()
+    return normalized
 
 
 def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
@@ -5448,12 +5471,40 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
     return has_route_provenance and has_meta_feedback_cluster and has_fix_candidate and has_hook_blocker_scope and has_boundary
 
 
+def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: str) -> bool:
+    if not _is_meta_feedback_incubation_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    source = str(data.get("source") or "").strip().casefold()
+    related_roadmap = _normalize_hook_path(str(data.get("related_roadmap") or "")).casefold()
+    related_item = str(data.get("related_roadmap_item") or "").strip()
+    promoted_to = _normalize_hook_path(str(data.get("promoted_to") or "")).casefold()
+    return (
+        source == "mylittleharness incubation route"
+        and related_roadmap == "project/roadmap.md"
+        and bool(related_item)
+        and promoted_to == "project/roadmap.md"
+    )
+
+
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
         "post-closeout-route-package,worker-run-receipt-refs,retention-receipt-refs,verification/decision-evidence-package,"
         "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
-        "meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
+        "roadmap-promotion-package,meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
         "delegated-neighbor-bootstrap-scaffold"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
