@@ -35197,6 +35197,93 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-push", exact_main_refspec_push_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", exact_main_refspec_push_codes)
 
+    def test_hooks_pre_tool_allows_live_product_source_main_push_when_active_phase_complete(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="complete")
+            product_root = base / "product"
+            (product_root / "project").mkdir(parents=True)
+            (product_root / "project" / "project-state.md").write_text("dirty owner state\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "complete"',
+                    f'phase_status: "complete"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+
+            allowed_inputs = {
+                "plain_main": "git " + "push origin main",
+                "head_to_main": "git " + "push origin HEAD:refs/heads/main",
+            }
+            unsafe_inputs = {
+                "force": "git " + "push --force origin main",
+                "wrong_target": "git " + "push origin HEAD:refs/heads/dev",
+                "tag": "git " + "push origin refs/tags/v1.0.0",
+            }
+
+            for name, command in allowed_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "workdir": str(product_root), "command": command}),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertIn("phase_status=complete", messages)
+
+            for name, command in unsafe_inputs.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "workdir": str(product_root), "command": command}),
+                    )
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-product-source-vcs-push", finding_codes)
+
+    def test_hooks_pre_tool_guides_live_product_source_main_push_before_active_phase_complete(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            hook_input = json.dumps(
+                {"toolName": "shell_command", "workdir": str(product_root), "command": "git " + "push origin main"}
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-product-source-vcs-push-before-phase-complete", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("stage the coherent route-produced lifecycle set", messages)
+            self.assertIn("product-source main publication push", messages)
+            self.assertIn("phase_status=complete", messages)
+
     def test_hooks_pre_tool_allows_exact_product_release_publication_push_when_ready(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

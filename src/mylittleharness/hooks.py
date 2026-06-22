@@ -1714,6 +1714,10 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_product_source_release_publication_push = _is_product_source_release_publication_push_command(
         inventory, data, command
     )
+    block_product_source_vcs_push_before_phase_complete = (
+        _active_plan_blocks_product_source_vcs_push(inventory)
+        and _is_product_source_vcs_push_candidate(inventory, data, command)
+    )
     allow_product_source_vcs_push = (
         allow_product_source_release_publication_push
         or _is_product_source_vcs_push_command(inventory, data, command)
@@ -1971,8 +1975,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-allow-product-source-vcs-push",
                 (
                     "allowed ordinary non-force Git push from the configured product_source_root workdir after "
-                    "plan_status=none; force, mirror, delete, broad refspec, operating-root lifecycle mutation, "
-                    "release, and future lifecycle decisions remain unapproved"
+                    "plan_status=none or active phase_status=complete; force, mirror, delete, broad refspec, "
+                    "operating-root lifecycle mutation, release, and future lifecycle decisions remain unapproved"
                 ),
                 paths[0] if paths else None,
             )
@@ -2229,6 +2233,20 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
+    if block_product_source_vcs_push_before_phase_complete:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-product-source-vcs-push-before-phase-complete",
+                (
+                    "blocked ordinary product-source main publication push while the active plan phase is not complete; "
+                    "finish verification and record phase_status=complete first, then rerun the exact product-root "
+                    "publication command; next_safe_command=mylittleharness --root <root> writeback --dry-run "
+                    "--phase-status complete --docs-decision <updated|not-needed|uncertain>"
+                ),
+                "project/implementation-plan.md",
+            )
+        )
     if (
         _looks_like_git_stage_or_commit(mutation_check_lowered)
         and not allow_apply_patch_intent
@@ -2242,6 +2260,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_read_only_source_paths
         and not allow_reviewed_local_vcs_checkpoint
         and not allow_reviewed_local_vcs_delegation
+        and not block_product_source_vcs_push_before_phase_complete
     ):
         next_safe = _git_mutation_next_safe_command(inventory, data, command)
         if reviewed_local_vcs_checkpoint.blocked_reason:
@@ -3970,7 +3989,13 @@ def _is_product_source_vcs_commit_command(inventory: Inventory, data: dict[str, 
 
 
 def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
-    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+    if _active_plan_blocks_product_source_vcs_push(inventory):
+        return False
+    return _is_product_source_vcs_push_candidate(inventory, data, command)
+
+
+def _is_product_source_vcs_push_candidate(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if _has_shell_command_separator(command):
         return False
     base_root, product_root = _product_source_vcs_roots(inventory, data, command)
     if base_root is None or product_root is None:
@@ -3997,7 +4022,7 @@ def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, ob
 def _is_product_source_release_publication_push_command(
     inventory: Inventory, data: dict[str, object], command: str
 ) -> bool:
-    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+    if _active_plan_blocks_product_source_vcs_push(inventory) or _has_shell_command_separator(command):
         return False
     base_root, product_root = _product_source_vcs_roots(inventory, data, command)
     if base_root is None or product_root is None:
@@ -7024,6 +7049,13 @@ def _is_code_path(path: str) -> bool:
 def _has_active_plan(inventory: Inventory) -> bool:
     state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     return str(state.get("plan_status") or "").strip().casefold() == "active" and bool(str(state.get("active_plan") or "").strip())
+
+
+def _active_plan_blocks_product_source_vcs_push(inventory: Inventory) -> bool:
+    if not _has_active_plan(inventory):
+        return False
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return str(state.get("phase_status") or "").strip().casefold() != "complete"
 
 
 def _is_lifecycle_authority_path(path: str) -> bool:
