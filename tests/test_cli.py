@@ -58,7 +58,15 @@ from mylittleharness.projection_artifacts import (
     mark_projection_cache_dirty,
 )
 from mylittleharness.projection_index import INDEX_REL_PATH
-from mylittleharness.reporting import command_actions_for_report, next_safe_routes_for_report, render_report
+from mylittleharness.reporting import (
+    command_actions_for_report,
+    compact_summary_for_report,
+    next_safe_routes_for_report,
+    operator_diagnostics_for_report,
+    render_quick_check_report,
+    render_report,
+    work_result_capsule_for_report,
+)
 from mylittleharness.research_distill import research_distill_quality_problem
 from mylittleharness.root_boundary import (
     first_symlink_prefix,
@@ -42421,6 +42429,51 @@ class CliTests(unittest.TestCase):
             self.assertIn("Dirty Route Summary", rendered)
             self.assertIn("Actionable Findings", rendered)
             self.assertNotIn("\nSources\n", rendered)
+
+    def test_route_metadata_source_members_warning_is_nonblocking_readiness_signal(self) -> None:
+        finding = Finding(
+            "warn",
+            "route-metadata-changed-source-members",
+            "Changed verification route metadata lacks source_members; advisory only until route ownership is clear.",
+            "project/verification/smoke.md",
+        )
+        findings = [finding]
+
+        capsule = work_result_capsule_for_report("check --quick", "warn", findings, [])
+        summary = compact_summary_for_report(
+            "check --quick",
+            "warn",
+            findings,
+            work_result_outcome=capsule.outcome,
+        )
+        diagnostics = operator_diagnostics_for_report(
+            "check --quick",
+            "warn",
+            findings,
+            work_result_outcome=capsule.outcome,
+        )
+        rendered = render_quick_check_report(
+            Path("repo"),
+            "warn",
+            [],
+            [("Route metadata", findings)],
+            [],
+        )
+
+        self.assertEqual("completed", capsule.outcome)
+        self.assertNotIn("review warnings", capsule.next_safe_command)
+        self.assertEqual(0, summary["warning_classification"]["blocking_warning_count"])
+        self.assertEqual(1, summary["warning_classification"]["nonblocking_warning_count"])
+        self.assertEqual(
+            ["route-metadata-changed-source-members"],
+            summary["warning_classification"]["nonblocking_warning_codes_sample"],
+        )
+        self.assertEqual(0, summary["counts"]["blocking_warnings"])
+        self.assertEqual(1, summary["counts"]["nonblocking_warnings"])
+        self.assertEqual(0, diagnostics["counts"]["blocking_warnings"])
+        self.assertEqual(1, diagnostics["counts"]["nonblocking_warnings"])
+        self.assertIn("- warning_classification: 0 blocking; 1 nonblocking; 0 known-environment", rendered)
+        self.assertIn("route-metadata-changed-source-members", rendered)
 
     def test_check_quick_json_reports_summary_without_not_checked_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

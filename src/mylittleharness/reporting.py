@@ -309,6 +309,11 @@ def render_sectioned_report(
 
 QUICK_ACTIONABLE_FINDING_LIMIT = 30
 QUICK_POSTURE_FINDING_LIMIT = 8
+ADVISORY_ROUTE_METADATA_WARNING_CODES = frozenset(
+    {
+        "route-metadata-changed-source-members",
+    }
+)
 
 
 def render_quick_check_report(
@@ -324,6 +329,9 @@ def render_quick_check_report(
     errors = [finding for finding in flat_findings if finding.severity == "error"]
     warnings = [finding for finding in flat_findings if finding.severity == "warn"]
     infos = [finding for finding in flat_findings if finding.severity == "info"]
+    nonblocking_warnings = _nonblocking_warnings(warnings)
+    blocking_warnings = _blocking_warnings(warnings)
+    known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
     actionable = [finding for finding in flat_findings if finding.severity in {"error", "warn"}]
     posture_findings = [
         finding
@@ -339,6 +347,10 @@ def render_quick_check_report(
     lines.extend(_render_work_result_section("check --quick", result, flat_findings, suggestions))
     lines.append("Quick Summary")
     lines.append(f"- findings: {len(flat_findings)} total; {len(errors)} error(s); {len(warnings)} warning(s); {len(infos)} info finding(s)")
+    lines.append(
+        f"- warning_classification: {len(blocking_warnings)} blocking; "
+        f"{len(nonblocking_warnings)} nonblocking; {len(known_environment_warnings)} known-environment"
+    )
     lines.append(f"- sections: {len(sections)} checked")
     lines.append(f"- source_inventory_hidden: {len(sources)} inventory source(s); rerun without --quick for the full source list")
     lines.append("")
@@ -443,7 +455,7 @@ def operator_diagnostics_for_report(
 ) -> dict[str, object]:
     warnings = [finding for finding in findings if finding.severity == "warn"]
     errors = [finding for finding in findings if finding.severity == "error"]
-    nonblocking_warnings = [finding for finding in warnings if _is_nonblocking_warning(finding)]
+    nonblocking_warnings = _nonblocking_warnings(warnings)
     known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
     next_safe = next_safe_routes_for_report(findings)
     first_route = next_safe[0] if next_safe else None
@@ -513,7 +525,8 @@ def compact_summary_for_report(
     warnings = [finding for finding in findings if finding.severity == "warn"]
     errors = [finding for finding in findings if finding.severity == "error"]
     infos = [finding for finding in findings if finding.severity == "info"]
-    nonblocking_warnings = [finding for finding in warnings if _is_nonblocking_warning(finding)]
+    nonblocking_warnings = _nonblocking_warnings(warnings)
+    blocking_warnings = _blocking_warnings(warnings)
     known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
     next_safe_summary = _next_safe_route_summary(findings)
     return {
@@ -533,7 +546,7 @@ def compact_summary_for_report(
             "infos": len(infos),
             "sections": len(sections or []),
             "suggestions": len(suggestions),
-            "blocking_warnings": len(warnings) - len(nonblocking_warnings),
+            "blocking_warnings": len(blocking_warnings),
             "nonblocking_warnings": len(nonblocking_warnings),
             "known_environment_warnings": len(known_environment_warnings),
         },
@@ -547,12 +560,10 @@ def compact_summary_for_report(
         "warning_classification": {
             "warning_count": len(warnings),
             "nonblocking_warning_count": len(nonblocking_warnings),
-            "blocking_warning_count": len(warnings) - len(nonblocking_warnings),
+            "blocking_warning_count": len(blocking_warnings),
             "known_environment_warning_count": len(known_environment_warnings),
             "nonblocking_warning_codes_sample": _finding_code_sample(nonblocking_warnings),
-            "blocking_warning_codes_sample": _finding_code_sample(
-                [finding for finding in warnings if finding not in nonblocking_warnings]
-            ),
+            "blocking_warning_codes_sample": _finding_code_sample(blocking_warnings),
             "classification_boundary": (
                 "classification keeps warnings visible for operator review; it does not suppress warnings, "
                 "change exit codes, or approve lifecycle, archive, roadmap, Git, provider, cache, or release actions"
@@ -716,6 +727,8 @@ def _is_known_environment_warning(finding: Finding) -> bool:
 
 
 def _is_nonblocking_warning(finding: Finding) -> bool:
+    if finding.code in ADVISORY_ROUTE_METADATA_WARNING_CODES:
+        return True
     text = _finding_search_text(finding)
     return _is_known_environment_warning(finding) or any(
         marker in text
@@ -731,6 +744,14 @@ def _is_nonblocking_warning(finding: Finding) -> bool:
             "generated-cache",
         )
     )
+
+
+def _nonblocking_warnings(warnings: list[Finding]) -> list[Finding]:
+    return [finding for finding in warnings if _is_nonblocking_warning(finding)]
+
+
+def _blocking_warnings(warnings: list[Finding]) -> list[Finding]:
+    return [finding for finding in warnings if not _is_nonblocking_warning(finding)]
 
 
 def _next_safe_route_summary(findings: list[Finding]) -> dict[str, object]:
@@ -899,8 +920,8 @@ def work_result_capsule_for_report(
         nonblocking_compaction_hygiene
         or nonblocking_incubation_archive_hygiene
     )
-    blocking_warnings = warnings and not nonblocking_warning_hygiene
-    actionable_warnings = [] if nonblocking_warning_hygiene else warnings
+    actionable_warnings = [] if nonblocking_warning_hygiene else _blocking_warnings(warnings)
+    blocking_warnings = bool(actionable_warnings)
 
     if errors:
         outcome = "refused" if apply or base_command in MUTATING_REPORT_COMMANDS else "blocked"
@@ -977,7 +998,7 @@ def work_result_capsule_for_report(
             apply,
             read_only,
             findings,
-            warnings,
+            warnings if nonblocking_warning_hygiene else actionable_warnings,
             errors,
             suggestions,
             nonblocking_compaction_hygiene,
