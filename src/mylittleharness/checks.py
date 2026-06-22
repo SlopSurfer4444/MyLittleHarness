@@ -1233,7 +1233,18 @@ SPEC_SUPERSESSION_TARGET_FIELDS = (
     "deprecation_path",
     "archived_to",
 )
-ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "attachments", "decisions", "incubation", "operator-prompts", "research", "roadmap", "stable-specs", "verification"}
+ROUTE_METADATA_VALIDATED_ROUTES = {
+    "adrs",
+    "attachments",
+    "decisions",
+    "drafts",
+    "incubation",
+    "operator-prompts",
+    "research",
+    "roadmap",
+    "stable-specs",
+    "verification",
+}
 ROUTE_METADATA_STATUS_VALUES = {
     "accepted",
     "active",
@@ -1259,6 +1270,7 @@ ROUTE_METADATA_STATUS_VALUES = {
     "pending",
     "proposed",
     "promoted",
+    "ready-for-implementation",
     "rejected",
     "research-ready",
     "skipped",
@@ -1272,9 +1284,20 @@ ROUTE_METADATA_STATUS_HINTS_BY_ROUTE = {
     "adrs": ("draft", "accepted", "superseded", "archived"),
     "attachments": ("imported", "archived", "stale"),
     "decisions": ("draft", "accepted", "superseded", "archived"),
+    "drafts": ("draft", "active", "superseded", "archived", "stale"),
     "incubation": ("incubating", "implemented", "rejected", "superseded", "archived", "stale"),
     "operator-prompts": ("active", "archived", "superseded"),
-    "research": ("imported", "distilled", "compared", "research-ready", "accepted", "superseded", "archived", "stale"),
+    "research": (
+        "imported",
+        "distilled",
+        "compared",
+        "research-ready",
+        "ready-for-implementation",
+        "accepted",
+        "superseded",
+        "archived",
+        "stale",
+    ),
     "roadmap": ("proposed", "accepted", "active", "blocked", "done", "deferred", "rejected", "superseded"),
     "stable-specs": ("draft", "accepted", "synced", "stale", "superseded", "archived"),
     "verification": ("pending", "passed", "failed", "partial", "partially-verified", "archived"),
@@ -1303,6 +1326,10 @@ ROUTE_METADATA_LIFECYCLE_STATES = {
     "drift_detected": (
         "repo-visible authority disagrees with recorded route metadata or evidence",
         "mylittleharness --root <root> suggest --intent reconcile drift",
+    ),
+    "ready_for_implementation": (
+        "research evidence is ready to feed a reviewed implementation plan, but is not implementation approval",
+        "mylittleharness --root <root> plan --dry-run --roadmap-item <id>",
     ),
     "superseded": (
         "route has been replaced and should point at superseding authority before reuse",
@@ -13217,6 +13244,18 @@ def _route_metadata_destination_finding(surface: Surface, key: str, rel_path: st
         return None
     if route_destination_matches(policy, rel_path):
         return None
+    if key == "source_members" and rel_path.casefold().startswith("output/"):
+        return Finding(
+            "warn",
+            "route-metadata-destination",
+            (
+                f"{surface.rel_path} source_members must point to route-owned source evidence, not raw generated "
+                f"output; use output_refs on agent-run/verification evidence, or import the artifact under "
+                f"project/verification or project/attachments before referencing it: {rel_path}"
+            ),
+            surface.rel_path,
+            line,
+        )
     return Finding(
         "warn",
         "route-metadata-destination",

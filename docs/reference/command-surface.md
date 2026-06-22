@@ -57,12 +57,14 @@ participate in review-token matching through the closeout payload; changing the
 file contents after dry-run requires a fresh dry-run token.
 Roadmap relationship fields use a narrow vocabulary. `source_incubation` and
 `related_incubation` point to incubation routes, `source_research` points to
-research routes, `source_members` points to incubation, research, verification,
-or attachment evidence routes, and `related_plan`/`archived_plan` point to
-implementation plans. External evidence must first be imported or adopted
-through a route such as `research-import`, `research-distill`, or
-`attachment-import`; product source and test paths belong in `target_artifacts`
-and verification commands, not source relationship fields. `evidence --record`
+research routes, `source_members` points to draft, incubation, research,
+verification, or attachment evidence routes, and `related_plan`/`archived_plan`
+point to implementation plans. Generated `output/...` paths belong in
+`output_refs` on agent-run or verification evidence, or must first be imported
+or adopted through a route such as `research-import`, `research-distill`,
+`attachment-import`, or evidence recording. Product source and test paths belong
+in `target_artifacts` and verification commands, not source relationship fields.
+`evidence --record`
 accepts ordinary root-relative refs and, when `product_source_root` is
 configured, `product-source:<relative-path>` refs for product-source files in
 input, output, claimed, and changed-file fields. Product refs are hashed as

@@ -622,8 +622,6 @@ def _source_relationship_routes(item: RoadmapItem) -> tuple[str, ...]:
         rel = _normalize_rel(_field_scalar(item.fields, field))
         if rel:
             rels.append(rel)
-    for rel in _field_list(item.fields, "source_members"):
-        rels.append(_normalize_rel(rel))
     return tuple(rel for rel in dict.fromkeys(rels) if _source_relationship_route_allowed(rel))
 
 

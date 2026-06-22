@@ -91,6 +91,13 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "operating memory; not lifecycle authority",
     ),
     MemoryRoute(
+        "drafts",
+        "project/drafts/*.md",
+        "route-visible working drafts and sketches before incubation, research, or verification adoption",
+        "by task",
+        "draft advisory; not lifecycle authority",
+    ),
+    MemoryRoute(
         "research",
         "project/research/*.md",
         "durable research findings and distilled external evidence",
@@ -260,6 +267,7 @@ CHANGED_ROUTE_METADATA_PROFILES: dict[str, ChangedRouteMetadataProfile] = {
     "decisions": ChangedRouteMetadataProfile("decisions", ("status",), ()),
     "incubation": ChangedRouteMetadataProfile("incubation", ("status",), ("related_plan",)),
     "operator-prompts": ChangedRouteMetadataProfile("operator-prompts", ("status",), ("source_route",)),
+    "drafts": ChangedRouteMetadataProfile("drafts", ("status",), ()),
     "research": ChangedRouteMetadataProfile("research", ("status",), ("source_members",)),
     "attachments": ChangedRouteMetadataProfile("attachments", ("status",), ("related_research",)),
     "roadmap": ChangedRouteMetadataProfile("roadmap", ("status",), ()),
@@ -291,14 +299,15 @@ ROUTE_DESTINATION_POLICIES: dict[str, RouteDestinationPolicy] = {
     "related_doc": RouteDestinationPolicy(frozenset({"product-docs"}), (), "a product-docs route"),
     "related_docs": RouteDestinationPolicy(frozenset({"product-docs"}), (), "a product-docs route"),
     "source_members": RouteDestinationPolicy(
-        frozenset({"attachments", "incubation", "research", "verification"}),
+        frozenset({"attachments", "drafts", "incubation", "research", "verification"}),
         (
             "project/archive/reference/attachments/",
+            "project/archive/reference/drafts/",
             "project/archive/reference/incubation/",
             "project/archive/reference/research/",
             "project/archive/reference/verification/",
         ),
-        "an attachment, incubation, research, or verification route",
+        "an attachment, draft, incubation, research, or verification route",
     ),
 }
 SAME_ROUTE_DESTINATION_FIELDS = frozenset({"supersedes", "superseded_by"})
@@ -932,6 +941,7 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
         ("project/archive/", "archive"),
         ("project/attachments/", "attachments"),
         ("project/decisions/", "decisions"),
+        ("project/drafts/", "drafts"),
         ("project/operator-prompts/", "operator-prompts"),
         ("project/plan-incubation/", "incubation"),
         ("project/research/", "research"),

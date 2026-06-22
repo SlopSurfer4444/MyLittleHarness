@@ -2517,6 +2517,75 @@ class CliTests(unittest.TestCase):
                     self.assertIn("project/specs/workflow/wrong-implementation.md implemented_by must point to an active or archived plan route", rendered)
                     self.assertNotIn("project/plan-incubation/wrong-status.md status='accepted'; lifecycle_state='accepted'", rendered)
 
+    def test_group_e_route_metadata_accepts_research_ready_synonym_and_draft_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/research").mkdir()
+            (root / "project/research/ready.md").write_text(
+                "---\n"
+                'status: "ready-for-implementation"\n'
+                "---\n"
+                "# Ready Research\n",
+                encoding="utf-8",
+            )
+            (root / "project/drafts").mkdir()
+            (root / "project/drafts/sketch.md").write_text(
+                "---\n"
+                'status: "draft"\n'
+                "---\n"
+                "# Sketch\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "validation"])
+
+            rendered = output.getvalue()
+            inventory = load_inventory(root)
+            status_warnings = [
+                finding
+                for finding in validation_findings(inventory)
+                if finding.code == "route-metadata-status"
+                and finding.source in {"project/research/ready.md", "project/drafts/sketch.md"}
+            ]
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertEqual("drafts", inventory.surface_by_rel["project/drafts/sketch.md"].memory_route)
+            self.assertEqual([], status_warnings)
+            self.assertIn("project/research/ready.md status='ready-for-implementation'", rendered)
+            self.assertIn("lifecycle_state='ready_for_implementation'", rendered)
+            self.assertIn("project/drafts/sketch.md status='draft'", rendered)
+
+    def test_group_e_source_members_output_reference_guidance_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            verification = root / "project/verification/output-ref.md"
+            verification.parent.mkdir(parents=True, exist_ok=True)
+            verification.write_text(
+                "---\n"
+                'status: "passed"\n'
+                "source_members:\n"
+                '  - "output/run-result.json"\n'
+                "---\n"
+                "# Output Ref\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "validation"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-metadata-destination", rendered)
+            self.assertIn("source_members must point to route-owned source evidence, not raw generated output", rendered)
+            self.assertIn("use output_refs on agent-run/verification evidence", rendered)
+            self.assertIn("project/verification or project/attachments", rendered)
+
     def test_check_allows_empty_optional_route_relationship_lists_without_hiding_invalid_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -20976,6 +21045,12 @@ class CliTests(unittest.TestCase):
                 ["--source-member", "src/mylittleharness/roadmap.py"],
                 "product source and test paths belong in `target_artifacts`",
             ),
+            (
+                "generated output as source evidence",
+                lambda root: None,
+                ["--source-member", "output/run-result.json"],
+                "generated output paths belong in `output_refs`",
+            ),
         )
         for label, arrange, relationship_args, expected_hint in cases:
             with self.subTest(label=label):
@@ -21068,6 +21143,13 @@ class CliTests(unittest.TestCase):
                 "source_members",
                 "src/mylittleharness/roadmap.py",
                 "product source and test paths belong in `target_artifacts`",
+            ),
+            (
+                "generated output as source evidence",
+                lambda root: None,
+                "source_members",
+                "output/run-result.json",
+                "generated output paths belong in `output_refs`",
             ),
         )
         for label, arrange, field, value, expected_hint in cases:
@@ -42474,6 +42556,48 @@ class CliTests(unittest.TestCase):
         self.assertEqual(1, diagnostics["counts"]["nonblocking_warnings"])
         self.assertIn("- warning_classification: 0 blocking; 1 nonblocking; 0 known-environment", rendered)
         self.assertIn("route-metadata-changed-source-members", rendered)
+
+    def test_check_quick_json_classifies_actual_changed_source_members_warning_as_nonblocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / ".git").mkdir()
+            verification = root / "project/verification/smoke.md"
+            verification.parent.mkdir(parents=True, exist_ok=True)
+            archived_plan = root / "project/archive/plans/smoke-plan.md"
+            archived_plan.parent.mkdir(parents=True, exist_ok=True)
+            archived_plan.write_text("# Smoke Plan\n", encoding="utf-8")
+            verification.write_text(
+                "---\n"
+                'status: "passed"\n'
+                'related_plan: "project/archive/plans/smoke-plan.md"\n'
+                "---\n"
+                "# Smoke Evidence\n",
+                encoding="utf-8",
+            )
+            posture = VcsPosture(
+                root=root,
+                git_available=True,
+                is_worktree=True,
+                state="dirty",
+                changed_paths=(VcsChangedPath("M", "project/verification/smoke.md"),),
+            )
+
+            output = io.StringIO()
+            with patch("mylittleharness.checks.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--quick", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output.getvalue())
+            summary = payload["summary"]
+            diagnostics = payload["operator_diagnostics"]
+            self.assertEqual(0, summary["warning_classification"]["blocking_warning_count"])
+            self.assertGreaterEqual(summary["warning_classification"]["nonblocking_warning_count"], 1)
+            self.assertIn(
+                "route-metadata-changed-source-members",
+                summary["warning_classification"]["nonblocking_warning_codes_sample"],
+            )
+            self.assertEqual(0, diagnostics["counts"]["blocking_warnings"])
+            self.assertGreaterEqual(diagnostics["counts"]["nonblocking_warnings"], 1)
 
     def test_check_quick_json_reports_summary_without_not_checked_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

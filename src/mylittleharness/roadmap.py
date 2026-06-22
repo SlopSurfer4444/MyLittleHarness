@@ -5383,6 +5383,12 @@ def _roadmap_relationship_recovery_hint(field: str, rel_path: str) -> str:
             "implementation plan routes belong in `related_plan` or `archived_plan`; "
             "use `source_members` only for evidence routes"
         )
+    if folded.startswith("output/"):
+        return (
+            "generated output paths belong in `output_refs` on agent-run/verification evidence, or should first "
+            "be imported/adopted under `project/verification` or `project/attachments`; source relationship "
+            "fields only point at route-owned evidence"
+        )
     if folded.startswith(("src/", "tests/")):
         return (
             "product source and test paths belong in `target_artifacts` and verification commands, "
@@ -5395,7 +5401,7 @@ def _roadmap_relationship_recovery_hint(field: str, rel_path: str) -> str:
         )
     if field == SOURCE_MEMBERS_FIELD:
         return (
-            "`source_members` accepts incubation, research, verification, or attachment routes; "
+            "`source_members` accepts draft, incubation, research, verification, or attachment routes; "
             "use `related_plan`/`archived_plan` for plans and `target_artifacts` for product code"
         )
     if field in {"source_incubation", RELATED_INCUBATION_FIELD}:

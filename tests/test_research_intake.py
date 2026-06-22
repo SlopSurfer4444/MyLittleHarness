@@ -224,32 +224,39 @@ class ResearchIntakeTests(unittest.TestCase):
             self.assertTrue(text.endswith(body))
 
     def test_adopt_existing_is_idempotent_for_valid_research_frontmatter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_live_root(Path(tmp))
-            target = root / "project/research/imported.md"
-            target.parent.mkdir(parents=True)
-            target.write_text("---\nstatus: \"imported\"\n---\n# Imported\n", encoding="utf-8")
-            before = snapshot_tree(root)
+        cases = (
+            ("imported.md", "imported"),
+            ("ready.md", "ready-for-implementation"),
+            ("accepted.md", "accepted"),
+        )
+        for name, status in cases:
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_live_root(Path(tmp))
+                    target = root / "project/research" / name
+                    target.parent.mkdir(parents=True)
+                    target.write_text(f"---\nstatus: \"{status}\"\n---\n# Imported\n", encoding="utf-8")
+                    before = snapshot_tree(root)
 
-            findings = research_import_apply_findings(
-                load_inventory(root),
-                make_research_import_request(
-                    None,
-                    None,
-                    target="project/research/imported.md",
-                    adopt_existing=True,
-                ),
-            )
+                    findings = research_import_apply_findings(
+                        load_inventory(root),
+                        make_research_import_request(
+                            None,
+                            None,
+                            target=f"project/research/{name}",
+                            adopt_existing=True,
+                        ),
+                    )
 
-            rendered = "\n".join(finding.render() for finding in findings)
-            self.assertEqual(before, snapshot_tree(root))
-            self.assertIn("research-import-adopt-existing-already-route-visible", rendered)
-            self.assertNotIn("research-import-adopt-existing-route-write", rendered)
+                    rendered = "\n".join(finding.render() for finding in findings)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("research-import-adopt-existing-already-route-visible", rendered)
+                    self.assertNotIn("research-import-adopt-existing-route-write", rendered)
 
     def test_adopt_existing_refuses_malformed_or_nonresearch_frontmatter_without_writes(self) -> None:
         cases = (
             ("bad.md", "---\nstatus: \"imported\"\n- dangling\n---\n# Bad\n", "frontmatter is malformed"),
-            ("wrong.md", "---\nstatus: \"accepted\"\n---\n# Wrong\n", "no recognized research status"),
+            ("wrong.md", "---\nstatus: \"triaged\"\n---\n# Wrong\n", "no recognized research status"),
         )
         for name, text, expected in cases:
             with self.subTest(name=name):

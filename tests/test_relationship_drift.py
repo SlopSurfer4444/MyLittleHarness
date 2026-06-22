@@ -99,6 +99,33 @@ class RelationshipDriftTests(unittest.TestCase):
             self.assertIn('related_roadmap_item: "active-work"', source_text)
             self.assertIn('related_plan: "project/implementation-plan.md"', source_text)
 
+    def test_apply_does_not_treat_source_members_as_reciprocal_source_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp), active_item="active-work")
+            source_rel = "project/plan-incubation/member.md"
+            write_source(root, source_rel)
+            write_roadmap(
+                root,
+                item_id="active-work",
+                title="Active Work",
+                status="accepted",
+                related_plan="",
+                archived_plan="",
+                source_incubation="",
+                source_members=(source_rel,),
+            )
+
+            apply_code, apply_rendered = run_cli(root, "relationship-drift", "--apply", "--roadmap-item", "active-work")
+            self.assertEqual(apply_code, 0)
+            self.assertNotIn("relationship-drift-source-metadata", apply_rendered)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            source_text = (root / source_rel).read_text(encoding="utf-8")
+            self.assertIn("- `related_plan`: `project/implementation-plan.md`", roadmap_text)
+            self.assertNotIn("related_roadmap", source_text)
+            self.assertNotIn("related_roadmap_item", source_text)
+            self.assertNotIn("promoted_to", source_text)
+            self.assertNotIn("related_plan", source_text)
+
 
 def run_cli(root: Path, *args: str) -> tuple[int, str]:
     output = io.StringIO()
@@ -169,7 +196,9 @@ def write_roadmap(
     related_plan: str,
     archived_plan: str,
     source_incubation: str,
+    source_members: tuple[str, ...] = (),
 ) -> None:
+    source_members_value = "[" + ", ".join(f'"{member}"' for member in source_members) + "]" if source_members else "[]"
     (root / "project/roadmap.md").write_text(
         "---\n"
         'id: "memory-routing-roadmap"\n'
@@ -189,7 +218,7 @@ def write_roadmap(
         "- `dependencies`: `[]`\n"
         f"- `source_incubation`: `{source_incubation}`\n"
         "- `source_research`: ``\n"
-        "- `source_members`: `[]`\n"
+        f"- `source_members`: `{source_members_value}`\n"
         "- `related_specs`: `[]`\n"
         f"- `related_plan`: `{related_plan}`\n"
         f"- `archived_plan`: `{archived_plan}`\n"
