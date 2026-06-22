@@ -31555,6 +31555,87 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_project_thread_prompt_with_route_authority_and_savepoint_context(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Create a project thread for the saved Symphony dogfood run. Read AGENTS.md, "
+                ".codex/project-workflow.toml, project/project-state.md, and project/roadmap.md first. "
+                "Use dashboard/check before edits. Use reviewed MLH route sequence: writeback --dry-run "
+                "before writeback --apply when the dry-run is clean. Coordinate exact local savepoint and "
+                "git commit only for the reviewed local-only checkpoint. Do not push/release/provider routing, "
+                "do not bypass hooks, and preserve repo-visible route authority."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Symphony dogfood"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-warn-reviewed-local-vcs-delegation", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_guarded_live_provider_handoff_context(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Handoff to a worker for live provider/API dogfood review. This is coordination context only: "
+                "read AGENTS.md, project/project-state.md, dashboard/check output, and repo-visible evidence first. "
+                "Use legal MLH dry-run/apply routes for any lifecycle movement. Keep local savepoints exact. "
+                "No provider routing, no push, and no release until preflight passes."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "handoff_thread",
+                    "parameters": {"prompt": prompt, "thread_id": "thread-1"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertTrue(
+                {
+                    "hooks-policy-allow-delegation-prompt-context",
+                    "hooks-policy-allow-read-only-subagent-delegation",
+                }
+                & finding_codes
+            )
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+
+    def test_hooks_pre_tool_blocks_delegation_prompt_with_direct_apply_and_push_shortcuts(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Create a project thread. Read AGENTS.md and project/project-state.md, use dashboard/check, "
+                "then run mylittleharness --root . writeback --apply and git push the result."
+            )
+            hook_input = json.dumps(
+                {
+                    "toolName": "create_thread",
+                    "parameters": {"prompt": prompt, "title": "Unsafe delegation"},
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+
     def test_hooks_pre_tool_allows_read_navigation_delegation_prompt_with_negated_route_guardrails(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

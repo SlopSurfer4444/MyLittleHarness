@@ -208,6 +208,46 @@ LOCAL_VCS_DELEGATION_BOUNDARY_MARKERS = (
     "without push",
     "without pushing",
 )
+SAFE_DELEGATION_ROUTE_CONTEXT_MARKERS = (
+    "agents.md",
+    ".codex/project-workflow.toml",
+    "project/project-state.md",
+    "project/roadmap.md",
+    "dashboard/check",
+    "dashboard",
+    "check",
+    "dry-run/apply",
+    "dry-run",
+    "dry run",
+    "mlh route",
+    "mlh routes",
+    "legal route",
+    "legal mlh",
+    "repo-visible",
+    "route authority",
+    "route-authority",
+    "local contract",
+    "local savepoint",
+    "local savepoints",
+    "main/local",
+    "exact staging",
+)
+SAFE_DELEGATION_BOUNDARY_MARKERS = (
+    "do not push",
+    "no push",
+    "without push",
+    "do not release",
+    "no release",
+    "without release",
+    "do not bypass",
+    "do not weaken",
+    "preserve",
+    "legal",
+    "reviewed",
+    "dry-run",
+    "dry run",
+    "preflight",
+)
 SUBAGENT_DELEGATION_FORBIDDEN_RE = re.compile(
     r"(?i)"
     r"(?:"
@@ -231,6 +271,7 @@ SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE = re.compile(
     r"(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r;]*\s--apply\b|"
     r"archive-active-plan\b|"
     r"mark\s+(?:roadmap\s+)?done\b|"
+    r"bypass(?:\s+[-\w]+){0,3}\b|"
     r"git\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
     r"apply_patch\b|"
     r"(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item)\b|"
@@ -241,7 +282,12 @@ SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE = re.compile(
 )
 SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE = re.compile(
     r"(?i)\b(?:do\s+not|don't|no|without)\s+"
-    r"(?:push(?:ing)?|release|releasing|publish(?:ing)?|provider|daemon|runtime|launcher)\b"
+    r"(?:"
+    r"(?:push(?:ing)?|release|releasing|publish(?:ing)?|provider(?:\s+routing)?|daemon|runtime|launcher)"
+    r"(?:\s*(?:/|,|and|or)\s*"
+    r"(?:push(?:ing)?|release|releasing|publish(?:ing)?|provider(?:\s+routing)?|daemon|runtime|launcher)"
+    r")*"
+    r")\b"
 )
 SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r"(?i)(?:"
@@ -251,6 +297,16 @@ SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r"\b(?:start|launch|serve|run)\s+(?:provider|daemon|runtime|launcher)\b|"
     r"\b(?:provider\s+routing|daemon\s+launch|runtime\s+launch|launcher\s+config)\b|"
     r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|apply_patch)\b"
+    r")"
+)
+SUBAGENT_DELEGATION_DIRECT_MUTATION_RE = re.compile(
+    r"(?i)\b(?:then|after(?:\s+inspection)?|afterward|now|immediately)\b[^\n\r.;]*"
+    r"(?:"
+    r"\bmy(?:littleharness)?\b[^\n\r.;]*\s--apply\b|"
+    r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r.;]*\s--apply\b|"
+    r"\bgit\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
+    r"\bapply_patch\b|"
+    r"\b(?:start|launch|serve|run)\s+(?:provider|daemon|runtime|launcher)\b"
     r")"
 )
 READ_ONLY_GIT_INSPECTION_COMMANDS = {
@@ -3103,7 +3159,11 @@ def _path_policy_findings(
             continue
         if route_rel in checkpoint_paths:
             continue
-        if reviewed_local_vcs_checkpoint_root is not None and _path_resolves_under_base_root(inventory, rel, reviewed_local_vcs_checkpoint_root):
+        if (
+            checkpoint_paths
+            and reviewed_local_vcs_checkpoint_root is not None
+            and _path_resolves_under_base_root(inventory, rel, reviewed_local_vcs_checkpoint_root)
+        ):
             continue
         if allow_delegation_prompt_context and (_is_lifecycle_route_path(rel) or _is_under_configured_product_root(inventory, rel)):
             continue
@@ -3213,14 +3273,34 @@ def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
     if _is_reviewed_local_vcs_delegation_prompt(raw):
         scrubbed = SUBAGENT_DELEGATION_LOCAL_VCS_RE.sub(" ", raw)
         scrubbed = _scrub_negated_subagent_delegation_guardrails(scrubbed)
-        return bool(SUBAGENT_DELEGATION_FORBIDDEN_RE.search(scrubbed) or SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed))
-    scrubbed = _scrub_negated_subagent_delegation_guardrails(raw)
+    else:
+        scrubbed = _scrub_negated_subagent_delegation_guardrails(raw)
+    if _is_safe_route_delegation_coordination_prompt(raw, scrubbed):
+        return False
     return bool(SUBAGENT_DELEGATION_FORBIDDEN_RE.search(scrubbed) or SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed))
 
 
 def _scrub_negated_subagent_delegation_guardrails(text: str) -> str:
     scrubbed = SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE.sub(" ", str(text or ""))
     return SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
+
+
+def _is_safe_route_delegation_coordination_prompt(raw: str, scrubbed: str) -> bool:
+    lowered = str(raw or "").casefold()
+    scrubbed_lowered = str(scrubbed or "").casefold()
+    if SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE.search(scrubbed):
+        return False
+    if SUBAGENT_DELEGATION_DIRECT_MUTATION_RE.search(scrubbed):
+        return False
+    if "--apply" in scrubbed_lowered and not any(
+        marker in lowered for marker in ("dry-run", "dry run", "reviewed", "legal mlh", "mlh route", "mlh routes")
+    ):
+        return False
+    context_hits = sum(1 for marker in SAFE_DELEGATION_ROUTE_CONTEXT_MARKERS if marker in lowered)
+    boundary_hits = sum(1 for marker in SAFE_DELEGATION_BOUNDARY_MARKERS if marker in lowered)
+    if context_hits < 2 or boundary_hits < 2:
+        return False
+    return any(marker in lowered for marker in ("create_thread", "handoff", "thread", "worker", "agent", "delegation"))
 
 
 def _is_reviewed_local_vcs_delegation_prompt(text: str) -> bool:
@@ -3817,11 +3897,14 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return False
     if any(_is_top_level_verification_checkpoint_path(_hook_route_rel_path(inventory, path) or path) for path in paths):
         return False
+    pathspecs = [] if _has_shell_command_separator(command) else _git_stage_pathspecs(command)
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, pathspecs or paths)
+    if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
+        return bool(_coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs))
     if all(_is_existing_lifecycle_route_file(inventory, path) for path in paths):
         return True
     if _has_shell_command_separator(command):
         return False
-    pathspecs = _git_stage_pathspecs(command)
     return bool(_coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, pathspecs))
 
 
@@ -4213,6 +4296,8 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
         if _coherent_post_closeout_lifecycle_vcs_stage_paths(inventory, pathspecs):
             return True
         return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in normalized)
+    if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
+        return False
     return all(_is_exact_post_closeout_stage_file(inventory, pathspec) for pathspec in pathspecs)
 
 
