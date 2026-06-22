@@ -33121,13 +33121,48 @@ class CliTests(unittest.TestCase):
                     "command": command + " | ConvertFrom-Json | Select-Object -ExpandProperty result",
                 }
             )
+            assignment_pipeline_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": "$j = " + command + " | ConvertFrom-Json",
+                }
+            )
+            powershell_summary_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": (
+                        "$j = "
+                        + command
+                        + " | ConvertFrom-Json; "
+                        "$summary = $j.PSObject.Properties['summary'].Value; "
+                        "$roadmap = $j.PSObject.Properties['roadmap'].Value; "
+                        "[pscustomobject]@{status=$summary.status; errors=$summary.errors; "
+                        "warnings=$summary.warnings; queued=$roadmap.queued_count} | ConvertTo-Json -Compress"
+                    ),
+                }
+            )
 
             direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_input)
             arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], arguments_input)
             parallel_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], parallel_input)
             pipeline_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], pipeline_input)
+            assignment_pipeline_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], assignment_pipeline_input
+            )
+            powershell_summary_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], powershell_summary_input
+            )
 
-            for checked_payload in (direct_payload, arguments_payload, parallel_payload, pipeline_payload):
+            for checked_payload in (
+                direct_payload,
+                arguments_payload,
+                parallel_payload,
+                pipeline_payload,
+                assignment_pipeline_payload,
+                powershell_summary_payload,
+            ):
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
                 self.assertFalse(checked_payload["block"])
                 self.assertIn("hooks-policy-allow-read-only-mlh-report", finding_codes)
@@ -33159,14 +33194,27 @@ class CliTests(unittest.TestCase):
                     "command": "mylittleharness --root . roadmap --list --json | Set-Content project/roadmap.md",
                 }
             )
+            mutation_suffix_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": (
+                        "$j = mylittleharness --root . roadmap --list --json | ConvertFrom-Json; "
+                        "mylittleharness --root . roadmap --action add --item-id new-work"
+                    ),
+                }
+            )
 
             mutation_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], mutation_input)
             mixed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], mixed_input)
             write_pipeline_payload = hook_event_payload(
                 load_inventory(root), HOOK_PRE_TOOL_USE, [], write_pipeline_input
             )
+            mutation_suffix_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], mutation_suffix_input
+            )
 
-            for checked_payload in (mutation_payload, mixed_payload):
+            for checked_payload in (mutation_payload, mixed_payload, mutation_suffix_payload):
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
                 self.assertTrue(checked_payload["block"])
                 self.assertIn("hooks-policy-block-mlh-mutation-without-mode", finding_codes)

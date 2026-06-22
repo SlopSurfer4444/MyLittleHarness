@@ -4103,6 +4103,7 @@ def _is_read_only_mlh_report_subcommand(command: str, subcommand: str) -> bool:
 
 
 def _strip_read_only_mlh_report_pipeline(command: str) -> str:
+    command = _strip_read_only_mlh_report_powershell_suffix(command)
     tokens = _shell_tokens(command)
     if "|" not in tokens:
         return command
@@ -4114,9 +4115,44 @@ def _strip_read_only_mlh_report_pipeline(command: str) -> str:
         segments[-1].append(token)
     if len(segments) < 2 or not segments[0] or any(not segment for segment in segments[1:]):
         return command
+    first_segment = _strip_read_only_mlh_report_assignment_prefix(segments[0])
+    if not first_segment:
+        return command
     if not all(_is_read_only_mlh_report_pipeline_segment(segment) for segment in segments[1:]):
         return command
-    return " ".join(segments[0])
+    return " ".join(first_segment)
+
+
+def _strip_read_only_mlh_report_assignment_prefix(tokens: list[str]) -> list[str]:
+    if len(tokens) >= 3 and _clean_token(tokens[0]).startswith("$") and _clean_token(tokens[1]) == "=":
+        return tokens[2:]
+    return tokens
+
+
+def _strip_read_only_mlh_report_powershell_suffix(command: str) -> str:
+    if ";" not in command:
+        return command
+    head, suffix = command.split(";", 1)
+    lowered_suffix = suffix.casefold()
+    if not any(marker in lowered_suffix for marker in ("$j.", "$json.", "$summary", "$roadmap", "convertto-json", "select-object")):
+        return command
+    unsafe_suffix_markers = (
+        "mylittleharness",
+        "git ",
+        "set-content",
+        "add-content",
+        "out-file",
+        "tee-object",
+        "remove-item",
+        "move-item",
+        "copy-item",
+        "new-item",
+        "apply_patch",
+        ">",
+    )
+    if any(marker in lowered_suffix for marker in unsafe_suffix_markers):
+        return command
+    return head.strip()
 
 
 def _is_read_only_mlh_report_pipeline_segment(tokens: list[str]) -> bool:
