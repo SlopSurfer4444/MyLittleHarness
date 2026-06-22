@@ -38053,6 +38053,26 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("no active implementation plan", planless_payload["system_message"])
 
+    def test_hooks_allow_read_only_git_check_ignore_evidence_probe(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            command = "git check-ignore -v project/verification/agent-runs/roadmap-list-json-read-only-cli-report-route-2026-06-22.md"
+
+            payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": command}),
+            )
+
+            self.assertFalse(payload["block"])
+            self.assertNotIn(
+                "hooks-policy-block-lifecycle-markdown-shortcut",
+                {finding["code"] for finding in payload["findings"]},
+            )
+
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)

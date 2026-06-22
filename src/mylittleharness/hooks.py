@@ -327,6 +327,7 @@ SUBAGENT_DELEGATION_DIRECT_MUTATION_RE = re.compile(
 )
 READ_ONLY_GIT_INSPECTION_COMMANDS = {
     "cat-file",
+    "check-ignore",
     "diff",
     "for-each-ref",
     "grep",
