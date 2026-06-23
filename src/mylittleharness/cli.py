@@ -704,7 +704,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.focus:
                 payload["report_scope"] = _focused_report_scope(args.focus, sections)
-            if getattr(args, "quick", False):
+        if getattr(args, "quick", False):
+            if getattr(args, "summary_only", False):
+                payload["report_scope"] = _quick_summary_only_report_scope(sections)
+            else:
                 payload["report_scope"] = _quick_report_scope(sections)
             if "report_scope" in payload:
                 apply_report_scope_to_compact_summary(payload["summary"], payload["report_scope"])
@@ -2692,6 +2695,25 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         boundary_section.append(Finding("info", "check-focus-read-only", f"check --focus {args.focus} runs one compatibility diagnostic without writing files"))
         return f"check --focus {args.focus}", [section, ("Boundary", boundary_section)]
 
+    if getattr(args, "quick", False) and getattr(args, "json", False) and getattr(args, "summary_only", False):
+        sections = [
+            ("Status", status_findings(inventory)),
+            ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
+            ("Worktree Coordination", worktree_coordination_findings(inventory, code_prefix="check-worktree-coordination")),
+            ("Validation", validation_findings(inventory)),
+        ]
+        boundary_section.append(
+            Finding(
+                "info",
+                "check-quick-summary-only-bounded",
+                (
+                    "check --quick --json --summary-only computes a bounded lifecycle/posture summary and "
+                    "marks omitted diagnostics as not-checked; rerun without --summary-only for the full quick JSON report"
+                ),
+            )
+        )
+        return "check --quick", [*sections, ("Boundary", boundary_section)]
+
     sections = [
         ("Status", status_findings(inventory)),
         ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
@@ -2761,6 +2783,38 @@ def _quick_report_scope(sections: list[tuple[str, list[Finding]]]) -> dict[str, 
         "boundary": (
             "quick text reports compact the display only; they do not skip check sections, "
             "write files, approve lifecycle, archive, staging, commit, or push"
+        ),
+    }
+
+
+def _quick_summary_only_report_scope(sections: list[tuple[str, list[Finding]]]) -> dict[str, object]:
+    included = [name for name, _findings in sections]
+    full_quick_sections = {
+        "Status",
+        "Session Active Work",
+        "Worktree Coordination",
+        "Validation",
+        "Agent Run Evidence",
+        "Retention",
+        "Work Claims",
+        "Handoff Packets",
+        "Coordination Evidence",
+        "Projection Cache",
+        "Drift",
+        "Boundary",
+    }
+    return {
+        "scope": "quick-summary-only",
+        "included_sections": included,
+        "omitted_sections": sorted(full_quick_sections.difference(included)),
+        "bounded_fast_path": True,
+        "global_status_uncomputed": True,
+        "status_represents_included_sections_only": True,
+        "summary_omits_full_findings": True,
+        "rerun_without_summary_only_for_full_quick_json": True,
+        "boundary": (
+            "quick summary-only JSON computes a bounded lifecycle/posture subset for closeout triage; "
+            "it does not compute whole-root clean posture or approve lifecycle, archive, staging, commit, or push"
         ),
     }
 

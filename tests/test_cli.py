@@ -43848,7 +43848,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             payload = json.loads(output.getvalue())
             self.assertEqual("mylittleharness.summary-only-report.v1", payload["summary_only"]["schema"])
-            self.assertEqual("quick", payload["report_scope"]["scope"])
+            self.assertEqual("quick-summary-only", payload["report_scope"]["scope"])
+            self.assertTrue(payload["report_scope"]["bounded_fast_path"])
             self.assertEqual("check --quick", payload["summary"]["command"])
             self.assertEqual(payload["summary"]["warnings"], payload["operator_diagnostics"]["counts"]["warnings"])
             self.assertEqual("result.status", payload["summary_only"]["stable_json_paths"][0])
@@ -43856,6 +43857,43 @@ class CliTests(unittest.TestCase):
             self.assertIn("sections", payload["summary_only"]["omitted_keys"])
             self.assertNotIn("findings", payload)
             self.assertNotIn("sections", payload)
+            self.assertFalse(payload["boundary"]["json_output_approves_lifecycle"])
+
+    def test_check_quick_json_summary_only_uses_bounded_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            def fail_full_report(*_args: object, **_kwargs: object) -> list[Finding]:
+                raise AssertionError("summary-only quick check must not run full-report diagnostics")
+
+            output = io.StringIO()
+            with (
+                patch("mylittleharness.cli.agent_run_record_findings", side_effect=fail_full_report),
+                patch("mylittleharness.cli.retention_receipt_findings", side_effect=fail_full_report),
+                patch("mylittleharness.cli.work_claim_status_findings", side_effect=fail_full_report),
+                patch("mylittleharness.cli.handoff_packet_status_findings", side_effect=fail_full_report),
+                patch("mylittleharness.cli.coordination_evidence_identity_findings", side_effect=fail_full_report),
+                patch("mylittleharness.cli.projection_cache_status_findings", side_effect=fail_full_report),
+                patch("mylittleharness.cli.check_drift_findings", side_effect=fail_full_report),
+                redirect_stdout(output),
+            ):
+                code = main(["--root", str(root), "check", "--quick", "--json", "--summary-only"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("quick-summary-only", payload["report_scope"]["scope"])
+            self.assertTrue(payload["report_scope"]["global_status_uncomputed"])
+            self.assertTrue(payload["report_scope"]["status_represents_included_sections_only"])
+            omitted_sections = payload["report_scope"]["omitted_sections"]
+            self.assertIn("Agent Run Evidence", omitted_sections)
+            self.assertIn("Projection Cache", omitted_sections)
+            self.assertIn("Retention", omitted_sections)
+            self.assertIn("Drift", omitted_sections)
+            self.assertEqual(len(omitted_sections), payload["summary"]["outcomes"]["not_checked"]["count"])
+            self.assertEqual("result.status", payload["summary_only"]["stable_json_paths"][0])
+            self.assertNotIn("findings", payload)
             self.assertFalse(payload["boundary"]["json_output_approves_lifecycle"])
 
     def test_root_boundary_describes_governed_product_source_operator_lane(self) -> None:

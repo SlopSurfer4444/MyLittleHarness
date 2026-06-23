@@ -728,15 +728,18 @@ def _outcome_bucket(findings: list[Finding], markers: tuple[str, ...]) -> dict[s
 def _not_checked_bucket(report_scope: dict[str, object] | None) -> dict[str, object]:
     omitted = report_scope.get("omitted_sections", []) if isinstance(report_scope, dict) else []
     sections = [str(section) for section in omitted] if isinstance(omitted, list) else []
+    reason = "focused-report-scope"
+    if isinstance(report_scope, dict) and report_scope.get("scope") == "quick-summary-only":
+        reason = "quick-summary-only-bounded-report"
     return {
         "detected": bool(sections),
         "count": len(sections),
         "sections": sections,
-        "reason": "focused-report-scope" if sections else "",
+        "reason": reason if sections else "",
         "items": [
             {
                 "section": section,
-                "reason": "focused-report-scope",
+                "reason": reason,
             }
             for section in sections[:10]
         ],
