@@ -219,16 +219,23 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
     state_payload = _read_runtime_json(root, MLHD_STATE_FILE_NAME)
     autostart_payload = _read_runtime_json(root, MLHD_AUTOSTART_FILE_NAME)
     refresh_payload = _read_runtime_json(root, MLHD_PROJECTION_REFRESH_FILE_NAME)
+    run_once_payload = _read_runtime_json(root, MLHD_LAST_RUN_ONCE_FILE_NAME)
     pid = _payload_pid(pid_payload)
+    state_pid = _payload_pid(state_payload)
     pid_status = "absent"
     if pid:
         pid_status = "alive" if _pid_is_alive(pid) else "stale"
+    state_pid_status = "absent"
+    if state_pid:
+        state_pid_status = "alive" if _pid_is_alive(state_pid) else "stale"
     if runtime_status == "invalid":
         control_status = "invalid"
     elif pid_status == "alive" and lock_payload:
         control_status = "running"
     elif pid_status == "stale":
         control_status = "stale"
+    elif state_payload.get("last_action") == "run-once" and state_payload.get("status") == "running":
+        control_status = "run-once-active" if state_pid_status == "alive" else "run-once-interrupted"
     elif state_payload.get("status") == "stopped":
         control_status = "stopped"
     elif state_payload.get("last_action") == "run-once":
@@ -253,6 +260,11 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
         "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
         "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
         "projection_stale_reason": str(refresh_payload.get("stale_reason") or ""),
+        "run_once_status": str(run_once_payload.get("run_once_status") or run_once_payload.get("status") or ""),
+        "run_once_started_at_utc": str(run_once_payload.get("started_at_utc") or ""),
+        "run_once_completed_at_utc": str(run_once_payload.get("completed_at_utc") or ""),
+        "run_once_updated_at_utc": str(run_once_payload.get("updated_at_utc") or ""),
+        "run_once_bounded_outcome": str(run_once_payload.get("bounded_outcome") or ""),
     }
 
 
@@ -345,9 +357,10 @@ def mlhd_runtime_findings(inventory: Inventory, code_prefix: str = "dashboard-ml
                 "info" if pulse["status"] in {"idle", "warmable", "cooling-down"} else "warn",
                 f"{code_prefix}-projection-pulse",
                 (
-                    f"projection pulse status={pulse['status']}; dirty_since={pulse['dirty_since_utc'] or '<none>'}; "
-                    f"last_operation={pulse['operation'] or '<none>'}; "
-                    f"last_refresh={pulse['last_refresh_status'] or '<none>'}; optional warm-cache ticks cannot write lifecycle authority"
+                f"projection pulse status={pulse['status']}; dirty_since={pulse['dirty_since_utc'] or '<none>'}; "
+                f"last_operation={pulse['operation'] or '<none>'}; "
+                    f"last_refresh={pulse['last_refresh_status'] or '<none>'}; "
+                    f"run_once={pulse['run_once_status'] or '<none>'}; optional warm-cache ticks cannot write lifecycle authority"
                 ),
                 ARTIFACT_DIR_REL,
             ),
@@ -380,6 +393,10 @@ def mlhd_runtime_payload(inventory: Inventory) -> dict[str, object]:
         "approves_lifecycle": False,
         "projection_pulse": projection_pulse_payload(inventory, quiet_period_seconds=MLHD_PROJECTION_QUIET_PERIOD_SECONDS),
         "context_memory": context_memory_capsule_payload(inventory),
+        "run_once_status": str(state.get("run_once_status") or ""),
+        "run_once_started_at_utc": str(state.get("run_once_started_at_utc") or ""),
+        "run_once_completed_at_utc": str(state.get("run_once_completed_at_utc") or ""),
+        "run_once_bounded_outcome": str(state.get("run_once_bounded_outcome") or ""),
     }
 
 
@@ -410,6 +427,7 @@ def projection_pulse_payload(
         quiet_period_seconds,
     )
     refresh_payload = _read_runtime_json(inventory.root, MLHD_PROJECTION_REFRESH_FILE_NAME)
+    run_once_payload = _read_runtime_json(inventory.root, MLHD_LAST_RUN_ONCE_FILE_NAME)
     status = (
         "updating-or-interrupted"
         if operation_payload
@@ -436,6 +454,10 @@ def projection_pulse_payload(
         "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
         "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
         "stale_reason": str(refresh_payload.get("stale_reason") or ""),
+        "run_once_status": str(run_once_payload.get("run_once_status") or run_once_payload.get("status") or ""),
+        "run_once_started_at_utc": str(run_once_payload.get("started_at_utc") or ""),
+        "run_once_completed_at_utc": str(run_once_payload.get("completed_at_utc") or ""),
+        "run_once_bounded_outcome": str(run_once_payload.get("bounded_outcome") or ""),
         "owner_command": refresh_command,
         "warm_cache_command": "mylittleharness --root <root> projection --warm-cache --target all",
         "manual_recovery_command": "mylittleharness --root <root> projection --warm-cache --target all",
@@ -878,27 +900,42 @@ def _apply_mlhd_run_once(
     quiet_period_seconds: float = MLHD_PROJECTION_QUIET_PERIOD_SECONDS,
 ) -> list[Finding]:
     runtime_dir = _ensure_runtime_dir(inventory.root)
-    now = _utc_now()
+    started_at = _utc_now()
     pid = os.getpid()
+    _write_runtime_json(
+        inventory.root,
+        MLHD_LAST_RUN_ONCE_FILE_NAME,
+        _run_once_payload("in-progress", pid, started_at, started_at, quiet_period_seconds=quiet_period_seconds),
+    )
+    _write_runtime_json(inventory.root, MLHD_HEARTBEAT_FILE_NAME, _heartbeat_payload("run-once", "running", pid, started_at))
+    _write_runtime_json(inventory.root, MLHD_STATE_FILE_NAME, _state_payload("running", "run-once", pid, started_at))
+    _append_event(runtime_dir, "run-once", "running", pid, started_at)
     projection_findings = _mlhd_projection_autorefresh_apply_findings(inventory, quiet_period_seconds)
     refresh_status = _projection_autorefresh_status(projection_findings)
-    context_memory_findings, context_memory_payload = refresh_context_memory_capsule(inventory, trigger="mlhd-run-once", now=now)
-    _write_projection_refresh_state(inventory.root, refresh_status, projection_findings, now)
-    run_once_payload = _state_payload("idle", "run-once", pid, now)
+    completed_at = _utc_now()
+    context_memory_findings, context_memory_payload = refresh_context_memory_capsule(inventory, trigger="mlhd-run-once", now=completed_at)
+    _write_projection_refresh_state(inventory.root, refresh_status, projection_findings, completed_at)
+    run_once_payload = _run_once_payload(
+        "completed",
+        pid,
+        started_at,
+        completed_at,
+        quiet_period_seconds=quiet_period_seconds,
+        completed_at=completed_at,
+    )
     run_once_payload["projection_refresh_status"] = refresh_status
     run_once_payload["context_memory_status"] = str(context_memory_payload.get("status") or "current")
     run_once_payload["context_memory_capsule_id"] = str(context_memory_payload.get("capsule_id") or "")
-    run_once_payload["quiet_period_seconds"] = quiet_period_seconds
     _write_runtime_json(inventory.root, MLHD_LAST_RUN_ONCE_FILE_NAME, run_once_payload)
-    _write_runtime_json(inventory.root, MLHD_HEARTBEAT_FILE_NAME, _heartbeat_payload("run-once", "idle", pid, now))
-    _write_runtime_json(inventory.root, MLHD_STATE_FILE_NAME, _state_payload("idle", "run-once", pid, now))
-    _append_event(runtime_dir, "run-once", "idle", pid, now)
+    _write_runtime_json(inventory.root, MLHD_HEARTBEAT_FILE_NAME, _heartbeat_payload("run-once", "idle", pid, completed_at))
+    _write_runtime_json(inventory.root, MLHD_STATE_FILE_NAME, _state_payload("idle", "run-once", pid, completed_at))
+    _append_event(runtime_dir, "run-once", "idle", pid, completed_at)
     return [
         Finding(
             "info",
             "mlhd-run-once-apply",
             (
-                "ran one foreground mlhd control-plane tick and wrote heartbeat/state/event evidence under the disposable "
+                "ran one foreground mlhd control-plane tick with bounded start/completion outcome markers and wrote heartbeat/state/event evidence under the disposable "
                 "runtime directory; optional projection warm-cache and source-bound context capsule stayed inside generated "
                 "cache/context boundaries; no watcher, listener, autostart entry, lifecycle mutation, or source mutation was created"
             ),
@@ -1039,6 +1076,34 @@ def _write_projection_refresh_state(root: Path, status: str, findings: list[Find
     if status == "degraded":
         payload["last_failed_refresh_utc"] = now
     _write_runtime_json(root, MLHD_PROJECTION_REFRESH_FILE_NAME, payload)
+
+
+def _run_once_payload(
+    status: str,
+    pid: int,
+    started_at: str,
+    updated_at: str,
+    *,
+    quiet_period_seconds: float,
+    completed_at: str = "",
+) -> dict[str, object]:
+    bounded_outcome = "in-progress" if status == "in-progress" else status
+    payload = _state_payload(status, "run-once", pid, updated_at)
+    payload.update(
+        {
+            "run_once_status": status,
+            "bounded_outcome": bounded_outcome,
+            "started_at_utc": started_at,
+            "completed_at_utc": completed_at,
+            "quiet_period_seconds": quiet_period_seconds,
+            "operator_diagnostic": (
+                "run-once refresh is still working or was interrupted before completion"
+                if status == "in-progress"
+                else "run-once refresh completed; inspect projection_refresh_status for cache outcome"
+            ),
+        }
+    )
+    return payload
 
 
 def _projection_refresh_stale_reason(findings: list[Finding]) -> str:

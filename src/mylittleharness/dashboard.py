@@ -835,6 +835,10 @@ def connect_readiness_packet(
             "sourceHealthStatus": str(mlhd.get("source_health_status") or "unknown"),
             "refreshPosture": str(mlhd.get("refresh_posture") or "unknown"),
             "operatorSummary": str(mlhd.get("operator_summary") or ""),
+            "runOnceStatus": str(mlhd.get("run_once_status") or ""),
+            "runOnceStartedAtUtc": str(mlhd.get("run_once_started_at_utc") or ""),
+            "runOnceCompletedAtUtc": str(mlhd.get("run_once_completed_at_utc") or ""),
+            "runOnceBoundedOutcome": str(mlhd.get("run_once_bounded_outcome") or ""),
             "lastTickUtc": str(mlhd.get("last_tick_utc") or ""),
             "lastAction": str(mlhd.get("last_action") or ""),
             "lastRefreshStatus": str(mlhd.get("last_refresh_status") or ""),
@@ -1337,6 +1341,22 @@ def mlhd_freshness_payload(inventory: Inventory) -> dict[str, object]:
     pid_status = str(control.get("pid_status") or "unknown")
     runtime_cache_status = str(runtime.get("runtime_cache_status") or "unknown")
     last_refresh_status = str(pulse.get("last_refresh_status") or "")
+    run_once_status = str(pulse.get("run_once_status") or runtime.get("run_once_status") or control.get("run_once_status") or "")
+    run_once_started_at = str(
+        pulse.get("run_once_started_at_utc") or runtime.get("run_once_started_at_utc") or control.get("run_once_started_at_utc") or ""
+    )
+    run_once_completed_at = str(
+        pulse.get("run_once_completed_at_utc")
+        or runtime.get("run_once_completed_at_utc")
+        or control.get("run_once_completed_at_utc")
+        or ""
+    )
+    run_once_bounded_outcome = str(
+        pulse.get("run_once_bounded_outcome")
+        or runtime.get("run_once_bounded_outcome")
+        or control.get("run_once_bounded_outcome")
+        or ""
+    )
     dirty_count = int(pulse.get("dirty_marker_count") or 0)
     changed_path_count = int(pulse.get("changed_path_count") or 0)
     runtime.update(
@@ -1351,8 +1371,18 @@ def mlhd_freshness_payload(inventory: Inventory) -> dict[str, object]:
             "last_failed_refresh_utc": str(pulse.get("last_failed_refresh_utc") or ""),
             "dirty_count": dirty_count,
             "changed_path_count": changed_path_count,
+            "run_once_status": run_once_status,
+            "run_once_started_at_utc": run_once_started_at,
+            "run_once_completed_at_utc": run_once_completed_at,
+            "run_once_bounded_outcome": run_once_bounded_outcome,
             "source_health_status": _mlhd_source_health_status(last_refresh_status, dirty_count, changed_path_count),
-            "refresh_posture": _mlhd_refresh_posture(last_refresh_status, dirty_count, changed_path_count),
+            "refresh_posture": _mlhd_refresh_posture(
+                last_refresh_status,
+                dirty_count,
+                changed_path_count,
+                run_once_status=run_once_status,
+                run_once_bounded_outcome=run_once_bounded_outcome,
+            ),
             "next_safe_command": str(pulse.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
         }
     )
@@ -1372,7 +1402,16 @@ def _mlhd_daemon_status(control_status: str, pid_status: str, runtime_cache_stat
     return control_status or "unknown"
 
 
-def _mlhd_refresh_posture(last_refresh_status: str, dirty_count: int, changed_path_count: int) -> str:
+def _mlhd_refresh_posture(
+    last_refresh_status: str,
+    dirty_count: int,
+    changed_path_count: int,
+    *,
+    run_once_status: str = "",
+    run_once_bounded_outcome: str = "",
+) -> str:
+    if run_once_status == "in-progress" and run_once_bounded_outcome in {"", "in-progress"}:
+        return "in-progress"
     if last_refresh_status == "degraded":
         return "failed"
     if last_refresh_status == "deferred":
@@ -1397,10 +1436,18 @@ def _mlhd_source_health_status(last_refresh_status: str, dirty_count: int, chang
 def _mlhd_operator_summary(mlhd: dict[str, object]) -> str:
     daemon_status = str(mlhd.get("daemon_status") or "unknown")
     refresh_posture = str(mlhd.get("refresh_posture") or "unknown")
+    run_once_status = str(mlhd.get("run_once_status") or "")
+    run_once_bounded_outcome = str(mlhd.get("run_once_bounded_outcome") or "")
+    if run_once_status == "in-progress" and daemon_status == "run-once-active":
+        return "one-shot refresh is in progress; last-run-once is the bounded outcome marker and source/cache truth is not complete yet"
+    if run_once_status == "in-progress" and daemon_status == "run-once-interrupted":
+        return "one-shot refresh started but has no completion marker; rerun mlhd status/dashboard or mlhd run-once before treating cache health as current"
     if daemon_status == "stale-pid" and refresh_posture == "current":
         return "background daemon marker is stale, but one-shot projection refresh is current; not a product-work blocker"
     if daemon_status == "not-running" and refresh_posture == "current":
         return "background daemon is not running, but disposable generated-cache freshness is current"
+    if run_once_status == "completed" and run_once_bounded_outcome == "completed" and refresh_posture == "current":
+        return "one-shot refresh completed and disposable generated-cache freshness is current"
     if daemon_status == "running":
         return "background daemon appears to be running; source-health still comes from projection refresh posture"
     if refresh_posture in {"failed", "needs-refresh"}:
@@ -1412,13 +1459,17 @@ def _mlhd_freshness_findings(inventory: Inventory, code_prefix: str = "dashboard
     mlhd = mlhd_freshness_payload(inventory)
     return [
         Finding(
-            "warn" if mlhd["daemon_status"] == "invalid" else "info",
+            "warn" if mlhd["daemon_status"] in {"invalid", "run-once-interrupted"} else "info",
             f"{code_prefix}-control-freshness",
             (
                 f"mlhd daemon_status={mlhd['daemon_status']}; control_status={mlhd['control_status']}; "
                 f"runtime_cache={mlhd['runtime_cache_status']}; "
                 f"pid_status={mlhd['pid_status']}; last_tick={mlhd['last_tick_utc'] or '<none>'}; "
-                f"last_action={mlhd['last_action'] or '<none>'}; summary={mlhd['operator_summary']}"
+                f"last_action={mlhd['last_action'] or '<none>'}; "
+                f"run_once={mlhd['run_once_status'] or '<none>'}; "
+                f"run_once_started={mlhd['run_once_started_at_utc'] or '<none>'}; "
+                f"run_once_completed={mlhd['run_once_completed_at_utc'] or '<none>'}; "
+                f"summary={mlhd['operator_summary']}"
             ),
             MLHD_RUNTIME_DIR_REL,
         ),

@@ -373,10 +373,10 @@ SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r")"
 )
 SUBAGENT_DELEGATION_DIRECT_MUTATION_RE = re.compile(
-    r"(?i)\b(?:then|after(?:\s+inspection)?|afterward|now|immediately)\b[^\n\r.;]*"
+    r"(?i)\b(?:then|after(?:\s+inspection)?|afterward|now|immediately)\b[^\n\r;]*"
     r"(?:"
-    r"\bmy(?:littleharness)?\b[^\n\r.;]*\s--apply\b|"
-    r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r.;]*\s--apply\b|"
+    r"\bmy(?:littleharness)?\b[^\n\r;]*\s--apply\b|"
+    r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r;]*\s--apply\b|"
     r"\bgit\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
     r"\bapply_patch\b|"
     r"\b(?:start|launch|serve|run)\s+(?:provider|daemon|runtime|launcher)\b"
@@ -545,9 +545,9 @@ PATH_RE = re.compile(
 POWERSHELL_HERE_STRING_RE = re.compile(r"@(['\"])\r?\n.*?\r?\n\1@", re.DOTALL)
 POSIX_HEREDOC_START_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 POWERSHELL_SPLAT_INVOCATION_RE = re.compile(
-    r"(?:^|[;\r\n])\s*(?:&\s*)?"
+    r"(?:^|[;\r\n|])\s*(?:\$[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?(?:&\s*)?"
     r"(?P<exe>(?:my" + "littleharness(?:\\.exe)?)|(?:(?:python|py)(?:\\.exe)?\\s+-m\\s+my" + "littleharness))"
-    r"\s+@(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$",
+    r"\s+@(?P<var>[A-Za-z_][A-Za-z0-9_]*)(?:\s+(?:\d+|\*)?>&\d+)?(?=\s*(?:$|[;\r\n|]))",
     re.IGNORECASE | re.DOTALL,
 )
 POWERSHELL_ARRAY_ASSIGNMENT_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*@\((.*?)\)\s*;?", re.DOTALL)
@@ -1768,6 +1768,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     delegation_prompt_text = _delegation_prompt_text(data, text)
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
+    allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(command_data))
     allow_read_only_mlh_report = _is_read_only_mlh_report_command(command)
     allow_read_only_source_paths = (
@@ -1783,6 +1784,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         or allow_read_only_product_source_vcs_inspection
         or allow_read_only_subagent_delegation
         or allow_reviewed_local_vcs_delegation
+        or (allow_delegation_prompt_context and _is_subagent_delegation_only_request(data))
     )
     allow_read_only_roadmap_path = _is_read_only_roadmap_direct_read_command(command, paths)
     allow_research_import_related_prompt = _is_research_import_related_prompt_provenance_command(command)
@@ -1836,15 +1838,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, command_data, command)
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
-    allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
     delegation_prompt_shortcut = (
         _is_subagent_delegation_tool_request(data)
         and _subagent_delegation_forbidden_shortcut(delegation_prompt_text)
     )
+    delegation_wrapper_shortcut_text = _delegation_direct_command_text(data)
     delegation_wrapper_unallowed_shortcut = (
         _is_subagent_delegation_tool_request(data)
         and not allow_product_source_vcs_command
-        and _subagent_delegation_forbidden_shortcut(text)
+        and not allow_read_only_source_paths
+        and not allow_mlh_owner_route_paths
+        and bool(delegation_wrapper_shortcut_text)
+        and _subagent_delegation_forbidden_shortcut(delegation_wrapper_shortcut_text)
     )
     allow_delegation_prompt_path_context = (
         allow_delegation_prompt_context
@@ -2031,7 +2036,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed exact Git staging of existing MLH lifecycle route files while the active phase is complete "
                     "and project-state contains route writeback evidence; broad add, generated/runtime caches, "
-                    "partial lifecycle staging, commit, push, roadmap movement, and future lifecycle decisions remain unapproved"
+                    "partial lifecycle staging, commit, push, roadmap movement, and future lifecycle decisions remain unapproved; "
+                    "review bundles may append only git status --short and git diff --cached --check in the same operating root; "
+                    "if Git ignore rules hide a route-created artifact, use git add -f -- <exact-route-artifact> for that artifact only"
                 ),
                 paths[0] if paths else None,
             )
@@ -2086,6 +2093,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed exact Git staging from the configured product_source_root workdir "
                     f"{stage_context}; "
+                    "review bundles may append only git status --short and git diff --cached --check in the same product root; "
                     "operating-root lifecycle files, broad add, wildcards, directories, commit, push, reset, and clean "
                     "remain outside this allowance"
                 ),
@@ -2469,7 +2477,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "reset, clean, broad add, or authority decisions; "
                 "safe_pattern=stage ordinary source/test files first by exact path, then stage route-produced "
                 "lifecycle/evidence/archive artifacts separately by exact path; if Git ignore rules hide a "
-                "route-created artifact, use git -C <actual-root> add -f -- <exact-route-artifact> for that artifact only; "
+                "route-created artifact, use git -C <actual-root> add -f -- <exact-route-artifact> for that artifact only "
+                "(template: git -C <actual-root> add -f -- <exact-route-artifact-if-ignored>); "
                 "next_safe_command=git -C <actual-root> add -- <exact-route-files>; "
                 "git -C <actual-root> diff --cached --check; git -C <actual-root> commit -F <message-file>"
             )
@@ -2829,7 +2838,17 @@ def _hook_direct_command_payloads(value: object, context: dict[str, object] | No
         "tool_uses",
         "toolUse",
         "tool_calls",
+        "tool_call",
+        "toolCall",
         "calls",
+        "request",
+        "payload",
+        "data",
+        "target",
+        "project",
+        "body",
+        "message",
+        "messages",
     ):
         item = value.get(key)
         if isinstance(item, (dict, list)):
@@ -3781,6 +3800,16 @@ def _delegation_prompt_text(data: dict[str, object], fallback_text: str) -> str:
     return "\n".join(part for part in prompt_parts if part.strip()) or str(fallback_text or "")
 
 
+def _delegation_direct_command_text(data: dict[str, object]) -> str:
+    if not _is_subagent_delegation_tool_request(data):
+        return ""
+    commands = [
+        _hook_input_command(payload, "")
+        for payload in _hook_direct_command_payloads(data)
+    ]
+    return "\n".join(command for command in commands if command.strip())
+
+
 def _is_typed_route_delegation_intent(data: dict[str, object], text: str) -> bool:
     if not _is_subagent_delegation_tool_request(data):
         return False
@@ -3838,12 +3867,33 @@ def _is_read_only_subagent_delegation_request(data: dict[str, object], text: str
 def _is_delegation_prompt_context_request(data: dict[str, object], text: str) -> bool:
     if not _is_subagent_delegation_tool_request(data):
         return False
+    prompt_text = _delegation_prompt_text(data, text)
+    scrubbed = _scrub_negated_subagent_delegation_guardrails(prompt_text)
+    if _subagent_delegation_prompt_direct_mutation_request(prompt_text, scrubbed):
+        return False
     if _is_typed_route_delegation_intent(data, text):
         return True
-    prompt_text = _delegation_prompt_text(data, text)
-    if _subagent_delegation_forbidden_shortcut(prompt_text):
-        return False
     return True
+
+
+def _subagent_delegation_prompt_direct_mutation_request(raw: str, scrubbed: str) -> bool:
+    clean = str(scrubbed or raw or "").strip()
+    if SUBAGENT_DELEGATION_DIRECT_MUTATION_RE.search(clean):
+        return True
+    protected_command = (
+        r"(?:"
+        r"\bgit\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)\b|"
+        r"\bmy(?:littleharness)?\b[^\n\r;]*\s--apply\b|"
+        r"\b(?:writeback|roadmap|plan|transition|repair|memory-hygiene|meta-feedback|projection)\b[^\n\r;]*\s--apply\b|"
+        r"\bmlhd\s+run-once\s+--apply\b|"
+        r"\bapply_patch\b|"
+        r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item)\b|"
+        r"\b(?:start|launch|serve|run)\s+(?:provider|daemon|runtime|launcher)\b"
+        r")"
+    )
+    if re.search(r"(?i)(?:^|[\n\r.;]\s*)(?:please\s+)?(?:run|execute|call|invoke|perform|do|use)\b[^\n\r;]*" + protected_command, clean):
+        return True
+    return bool(re.match(r"(?i)^(?:please\s+)?" + protected_command, clean))
 
 
 def _mlh_policy_command(command: str) -> str:
@@ -4161,12 +4211,32 @@ def _hook_diagnostic_simulation_payload_commands(command: str) -> list[str]:
 
 
 def _command_prefix_before_first_mlh_invocation(command: str) -> str:
-    match = re.search(
-        r"\b(?:my" + "littleharness|python\s+-m\s+my" + "littleharness|py\s+-m\s+my" + "littleharness)\b",
-        command or "",
+    text = command or ""
+    pattern = re.compile(
+        r"\b(?:my" + r"littleharness|python\s+-m\s+my" + r"littleharness|py\s+-m\s+my" + r"littleharness)\b",
         re.IGNORECASE,
     )
-    return (command or "")[: match.start()] if match else (command or "")
+    for match in pattern.finditer(text):
+        if not _is_inside_powershell_quoted_literal(text, match.start()):
+            return text[: match.start()]
+    return text
+
+
+def _is_inside_powershell_quoted_literal(text: str, index: int) -> bool:
+    quote = ""
+    cursor = 0
+    while cursor < min(index, len(text)):
+        current = text[cursor]
+        if quote:
+            if current == quote:
+                if cursor + 1 < index and text[cursor + 1] == quote:
+                    cursor += 2
+                    continue
+                quote = ""
+        elif current in {"'", '"'}:
+            quote = current
+        cursor += 1
+    return bool(quote)
 
 
 def _is_mlh_hook_diagnostic_run_command(command: str) -> bool:
@@ -4654,7 +4724,7 @@ def _is_post_closeout_lifecycle_route_stage_path(inventory: Inventory, path: str
 
 def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, command: str) -> bool:
     if _has_shell_command_separator(command):
-        return False
+        return _is_route_produced_lifecycle_route_stage_review_bundle(inventory, command)
     subcommand, _tokens, _index = _git_command_context(command)
     if subcommand not in {"add", "stage"}:
         return False
@@ -4666,9 +4736,41 @@ def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, comma
     return bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
 
 
-def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
-    if _has_shell_command_separator(command):
+def _is_route_produced_lifecycle_route_stage_review_bundle(inventory: Inventory, command: str) -> bool:
+    segments = _shell_command_segments(command)
+    if len(segments) < 2 or _git_subcommand(segments[0]) not in {"add", "stage"}:
         return False
+    try:
+        current_root = inventory.root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for segment in segments:
+        segment_root = _git_effective_workdir_path(inventory, {}, segment)
+        if segment_root is None:
+            return False
+        try:
+            if segment_root.resolve() != current_root:
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+    pathspecs = _git_stage_pathspecs(segments[0])
+    if not pathspecs:
+        return False
+    coherent = bool(_coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs))
+    if not coherent and _active_plan_ready_for_route_produced_lifecycle_git(inventory):
+        coherent = bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
+    if not coherent:
+        return False
+    return all(_is_reviewed_local_vcs_checkpoint_review_segment(segment) for segment in segments[1:])
+
+
+def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    if len(_shell_command_segments(command)) > 1:
+        return _is_product_source_vcs_stage_review_bundle(inventory, data, command)
+    return _is_product_source_vcs_stage_segment(inventory, data, command)
+
+
+def _is_product_source_vcs_stage_segment(inventory: Inventory, data: dict[str, object], command: str) -> bool:
     base_root, product_root = _product_source_vcs_roots(inventory, data, command)
     if base_root is None or product_root is None:
         return False
@@ -4697,6 +4799,30 @@ def _is_product_source_vcs_stage_command(inventory: Inventory, data: dict[str, o
         )
         for pathspec in pathspecs
     )
+
+
+def _is_product_source_vcs_stage_review_bundle(inventory: Inventory, data: dict[str, object], command: str) -> bool:
+    segments = _shell_command_segments(command)
+    if len(segments) < 2 or not _is_product_source_vcs_stage_segment(inventory, data, segments[0]):
+        return False
+    base_root, product_root = _product_source_vcs_roots(inventory, data, segments[0])
+    if base_root is None or product_root is None:
+        return False
+    for segment in segments[1:]:
+        if not _is_reviewed_local_vcs_checkpoint_review_segment(segment):
+            return False
+        segment_base_root, segment_product_root = _product_source_vcs_roots(inventory, data, segment)
+        if segment_base_root is None or segment_product_root is None:
+            return False
+        try:
+            if (
+                segment_base_root.resolve() != base_root.resolve()
+                or segment_product_root.resolve() != product_root.resolve()
+            ):
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+    return True
 
 
 def _is_exact_active_plan_product_source_stage_file(
@@ -5242,8 +5368,9 @@ def _source_incubation_archive_references_for_tombstones(inventory: Inventory, s
 
 
 def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object], command: str) -> ReviewedLocalVcsCheckpoint:
-    if _has_shell_command_separator(command):
-        return ReviewedLocalVcsCheckpoint()
+    if len(_shell_command_segments(command)) > 1:
+        bundled = _reviewed_local_vcs_checkpoint_review_bundle(inventory, data, command)
+        return bundled if bundled.paths or bundled.blocked_reason else ReviewedLocalVcsCheckpoint()
     subcommand = _git_subcommand(command)
     if subcommand not in {"add", "stage", "commit"}:
         return ReviewedLocalVcsCheckpoint()
@@ -5295,6 +5422,79 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
         mode="commit",
         visible_workdir=visible_workdir,
     )
+
+
+def _reviewed_local_vcs_checkpoint_review_bundle(
+    inventory: Inventory,
+    data: dict[str, object],
+    command: str,
+) -> ReviewedLocalVcsCheckpoint:
+    segments = _shell_command_segments(command)
+    if len(segments) < 2 or _git_subcommand(segments[0]) not in {"add", "stage"}:
+        return ReviewedLocalVcsCheckpoint()
+    target_inventory, root_reason = _neighbor_mlh_root_inventory(inventory, data, segments[0])
+    if target_inventory is None:
+        return ReviewedLocalVcsCheckpoint(blocked_reason=root_reason) if root_reason else ReviewedLocalVcsCheckpoint()
+    pathspecs = _git_stage_pathspecs(segments[0])
+    if not pathspecs:
+        return ReviewedLocalVcsCheckpoint(
+            root=target_inventory.root,
+            blocked_reason=(
+                "no exact pathspecs were supplied; "
+                + _reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, (), "pathspecs")
+            ),
+        )
+    paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, pathspecs)
+    if not paths:
+        paths = _coherent_delegated_neighbor_exact_file_checkpoint_paths(target_inventory, pathspecs)
+    if not paths:
+        return ReviewedLocalVcsCheckpoint(
+            root=target_inventory.root,
+            blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, pathspecs, "pathspecs"),
+        )
+    for segment in segments[1:]:
+        if not _is_reviewed_local_vcs_checkpoint_review_segment(segment):
+            return ReviewedLocalVcsCheckpoint(
+                root=target_inventory.root,
+                blocked_reason=(
+                    f"actual command workdir/root is {target_inventory.root.resolve()}; "
+                    "split any message-file creation from the final narrow local VCS command; "
+                    "checkpoint convenience bundle may contain only exact git add/stage followed by "
+                    "read-only git status and git diff --cached --check review commands"
+                ),
+            )
+        segment_root, segment_reason = _neighbor_mlh_root_inventory(inventory, data, segment)
+        if segment_root is None:
+            return ReviewedLocalVcsCheckpoint(blocked_reason=segment_reason) if segment_reason else ReviewedLocalVcsCheckpoint()
+        try:
+            if segment_root.root.resolve() != target_inventory.root.resolve():
+                return ReviewedLocalVcsCheckpoint(
+                    root=target_inventory.root,
+                    blocked_reason="checkpoint convenience bundle mixed different actual command roots",
+                )
+        except (OSError, RuntimeError, ValueError):
+            return ReviewedLocalVcsCheckpoint(
+                root=target_inventory.root,
+                blocked_reason="checkpoint convenience bundle root could not be resolved",
+            )
+    return ReviewedLocalVcsCheckpoint(
+        root=target_inventory.root,
+        paths=frozenset(paths),
+        mode="staging-review-bundle",
+        visible_workdir=_checkpoint_uses_visible_workdir(inventory, data, target_inventory.root),
+    )
+
+
+def _is_reviewed_local_vcs_checkpoint_review_segment(command: str) -> bool:
+    if not _is_read_only_git_inspection_command(command):
+        return False
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand == "status":
+        return True
+    if subcommand != "diff" or subcommand_index < 0:
+        return False
+    args = {_clean_token(token) for token in tokens[subcommand_index + 1 :] if _clean_token(token)}
+    return "--cached" in args and "--check" in args
 
 
 def _checkpoint_uses_visible_workdir(inventory: Inventory, data: dict[str, object], target_root: Path) -> bool:
@@ -7259,6 +7459,26 @@ def _has_shell_command_separator(command: str) -> bool:
     return False
 
 
+def _shell_command_segments(command: str) -> list[str]:
+    segments: list[str] = []
+    for line in str(command or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        current: list[str] = []
+        for token in _shell_tokens(line):
+            clean = _clean_token(token)
+            if _is_shell_command_separator(token, clean):
+                stripped = str(token or "").strip()
+                if stripped.endswith(";") and stripped.strip(" ;"):
+                    current.append(stripped.rstrip(";"))
+                if current:
+                    segments.append(" ".join(current))
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(" ".join(current))
+    return [segment for segment in segments if segment.strip()]
+
+
 def _git_subcommand(command: str) -> str:
     return _git_command_context(command)[0]
 
@@ -7724,7 +7944,20 @@ def _reviewed_local_vcs_checkpoint_next_safe_command(checkpoint: ReviewedLocalVc
     git_prefix = "gi" + "t" if checkpoint.visible_workdir else "gi" + "t -C " + shell_arg(str(checkpoint.root))
     if checkpoint.mode == "commit":
         return f"{git_prefix} commit -F <message-file>"
-    return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
+    if checkpoint.mode == "staging-review-bundle":
+        return (
+            f"{git_prefix} status --short; "
+            f"{git_prefix} diff --cached --check; "
+            f"{git_prefix} add -f -- <ignored-route-artifact-if-needed>; "
+            f"{git_prefix} diff --cached --check; "
+            f"{git_prefix} commit -F <message-file>"
+        )
+    return (
+        f"{git_prefix} diff --cached --check; "
+        f"{git_prefix} add -f -- <ignored-route-artifact-if-needed>; "
+        f"{git_prefix} diff --cached --check; "
+        f"{git_prefix} commit -F <message-file>"
+    )
 
 
 def _product_source_vcs_next_safe_command(inventory: Inventory, data: dict[str, object], command: str) -> str:
@@ -7749,6 +7982,7 @@ def _product_source_vcs_next_safe_command(inventory: Inventory, data: dict[str, 
         stage_target = " ".join(shell_arg(pathspec) for pathspec in pathspecs) or "<exact-reviewed-product-files>"
         return (
             f"{git_prefix} add -- {stage_target}; "
+            f"{git_prefix} status --short; "
             f"{git_prefix} diff --cached --check; "
             f"{git_prefix} commit -F <message-file>"
         )

@@ -11219,6 +11219,46 @@ class CliTests(unittest.TestCase):
             self.assertIn("mlhd-run-once-apply", run_once_output.getvalue())
             run_once_payload = json.loads((runtime_dir / "last-run-once.json").read_text(encoding="utf-8"))
             self.assertEqual("run-once", run_once_payload["last_action"])
+            self.assertEqual("completed", run_once_payload["run_once_status"])
+            self.assertEqual("completed", run_once_payload["bounded_outcome"])
+            self.assertTrue(run_once_payload["started_at_utc"])
+            self.assertTrue(run_once_payload["completed_at_utc"])
+            self.assertIn(run_once_payload["projection_refresh_status"], {"current", "refreshed", "deferred", "degraded"})
+
+    def test_mlhd_run_once_writes_in_progress_marker_before_refresh_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            observed: list[str] = []
+
+            def artifact_refresh_probe(_inventory, *, quiet_period_seconds: float):
+                marker = json.loads((runtime_dir / "last-run-once.json").read_text(encoding="utf-8"))
+                state = json.loads((runtime_dir / "state.json").read_text(encoding="utf-8"))
+                self.assertEqual("in-progress", marker["run_once_status"])
+                self.assertEqual("in-progress", marker["bounded_outcome"])
+                self.assertEqual("running", state["status"])
+                self.assertEqual("run-once", state["last_action"])
+                self.assertEqual(os.getpid(), marker["pid"])
+                observed.append("artifact")
+                return [Finding("info", "projection-artifact-warm-cache", "artifact warmed", ARTIFACT_DIR_REL)]
+
+            def index_refresh_probe(_inventory, *, quiet_period_seconds: float):
+                observed.append("index")
+                return [Finding("info", "projection-index-warm-cache", "index warmed", INDEX_REL_PATH)]
+
+            output = io.StringIO()
+            with patch("mylittleharness.daemon.warm_projection_artifacts", side_effect=artifact_refresh_probe), patch(
+                "mylittleharness.daemon.warm_projection_index",
+                side_effect=index_refresh_probe,
+            ), redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply"]), 0)
+
+            self.assertEqual(["artifact", "index"], observed)
+            final_marker = json.loads((runtime_dir / "last-run-once.json").read_text(encoding="utf-8"))
+            self.assertEqual("completed", final_marker["run_once_status"])
+            self.assertEqual("completed", final_marker["bounded_outcome"])
+            self.assertTrue(final_marker["completed_at_utc"])
+            self.assertIn("bounded one-shot start/completion markers", output.getvalue())
 
     def test_mlhd_run_once_warms_dirty_projection_cache_after_quiet_period(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11321,6 +11361,69 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(doctor_text):
                 self.assertEqual(main(["--root", str(root), "mlhd", "doctor"]), 0)
             self.assertIn("projection_refresh_status=refreshed", doctor_text.getvalue())
+
+    def test_dashboard_reports_interrupted_run_once_marker_without_confusing_source_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            runtime_dir.mkdir(parents=True)
+            started_at = "2026-06-23T10:00:00Z"
+            stale_pid = 999999999
+            (runtime_dir / "last-run-once.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.mlhd-control-plane.v1",
+                        "status": "in-progress",
+                        "last_action": "run-once",
+                        "pid": stale_pid,
+                        "updated_at_utc": started_at,
+                        "run_once_status": "in-progress",
+                        "bounded_outcome": "in-progress",
+                        "started_at_utc": started_at,
+                        "completed_at_utc": "",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.mlhd-control-plane.v1",
+                        "status": "running",
+                        "last_action": "run-once",
+                        "pid": stale_pid,
+                        "updated_at_utc": started_at,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            dashboard_json = io.StringIO()
+            with redirect_stdout(dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            payload = json.loads(dashboard_json.getvalue())
+            self.assertEqual("run-once-interrupted", payload["mlhd"]["control_status"])
+            self.assertEqual("run-once-interrupted", payload["mlhd"]["daemon_status"])
+            self.assertEqual("in-progress", payload["mlhd"]["run_once_status"])
+            self.assertEqual("in-progress", payload["mlhd"]["refresh_posture"])
+            self.assertEqual("no-dirty-markers", payload["mlhd"]["source_health_status"])
+            self.assertIn("no completion marker", payload["mlhd"]["operator_summary"])
+            readiness = payload["connectReadiness"]["mlhd"]
+            self.assertEqual("in-progress", readiness["runOnceStatus"])
+            self.assertEqual(started_at, readiness["runOnceStartedAtUtc"])
+            self.assertEqual("", readiness["runOnceCompletedAtUtc"])
+            dashboard_findings = [
+                finding
+                for section in payload["sections"]
+                for finding in section["findings"]
+                if finding["code"] == "dashboard-mlhd-control-freshness"
+            ]
+            self.assertEqual(["warn"], [finding["severity"] for finding in dashboard_findings])
 
     def test_mlhd_product_fixture_refuses_runtime_control_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -35932,6 +36035,32 @@ class CliTests(unittest.TestCase):
                     "command": "git " + f'-C "{product_root}" add -- src/mylittleharness/hooks.py tests/test_cli.py',
                 }
             )
+            review_bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "git "
+                        + f'-C "{product_root}" add -- src/mylittleharness/hooks.py tests/test_cli.py\n'
+                        + "git "
+                        + f'-C "{product_root}" status --short\n'
+                        + "git "
+                        + f'-C "{product_root}" diff --cached --check'
+                    ),
+                }
+            )
+            broad_review_bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "git "
+                        + f'-C "{product_root}" add -- .\n'
+                        + "git "
+                        + f'-C "{product_root}" status --short\n'
+                        + "git "
+                        + f'-C "{product_root}" diff --cached --check'
+                    ),
+                }
+            )
             commit_input = json.dumps(
                 {
                     "toolName": "shell_command",
@@ -35978,6 +36107,10 @@ class CliTests(unittest.TestCase):
 
             stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
             stage_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_git_c_input)
+            review_bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], review_bundle_input)
+            broad_review_bundle_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], broad_review_bundle_input
+            )
             commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
             commit_git_c_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_git_c_input)
             finalization_sequence_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], finalization_sequence_input)
@@ -35990,6 +36123,12 @@ class CliTests(unittest.TestCase):
 
             stage_codes = {finding["code"] for finding in stage_payload["findings"]}
             stage_git_c_codes = {finding["code"] for finding in stage_git_c_payload["findings"]}
+            review_bundle_codes = {finding["code"] for finding in review_bundle_payload["findings"]}
+            broad_review_bundle_codes = {finding["code"] for finding in broad_review_bundle_payload["findings"]}
+            review_bundle_messages = "\n".join(str(finding["message"]) for finding in review_bundle_payload["findings"])
+            broad_review_bundle_messages = "\n".join(
+                str(finding["message"]) for finding in broad_review_bundle_payload["findings"]
+            )
             commit_codes = {finding["code"] for finding in commit_payload["findings"]}
             commit_git_c_codes = {finding["code"] for finding in commit_git_c_payload["findings"]}
             finalization_sequence_codes = {finding["code"] for finding in finalization_sequence_payload["findings"]}
@@ -36005,6 +36144,16 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-staging", stage_git_c_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", stage_git_c_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", stage_git_c_codes)
+            self.assertFalse(review_bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-staging", review_bundle_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", review_bundle_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", review_bundle_codes)
+            self.assertIn("review bundles may append only git status --short", review_bundle_messages)
+            self.assertIn("diff --cached --check", review_bundle_messages)
+            self.assertTrue(broad_review_bundle_payload["block"])
+            self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", broad_review_bundle_codes)
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_review_bundle_codes)
+            self.assertIn("only exact staging of reviewed existing files", broad_review_bundle_messages)
             self.assertFalse(commit_payload["block"])
             self.assertIn("hooks-policy-allow-product-source-vcs-commit", commit_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
@@ -36226,6 +36375,95 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_real_codex_wrapper_coordination_reports_with_protected_terms(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "operator", phase_status="pending")
+            product_root = Path(tmp) / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            prompt = (
+                "<codex_delegation><input>Coordinator report: checkpoint/bundle behavior must be validated for "
+                "product/neighbor-root exact packages and operating-root route/evidence packages. Discuss protected "
+                "workflow concepts such as writeback --apply, git add -f -- <exact-route-artifact>, git commit, "
+                "route-produced evidence, broad unsafe staging, and local savepoints as report context and test "
+                "requirements. Keep broad unsafe staging blocked, use legal MLH dry-run/apply routes, preserve "
+                "unrelated dirty work, do not push, do not release, do not bypass review, and do not weaken mutation "
+                "guards. This create/send thread wrapper text is not a current shell/editor mutation request.</input>"
+                "</codex_delegation>"
+            )
+            hook_inputs = [
+                {
+                    "request": {
+                        "payload": {
+                            "tool_call": {
+                                "function": {
+                                    "name": "codex_app.create_thread",
+                                    "arguments": json.dumps(
+                                        {
+                                            "workdir": str(root),
+                                            "target": {"project": {"root": str(root), "product_source_root": str(product_root)}},
+                                            "input": prompt,
+                                        }
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    "payload": {
+                        "toolCall": {
+                            "name": "codex_app.send_message_to_thread",
+                            "arguments": json.dumps(
+                                {
+                                    "thread_id": "019e7d92-c750-77c3-b74f-a8380ebc094f",
+                                    "target": {"project": {"root": str(root), "product_source_root": str(product_root)}},
+                                    "message": prompt,
+                                }
+                            ),
+                        }
+                    }
+                },
+                {
+                    "tool_uses": [
+                        {
+                            "recipient_name": "codex_app.send_message_to_thread",
+                            "parameters": {
+                                "thread_id": "thread-1",
+                                "workdir": str(root),
+                                "message": prompt,
+                            },
+                        },
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {
+                                "workdir": str(root),
+                                "command": 'rg -n "git add -f|writeback --apply|route-produced evidence" project',
+                            },
+                        },
+                    ]
+                },
+            ]
+
+            for hook_input in hook_inputs:
+                with self.subTest(wrapper=json.dumps(hook_input)[:90]):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+                    self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+                    self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
     def test_hooks_pre_tool_blocks_policy_boundary_plus_direct_mutation(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -36242,6 +36480,45 @@ class CliTests(unittest.TestCase):
                         "parameters": {"thread_id": "thread-1", "workdir": str(root), "message": prompt},
                     }
                 ],
+            }
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+
+    def test_hooks_pre_tool_blocks_real_codex_wrapper_with_delegated_direct_mutation_payload(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            hook_input = {
+                "request": {
+                    "payload": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "codex_app.send_message_to_thread",
+                                    "arguments": json.dumps(
+                                        {
+                                            "thread_id": "thread-1",
+                                            "workdir": str(root),
+                                            "message": "Read the contract and report findings only.",
+                                        }
+                                    ),
+                                }
+                            },
+                            {
+                                "function": {
+                                    "name": "functions.shell_command",
+                                    "arguments": json.dumps({"workdir": str(root), "command": "git push origin main"}),
+                                }
+                            },
+                        ]
+                    }
+                }
             }
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
@@ -36909,6 +37186,16 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = make_live_root(base / "operator")
+            product_root = base / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
             neighbor_root = make_live_root(base / "neighbor")
             checkpoint_paths = self._write_meta_feedback_checkpoint_fixture(neighbor_root)
             stage_paths = " ".join(checkpoint_paths)
@@ -36926,8 +37213,74 @@ class CliTests(unittest.TestCase):
             messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
-            self.assertIn("next_safe_review=git diff --cached --check; git commit -F <message-file>", messages)
+            self.assertIn(
+                "next_safe_review=git diff --cached --check; git add -f -- <ignored-route-artifact-if-needed>; "
+                "git diff --cached --check; git commit -F <message-file>",
+                messages,
+            )
             self.assertNotIn("next_safe_review=git -C", messages)
+
+    def test_hooks_pre_tool_allows_neighbor_checkpoint_review_bundle_and_blocks_broad_add(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operator")
+            product_root = base / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    f'active_plan: ""\nproduct_source_root: "{product_root}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            neighbor_root = make_live_root(base / "neighbor")
+            checkpoint_paths = self._write_meta_feedback_checkpoint_fixture(neighbor_root)
+            stage_paths = " ".join(checkpoint_paths)
+            bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "git "
+                        + f'-C "{neighbor_root}" add -- '
+                        + stage_paths
+                        + "; git "
+                        + f'-C "{neighbor_root}" status --short; git '
+                        + f'-C "{neighbor_root}" diff --cached --check'
+                    ),
+                }
+            )
+            broad_bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        "git "
+                        + f'-C "{neighbor_root}" add -- .; git '
+                        + f'-C "{neighbor_root}" status --short; git '
+                        + f'-C "{neighbor_root}" diff --cached --check'
+                    ),
+                }
+            )
+
+            bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bundle_input)
+            broad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], broad_bundle_input)
+
+            bundle_codes = {finding["code"] for finding in bundle_payload["findings"]}
+            broad_codes = {finding["code"] for finding in broad_payload["findings"]}
+            bundle_messages = "\n".join(str(finding["message"]) for finding in bundle_payload["findings"])
+            broad_messages = "\n".join(str(finding["message"]) for finding in broad_payload["findings"])
+            self.assertFalse(bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", bundle_codes)
+            self.assertIn("next_safe_review=", bundle_messages)
+            self.assertIn("status --short", bundle_messages)
+            self.assertIn("add -f -- <ignored-route-artifact-if-needed>", bundle_messages)
+            self.assertIn(str(neighbor_root.resolve()), bundle_messages)
+            self.assertNotIn(str(product_root.resolve()), bundle_messages)
+            self.assertTrue(broad_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
+            self.assertIn("only exact existing MLH route/evidence files", broad_messages)
 
     def test_hooks_pre_tool_keeps_product_source_workdir_unsafe_vcs_forms_blocked_after_closeout(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -37072,6 +37425,56 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", partial_codes)
             self.assertIn("next_safe_command=", partial_messages)
             self.assertIn(archive_rel, partial_messages)
+
+    def test_hooks_pre_tool_allows_operating_root_route_review_bundle_and_blocks_broad_add(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state_rel = "project/" + "project-state.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            archive_rel = "project/" + "archive/plans/active-closeout.md"
+            state_path = root / state_rel
+            archive = root / archive_rel
+            archive.parent.mkdir(parents=True)
+            (root / roadmap_rel).write_text("# Roadmap\n", encoding="utf-8")
+            archive.write_text("# Active Closeout\n", encoding="utf-8")
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                .replace('phase_status: "complete"', f'phase_status: "complete"\nlast_archived_plan: "{archive_rel}"')
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- phase_status: complete\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", state_rel, roadmap_rel, archive_rel])
+                    + "; git status --short; git diff --cached --check",
+                }
+            )
+            broad_bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": "git add -- .; git status --short; git diff --cached --check",
+                }
+            )
+
+            bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bundle_input)
+            broad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], broad_bundle_input)
+
+            bundle_codes = {finding["code"] for finding in bundle_payload["findings"]}
+            broad_codes = {finding["code"] for finding in broad_payload["findings"]}
+            bundle_messages = "\n".join(str(finding["message"]) for finding in bundle_payload["findings"])
+            self.assertFalse(bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", bundle_codes)
+            self.assertIn("review bundles may append only git status --short", bundle_messages)
+            self.assertIn("git add -f -- <exact-route-artifact>", bundle_messages)
+            self.assertTrue(broad_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
 
     def test_hooks_pre_tool_allows_active_route_checkpoint_with_source_incubation_relationship(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -38219,6 +38622,28 @@ class CliTests(unittest.TestCase):
                 ")\n"
                 "& mylittleharness @argsList"
             )
+            splatted_transition_capture = (
+                "$risk = 'Pre-existing product project/project-state.md note remains out-of-scope and unaccepted.'\n"
+                "$resultFilter = 'review token'\n"
+                "$argsList = @(\n"
+                "  '--root', '.',\n"
+                "  'transition', '--dry-run',\n"
+                "  '--complete-current-phase',\n"
+                "  '--archive-active-plan',\n"
+                "  '--docs-decision', 'not-needed',\n"
+                "  '--state-writeback', 'route evidence written under project/verification/agent-runs/closeout.md',\n"
+                "  '--verification', 'focused tests passed',\n"
+                "  '--commit-decision', 'exact local savepoints; no push',\n"
+                "  '--residual-risk', $risk,\n"
+                "  '--carry-forward', $risk,\n"
+                "  '--next-state', 'no-next-action'\n"
+                ")\n"
+                "$out = & mylittleharness @argsList 2>&1\n"
+                "$out | Select-String -Pattern $resultFilter"
+            )
+            splatted_transition_capture_with_extra_write = (
+                splatted_transition_capture + "; Set-Content project/project-state.md '# bypass'"
+            )
 
             owner_payload = hook_event_payload(
                 load_inventory(root),
@@ -38256,6 +38681,18 @@ class CliTests(unittest.TestCase):
                 [],
                 json.dumps({"toolName": "shell_command", "command": splatted_phase_writeback}),
             )
+            transition_capture_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": splatted_transition_capture}),
+            )
+            transition_capture_extra_write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": splatted_transition_capture_with_extra_write}),
+            )
 
             owner_codes = {finding["code"] for finding in owner_payload["findings"]}
             self.assertFalse(owner_payload["block"])
@@ -38270,6 +38707,20 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", phase_writeback_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", phase_writeback_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", phase_writeback_codes)
+
+            transition_capture_codes = {finding["code"] for finding in transition_capture_payload["findings"]}
+            self.assertFalse(transition_capture_payload["block"])
+            self.assertIn("hooks-policy-allow-powershell-mlh-owner-route-splat", transition_capture_codes)
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", transition_capture_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", transition_capture_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", transition_capture_codes)
+
+            transition_capture_extra_write_codes = {
+                finding["code"] for finding in transition_capture_extra_write_payload["findings"]
+            }
+            self.assertTrue(transition_capture_extra_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", transition_capture_extra_write_codes)
+            self.assertNotIn("hooks-policy-allow-mlh-owner-route-evidence-paths", transition_capture_extra_write_codes)
 
             extra_write_codes = {finding["code"] for finding in extra_write_payload["findings"]}
             self.assertTrue(extra_write_payload["block"])

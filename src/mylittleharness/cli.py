@@ -2709,7 +2709,9 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
                 "check-quick-summary-only-bounded",
                 (
                     "check --quick --json --summary-only computes a bounded lifecycle/posture summary and "
-                    "marks omitted diagnostics as not-checked; rerun without --summary-only for the full quick JSON report"
+                    "marks omitted diagnostics as not-checked; it does not wait on mlhd run-once completion or prove "
+                    "generated cache truth; rerun without --summary-only for the full quick JSON report and inspect "
+                    "dashboard/check mlhd run_once markers for bounded refresh outcome"
                 ),
             )
         )
@@ -2743,7 +2745,17 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         return "check --deep", [*sections, ("Boundary", boundary_section)]
 
     if getattr(args, "quick", False):
-        boundary_section.append(Finding("info", "check-quick-read-only", "check --quick renders a compact routine report without writing files or hiding JSON authority boundaries"))
+        boundary_section.append(
+            Finding(
+                "info",
+                "check-quick-read-only",
+                (
+                    "check --quick renders a compact routine report without writing files or hiding JSON authority boundaries; "
+                    "it reports mlhd/run-once posture if present but does not wait forever for background refresh or make "
+                    "daemon markers into source/cache authority"
+                ),
+            )
+        )
         return "check --quick", [*sections, ("Boundary", boundary_section)]
 
     boundary_section.append(Finding("info", "check-compatibility-diagnostics", "use check --deep or check --focus for consolidated links, context, and hygiene diagnostics; compatibility commands remain available"))
@@ -3511,7 +3523,7 @@ def _suggestions(command: str, findings) -> list[str]:
         if any("dry-run" in str(finding.code or "") for finding in findings):
             return ["mlhd dry-run reported disposable runtime targets without writing files."]
         if any(finding.code.endswith("-apply") for finding in findings):
-            return ["mlhd apply wrote disposable runtime evidence and optional generated projection cache only; lifecycle, source, archive, Git, provider, and release authority remain unchanged."]
+            return ["mlhd apply wrote disposable runtime evidence, including bounded one-shot start/completion markers, and optional generated projection cache only; lifecycle, source, archive, Git, provider, and release authority remain unchanged."]
         return ["mlhd status inspected disposable runtime state without writing files."]
     if command == "preflight":
         if any(finding.severity in {"warn", "error"} for finding in findings):
