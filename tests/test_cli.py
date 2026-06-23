@@ -35210,6 +35210,121 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
             self.assertIn("memory-hygiene/archive-reference-package", unsafe_messages)
 
+    def test_hooks_pre_tool_allows_route_produced_deleted_incubation_note_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            subprocess.run(["git", "-C", str(neighbor_root), "init"], check=True, capture_output=True)
+            note_rel = "project/plan-incubation/writeback-fanin-claim-handoff-terminal-state-guidance.md"
+            unrelated_note_rel = "project/plan-incubation/unrelated-deleted-incubation-note.md"
+            archive_rel = (
+                "project/archive/reference/incubation/"
+                "2026-06-23-writeback-fanin-claim-handoff-terminal-state-guidance.md"
+            )
+            note_path = neighbor_root / note_rel
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            note_path.write_text(
+                "---\n"
+                'topic: "writeback-fanin-claim-handoff-terminal-state-guidance"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# writeback fanin\n\n"
+                "[MLH-Fix-Candidate] lifecycle staging checkpoint note.\n",
+                encoding="utf-8",
+            )
+            unrelated_note_path = neighbor_root / unrelated_note_rel
+            unrelated_note_path.write_text(
+                "---\n"
+                'topic: "unrelated-deleted-incubation-note"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# unrelated deleted incubation note\n\n"
+                "[MLH-Fix-Candidate] unrelated route note.\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(neighbor_root), "add", "--", note_rel, unrelated_note_rel],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(neighbor_root),
+                    "-c",
+                    "user.name=MLH Test",
+                    "-c",
+                    "user.email=mlh-test@example.invalid",
+                    "commit",
+                    "-m",
+                    "Track incubation note",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            note_path.unlink()
+            unrelated_note_path.unlink()
+            archive_path = neighbor_root / archive_rel
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.write_text(
+                "---\n"
+                'topic: "writeback-fanin-claim-handoff-terminal-state-guidance"\n'
+                'status: "implemented"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                f'archived_to: "{archive_rel}"\n'
+                "---\n"
+                "# writeback fanin\n\n"
+                "## Provenance\n\n"
+                "- Source: MyLittleHarness incubation route\n"
+                "- Non-authority note: incubation is temporary synthesis; promoted plan/state remains authority.\n\n"
+                "## Entry Coverage\n\n"
+                "- `2026-06-23`: `implemented` "
+                "project/archive/plans/2026-06-23-hook-ux-follow-up-terminal-evidence-and-staging-guidance.md\n",
+                encoding="utf-8",
+            )
+
+            payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": ("gi" + f't -C "{neighbor_root}" add -- {note_rel}'),
+                    }
+                ),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"], messages)
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertIn("memory-hygiene/archive-reference-package", messages)
+            self.assertIn("diff --cached --check", messages)
+            self.assertNotIn("incubate --dry-run", messages)
+
+            unrelated_payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": ("gi" + f't -C "{neighbor_root}" add -- {unrelated_note_rel}'),
+                    }
+                ),
+            )
+            unrelated_codes = {finding["code"] for finding in unrelated_payload["findings"]}
+            self.assertTrue(unrelated_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unrelated_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unrelated_codes)
+
     def test_hooks_pre_tool_allows_exact_memory_hygiene_prompt_move_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

@@ -5539,6 +5539,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     post_closeout_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
     if post_closeout_paths:
         return post_closeout_paths
+    archived_source_tombstone_paths = _coherent_archived_source_incubation_tombstone_stage_paths(inventory, paths)
+    if archived_source_tombstone_paths:
+        return archived_source_tombstone_paths
     memory_hygiene_paths = _coherent_memory_hygiene_checkpoint_paths(inventory, paths)
     if memory_hygiene_paths:
         return memory_hygiene_paths
@@ -6143,12 +6146,26 @@ def _is_reviewed_memory_hygiene_archive_reference_file(inventory: Inventory, pat
     archived_to = _hook_route_rel_path(inventory, str(data.get("archived_to") or "")).casefold()
     body = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :]).casefold()
     has_route_refs = any(str(data.get(key) or "").strip() for key in ("related_plan", "archived_plan", "implemented_by"))
+    has_entry_coverage = _has_archive_covered_entry_coverage(body)
     return (
         source == "mylittleharness incubation route"
         and status in {"implemented", "archived", "superseded", "rejected", "deferred"}
         and (not archived_to or archived_to == _normalize_hook_path(path).casefold())
-        and has_route_refs
+        and (has_route_refs or has_entry_coverage)
         and "non-authority" in body
+    )
+
+
+def _has_archive_covered_entry_coverage(body: str) -> bool:
+    content = str(body or "").casefold()
+    if "## entry coverage" not in content:
+        return False
+    return bool(
+        re.search(
+            r"(?m)^-\s*`[^`\n]+`:\s*`(?:implemented|archived|superseded|rejected|deferred)`\s+"
+            r"project/archive/plans/[^ \n]+\.md\b",
+            content,
+        )
     )
 
 
