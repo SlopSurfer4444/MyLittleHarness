@@ -2133,13 +2133,15 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     if allow_reviewed_local_vcs_checkpoint:
         checkpoint_next_safe = _reviewed_local_vcs_checkpoint_next_safe_command(reviewed_local_vcs_checkpoint)
+        checkpoint_root = reviewed_local_vcs_checkpoint.root
+        checkpoint_root_text = str(checkpoint_root.resolve()) if checkpoint_root else "unknown"
         findings.append(
             Finding(
                 "info",
                 "hooks-policy-allow-reviewed-local-vcs-checkpoint",
                 (
                     "allowed exact reviewed local-only VCS checkpoint operation for route-produced lifecycle/evidence "
-                    "files in the actual command workdir/root, including deferred research/archive route packages, "
+                    f"files in the actual command workdir/root ({checkpoint_root_text}), including deferred research/archive route packages, "
                     "memory-hygiene/archive-reference-package and post-closeout lifecycle route packages, "
                     "delegated neighbor-root exact eligible file sets, project evidence/reference routes, "
                     "and initial scaffold packages, "

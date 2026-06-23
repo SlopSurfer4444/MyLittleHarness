@@ -704,15 +704,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.focus:
                 payload["report_scope"] = _focused_report_scope(args.focus, sections)
-        if getattr(args, "quick", False):
-            if getattr(args, "summary_only", False):
-                payload["report_scope"] = _quick_summary_only_report_scope(sections)
-            else:
-                payload["report_scope"] = _quick_report_scope(sections)
-            if "report_scope" in payload:
                 apply_report_scope_to_compact_summary(payload["summary"], payload["report_scope"])
-            if getattr(args, "summary_only", False):
-                payload = summary_only_json_report_payload(payload)
+            if getattr(args, "quick", False):
+                if getattr(args, "summary_only", False):
+                    payload["report_scope"] = _quick_summary_only_report_scope(sections)
+                else:
+                    payload["report_scope"] = _quick_report_scope(sections)
+                if "report_scope" in payload:
+                    apply_report_scope_to_compact_summary(payload["summary"], payload["report_scope"])
+                if getattr(args, "summary_only", False):
+                    payload = summary_only_json_report_payload(payload)
             emit_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
         elif getattr(args, "quick", False):
             emit_text(render_quick_check_report(inventory.root, result, inventory.sources_for_report(), sections, suggestions))
