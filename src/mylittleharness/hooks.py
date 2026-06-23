@@ -317,6 +317,51 @@ SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE = re.compile(
     r")*"
     r")\b"
 )
+SUBAGENT_DELEGATION_NEGATED_CLASSIFICATION_RE = re.compile(
+    r"(?i)\b(?:is|are|was|were|be|being)?\s*not\s+"
+    r"(?:a|an|the)?\s*"
+    r"(?:(?!\b(?:then|after|afterward|now|immediately)\b)[^\n\r.;]){0,220}"
+    r"(?:"
+    r"bypass(?:\s+request)?|"
+    r"push(?:\s+request)?|"
+    r"release(?:\s+request)?|"
+    r"provider(?:\s+(?:launch|routing|request))?|"
+    r"daemon(?:\s+(?:launch|request))?|"
+    r"runtime(?:\s+(?:launch|request))?|"
+    r"launcher(?:\s+(?:config|request))?|"
+    r"mutation(?:\s+request)?|"
+    r"source-write(?:\s+request)?|"
+    r"shell\s+mutation|"
+    r"lifecycle\s+edit|"
+    r"product\s+edit|"
+    r"apply_patch|"
+    r"git\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)"
+    r")\b"
+)
+SUBAGENT_DELEGATION_PROTECTIVE_POLICY_BOUNDARY_RE = re.compile(
+    r"(?i)\b(?:keep|continue|preserve|retain|still|should|must|will|need\s+to|needs\s+to)\s+"
+    r"(?:(?:real|unsafe|direct|broad|protected|explicit)\s+){0,4}"
+    r"(?:blocking|block|blocked|refusing|refuse|preventing|prevent|disallowing|disallow|denying|deny)\b"
+    r"(?:(?!\b(?:then|after|afterward|now|immediately)\b)[^\n\r.;]){0,240}"
+    r"(?:"
+    r"bypass|"
+    r"push|"
+    r"release|"
+    r"provider|"
+    r"daemon|"
+    r"runtime|"
+    r"launcher|"
+    r"--force|"
+    r"--mirror|"
+    r"--delete|"
+    r"--amend|"
+    r"--all|"
+    r"--no-verify|"
+    r"apply_patch|"
+    r"set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|"
+    r"git\s+(?:add|stage|commit|push|reset|checkout|clean|restore|rm|mv)"
+    r")\b"
+)
 SUBAGENT_DELEGATION_UNSAFE_EXTERNAL_RE = re.compile(
     r"(?i)(?:"
     r"\bgit\s+(?:push|reset|checkout|clean|restore|rm|mv)\b|"
@@ -1720,6 +1765,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     )
     allow_read_only_hook_simulation = _is_read_only_hook_diagnostic_simulation_command(command)
     block_unsafe_hook_simulation_payload = _has_unsafe_hook_diagnostic_simulation_payload(command)
+    delegation_prompt_text = _delegation_prompt_text(data, text)
     allow_read_only_subagent_delegation = _is_read_only_subagent_delegation_request(data, text)
     allow_reviewed_local_vcs_delegation = _is_reviewed_local_vcs_delegation_request(data, text)
     allow_apply_patch_intent = bool(_hook_apply_patch_target_paths(command_data))
@@ -1791,6 +1837,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
     allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
+    delegation_prompt_shortcut = (
+        _is_subagent_delegation_tool_request(data)
+        and _subagent_delegation_forbidden_shortcut(delegation_prompt_text)
+    )
+    delegation_wrapper_unallowed_shortcut = (
+        _is_subagent_delegation_tool_request(data)
+        and not allow_product_source_vcs_command
+        and _subagent_delegation_forbidden_shortcut(text)
+    )
+    allow_delegation_prompt_path_context = (
+        allow_delegation_prompt_context
+        and not delegation_wrapper_unallowed_shortcut
+    )
     mutation_check_command = (
         _scrub_negated_subagent_delegation_guardrails(command)
         if _is_subagent_delegation_tool_request(data)
@@ -1823,7 +1882,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         allow_post_closeout_lifecycle_route_stage=(allow_post_closeout_lifecycle_route_stage or allow_route_produced_lifecycle_route_stage),
         allow_post_closeout_local_vcs_stage=allow_post_closeout_local_vcs_stage,
         allow_post_closeout_lifecycle_vcs_finalization_paths=post_closeout_lifecycle_vcs_finalization_paths,
-        allow_delegation_prompt_context=allow_delegation_prompt_context,
+        allow_delegation_prompt_context=allow_delegation_prompt_path_context,
         allow_product_source_vcs_command=allow_product_source_vcs_command,
         reviewed_local_vcs_checkpoint_root=reviewed_local_vcs_checkpoint.root,
         reviewed_local_vcs_checkpoint_paths=set(reviewed_local_vcs_checkpoint.paths),
@@ -2223,7 +2282,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else None,
             )
         )
-    if allow_delegation_prompt_context and not allow_read_only_subagent_delegation and not allow_reviewed_local_vcs_delegation:
+    if allow_delegation_prompt_path_context and not allow_read_only_subagent_delegation and not allow_reviewed_local_vcs_delegation:
         findings.append(
             Finding(
                 "info",
@@ -2239,9 +2298,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     if (
         _is_subagent_delegation_tool_request(data)
-        and _subagent_delegation_forbidden_shortcut(text)
+        and (delegation_wrapper_unallowed_shortcut or (delegation_prompt_shortcut and not allow_delegation_prompt_context))
         and not allow_reviewed_local_vcs_delegation
-        and not allow_delegation_prompt_context
     ):
         findings.append(
             Finding(
@@ -3645,7 +3703,9 @@ def _subagent_delegation_forbidden_shortcut(text: str) -> bool:
 def _scrub_negated_subagent_delegation_guardrails(text: str) -> str:
     scrubbed = SUBAGENT_DELEGATION_NEGATED_GUARDRAIL_RE.sub(" ", str(text or ""))
     scrubbed = SUBAGENT_DELEGATION_NEGATED_BYPASS_TAIL_RE.sub(" ", scrubbed)
-    return SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
+    scrubbed = SUBAGENT_DELEGATION_NEGATED_EXTERNAL_RE.sub(" ", scrubbed)
+    scrubbed = SUBAGENT_DELEGATION_NEGATED_CLASSIFICATION_RE.sub(" ", scrubbed)
+    return SUBAGENT_DELEGATION_PROTECTIVE_POLICY_BOUNDARY_RE.sub(" ", scrubbed)
 
 
 def _is_safe_route_delegation_coordination_prompt(raw: str, scrubbed: str) -> bool:
@@ -3744,7 +3804,8 @@ def _is_delegation_prompt_context_request(data: dict[str, object], text: str) ->
         return False
     if _is_typed_route_delegation_intent(data, text):
         return True
-    if _subagent_delegation_forbidden_shortcut(text):
+    prompt_text = _delegation_prompt_text(data, text)
+    if _subagent_delegation_forbidden_shortcut(prompt_text):
         return False
     return True
 

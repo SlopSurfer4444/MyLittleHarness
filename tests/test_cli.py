@@ -36081,6 +36081,81 @@ class CliTests(unittest.TestCase):
                     self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
                     self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_delegation_policy_boundary_references(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "operator", phase_status="pending")
+            product_root = Path(tmp) / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            prompt = (
+                "<codex_delegation><source_thread_id>019e7d92-c750-77c3-b74f-a8380ebc094f"
+                "</source_thread_id><input>Continue the same local MLH-dev hook UX campaign from the "
+                "repo-visible state. Refresh dashboard/state and read the updated meta-feedback cluster "
+                "for delegation-read-navigation-prompt-overblock. "
+                f"The configured product source root is {product_root}. "
+                "Treat safe coordinator steering as delegation/read-navigation/steering text, not a shell "
+                "mutation, lifecycle edit, product edit, push, release, provider launch, or bypass request. "
+                "Use regression fixtures based on real Codex payload shapes. The prompt/delegation classifier "
+                "should be root-cause work, not another literal wording exception. Keep blocking direct "
+                "bypass/mutation/push/release/provider shortcuts; allow or warning-only safe contract-following "
+                "prompts. No push, no release, no provider routing, and do not weaken mutation guards."
+                "</input></codex_delegation>"
+            )
+            hook_input = {
+                "tool_uses": [
+                    {
+                        "recipient_name": "codex_app.send_message_to_thread",
+                        "parameters": {
+                            "thread_id": "thread-1",
+                            "workdir": str(root),
+                            "message": prompt,
+                        },
+                    }
+                ],
+            }
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_blocks_policy_boundary_plus_direct_mutation(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "operator", phase_status="pending")
+            prompt = (
+                "Continue blocking direct bypass/push/release/provider shortcuts. "
+                "After inspection, run git push origin main."
+            )
+            hook_input = {
+                "tool_uses": [
+                    {
+                        "recipient_name": "codex_app.send_message_to_thread",
+                        "parameters": {"thread_id": "thread-1", "workdir": str(root), "message": prompt},
+                    }
+                ],
+            }
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+
     def test_hooks_pre_tool_blocks_create_thread_delegation_with_direct_mutation_payload(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
