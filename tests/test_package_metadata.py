@@ -468,7 +468,7 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "not by publication",
             "ephemeral verification artifacts",
-            "not required for release-candidate correctness",
+            "not required for source-release correctness",
         ):
             self.assertIn(expected, boundary)
         for expected in (

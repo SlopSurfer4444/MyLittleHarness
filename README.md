@@ -164,9 +164,9 @@ Optional helpers reduce repeated reading. They do not move authority out of the 
 
 ## Local Release Posture
 
-The current product posture is a local `1.0.0` release candidate. The release confidence claim is documentation-and-verification based, not a public publication claim.
+The current product posture is a public GitHub source release at `1.0.0`. The release confidence claim is documentation-and-verification based; package-index publication, signed binary artifacts, global workstation adoption, and hosted services remain separate future distribution steps.
 
-See `CHANGELOG.md` and `RELEASE_NOTES.md` for the local RC1 checkpoint summary, verification expectations, and owner-approval boundary.
+See `CHANGELOG.md` and `RELEASE_NOTES.md` for the `1.0.0` release summary, verification expectations, and owner-approval boundary.
 
 The local release checklist is:
 
@@ -174,7 +174,7 @@ The local release checklist is:
 - `bootstrap --package-smoke` passes from temporary source/build/install locations outside the product source checkout
 - Wheel, build, and install artifacts are verification outputs only
 - `bootstrap` rejects standalone `bootstrap --apply`
-- owner approval is still required before package-index publication, signed artifact release, global installation, push, tag, artifact upload, or public release announcement
+- owner approval is still required before package-index publication, signed binary artifact release, global installation, artifact upload, hosted-service launch, or future public release announcement
 
 ## Development
 
@@ -190,8 +190,8 @@ Use focused tests for bounded edits, then broader verification when the touched 
 
 ## Docs Map
 
-- `CHANGELOG.md`: local release-candidate change history.
-- `RELEASE_NOTES.md`: local RC1 readiness notes and owner-approval boundary.
+- `CHANGELOG.md`: public release change history.
+- `RELEASE_NOTES.md`: `1.0.0` release notes and owner-approval boundary.
 - `docs/README.md`: product documentation index and release posture.
 - `docs/security.md`: local trust and security boundaries.
 - `docs/reference/command-surface.md`: command overview.

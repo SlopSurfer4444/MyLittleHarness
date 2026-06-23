@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes for MyLittleHarness are recorded here once they are ready for a release-candidate checkpoint.
+All notable changes for MyLittleHarness are recorded here once they are ready for a public release checkpoint.
 
-## 1.0.0-rc1 - Public Release Candidate - 2026-06-21
+## 1.0.0 - First Public GitHub Release - 2026-06-23
 
-This checkpoint publishes MyLittleHarness as a `1.0.0` release candidate for public GitHub review. It does not declare a final stable release, package-index publication, global installation flow, PATH/profile mutation, or workstation adoption.
+This release publishes MyLittleHarness as a public GitHub source release for local use and review. It does not claim package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, or workstation adoption.
 
 ### Added
 
@@ -18,9 +18,11 @@ This checkpoint publishes MyLittleHarness as a `1.0.0` release candidate for pub
 
 ### Changed
 
-- Product posture is now documented as the direct `MyLittleHarness -> target repository` model.
+- Product posture is documented as the direct `MyLittleHarness -> target repository` model.
 - Operating memory, verification records, active plans, archives, and generated output are kept in target operating roots rather than in the reusable product source.
-- Docs and package metadata now treat `1.0.0` as the package version for the first GitHub release-candidate baseline.
+- Docs and package metadata treat `1.0.0` as the package version for the first public GitHub source-release baseline.
+- Quick checks can expose compact summary-only diagnostics for operator-facing decisions.
+- Hook guidance is more precise around real Codex/tool payloads, prompt/delegation boundaries, route-owned checkpointing, exact staging, and explicit publication pushes.
 
 ### Verification Expectations
 
@@ -28,13 +30,12 @@ This checkpoint publishes MyLittleHarness as a `1.0.0` release candidate for pub
 - Product tests run with bytecode disabled from the source checkout.
 - Package smoke builds and installs from temporary locations outside the product source checkout.
 - A fresh target repository can follow the README quick-start path with explicit dry-run/apply boundaries.
-- Product and operating roots are clean after exact local savepoints.
+- Product and operating roots are clean after exact local savepoints, except for intentionally disclosed unrelated local work.
 
 ### Not Included
 
 - Package-index publication.
-- Final stable release claim.
-- Signed artifact release.
+- Signed binary artifact release.
 - Global public announcement campaign.
 - Global installation, PATH/profile edits, or user-config mutation.
 - Standalone `bootstrap --apply` or mutating workstation adoption.
