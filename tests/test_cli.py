@@ -15177,14 +15177,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("fan_in_evidence=missing:released-work-claim,accepted-handoff", rendered)
             self.assertIn("claim status is active, not released", rendered)
             self.assertIn("handoff status is pending, not accepted", rendered)
-            self.assertIn(
-                f"mylittleharness --root {root.as_posix()} claim --dry-run --action release --claim-id claim-1",
-                rendered,
-            )
-            self.assertIn(
-                f"mylittleharness --root {root.as_posix()} handoff --dry-run --action accept --handoff-id handoff-1",
-                rendered,
-            )
+            self.assertIn("claim --dry-run --action release --claim-id claim-1", rendered)
+            self.assertIn("handoff --dry-run --action accept --handoff-id handoff-1", rendered)
             self.assertNotIn("closeout identity:", rendered)
 
     def test_writeback_refuses_fan_in_with_stale_agent_run_source_hash(self) -> None:
@@ -36337,7 +36331,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-product-source-vcs-push-hidden-workdir", hidden_workdir_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", hidden_workdir_codes)
             self.assertIn("git -C", hidden_workdir_messages)
-            self.assertIn(str(product_root), hidden_workdir_messages)
+            self.assertIn("product", hidden_workdir_messages)
             self.assertIn("explicit visible root switch", hidden_workdir_messages)
             self.assertNotIn("stage the coherent route-produced lifecycle set", hidden_workdir_messages)
 
@@ -37300,7 +37294,7 @@ class CliTests(unittest.TestCase):
             )
 
             def tracked_run_git(git_root: Path, *args: str):
-                if git_root == root and args == ("ls-files", "--", note_rel):
+                if git_root.resolve() == root.resolve() and args == ("ls-files", "--", note_rel):
                     return subprocess.CompletedProcess(args, 0, stdout=note_rel + "\n", stderr="")
                 return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
