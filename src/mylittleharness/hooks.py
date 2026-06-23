@@ -2709,7 +2709,18 @@ def _decode_hook_embedded_payloads(value: object, *, key: str = "", depth: int =
         return [_decode_hook_embedded_payloads(item, key=key, depth=depth + 1) for item in value]
     if not isinstance(value, str):
         return value
-    if key.casefold() not in {"arguments", "parameters", "tool_input", "input"}:
+    if key.casefold() not in {
+        "arguments",
+        "parameters",
+        "params",
+        "tool_input",
+        "input",
+        "tool_call",
+        "toolcall",
+        "request",
+        "payload",
+        "data",
+    }:
         return value
     parsed = _parse_hook_embedded_json(value)
     if parsed is None:
@@ -3650,6 +3661,30 @@ def _hook_tool_name(data: dict[str, object]) -> str:
 
 def _hook_tool_names(data: dict[str, object]) -> list[str]:
     names: list[str] = []
+    wrapper_keys = {
+        "tool_uses",
+        "tooluse",
+        "tool_calls",
+        "toolcalls",
+        "tool_call",
+        "toolcall",
+        "call",
+        "calls",
+        "function",
+        "arguments",
+        "parameters",
+        "params",
+        "tool_input",
+        "input",
+        "request",
+        "payload",
+        "data",
+        "target",
+        "project",
+        "body",
+        "message",
+        "messages",
+    }
 
     def collect(value: object) -> None:
         if isinstance(value, dict):
@@ -3657,9 +3692,8 @@ def _hook_tool_names(data: dict[str, object]) -> list[str]:
                 item = value.get(key)
                 if isinstance(item, str) and item.strip():
                     names.append(item.strip().casefold())
-            for key in ("tool_uses", "toolUse", "tool_calls", "calls", "function", "arguments", "parameters", "tool_input", "input"):
-                item = value.get(key)
-                if isinstance(item, (dict, list)):
+            for key, item in value.items():
+                if str(key).casefold() in wrapper_keys and isinstance(item, (dict, list)):
                     collect(item)
         elif isinstance(value, list):
             for item in value:

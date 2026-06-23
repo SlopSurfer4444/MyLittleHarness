@@ -829,8 +829,12 @@ def connect_readiness_packet(
         },
         "mlhd": {
             "controlStatus": str(mlhd.get("control_status") or "unknown"),
+            "daemonStatus": str(mlhd.get("daemon_status") or "unknown"),
             "runtimeCacheStatus": str(mlhd.get("runtime_cache_status") or "unknown"),
             "pidStatus": str(mlhd.get("pid_status") or "unknown"),
+            "sourceHealthStatus": str(mlhd.get("source_health_status") or "unknown"),
+            "refreshPosture": str(mlhd.get("refresh_posture") or "unknown"),
+            "operatorSummary": str(mlhd.get("operator_summary") or ""),
             "lastTickUtc": str(mlhd.get("last_tick_utc") or ""),
             "lastAction": str(mlhd.get("last_action") or ""),
             "lastRefreshStatus": str(mlhd.get("last_refresh_status") or ""),
@@ -1329,41 +1333,101 @@ def mlhd_freshness_payload(inventory: Inventory) -> dict[str, object]:
     runtime = dict(mlhd_runtime_payload(inventory))
     control = inspect_mlhd_control_state(inventory)
     pulse = runtime.get("projection_pulse") if isinstance(runtime.get("projection_pulse"), dict) else {}
+    control_status = str(control.get("control_status") or "unknown")
+    pid_status = str(control.get("pid_status") or "unknown")
+    runtime_cache_status = str(runtime.get("runtime_cache_status") or "unknown")
+    last_refresh_status = str(pulse.get("last_refresh_status") or "")
+    dirty_count = int(pulse.get("dirty_marker_count") or 0)
+    changed_path_count = int(pulse.get("changed_path_count") or 0)
     runtime.update(
         {
-            "control_status": str(control.get("control_status") or "unknown"),
-            "pid_status": str(control.get("pid_status") or "unknown"),
+            "control_status": control_status,
+            "daemon_status": _mlhd_daemon_status(control_status, pid_status, runtime_cache_status),
+            "pid_status": pid_status,
             "last_action": str(control.get("last_action") or ""),
             "last_tick_utc": str(control.get("heartbeat_at_utc") or ""),
-            "last_refresh_status": str(pulse.get("last_refresh_status") or ""),
+            "last_refresh_status": last_refresh_status,
             "last_successful_refresh_utc": str(pulse.get("last_successful_refresh_utc") or ""),
             "last_failed_refresh_utc": str(pulse.get("last_failed_refresh_utc") or ""),
-            "dirty_count": int(pulse.get("dirty_marker_count") or 0),
-            "changed_path_count": int(pulse.get("changed_path_count") or 0),
+            "dirty_count": dirty_count,
+            "changed_path_count": changed_path_count,
+            "source_health_status": _mlhd_source_health_status(last_refresh_status, dirty_count, changed_path_count),
+            "refresh_posture": _mlhd_refresh_posture(last_refresh_status, dirty_count, changed_path_count),
             "next_safe_command": str(pulse.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
         }
     )
+    runtime["operator_summary"] = _mlhd_operator_summary(runtime)
     return runtime
+
+
+def _mlhd_daemon_status(control_status: str, pid_status: str, runtime_cache_status: str) -> str:
+    if runtime_cache_status == "invalid" or control_status == "invalid":
+        return "invalid"
+    if control_status == "running":
+        return "running"
+    if pid_status == "stale" or control_status == "stale":
+        return "stale-pid"
+    if control_status in {"idle", "stopped", "absent"}:
+        return "not-running"
+    return control_status or "unknown"
+
+
+def _mlhd_refresh_posture(last_refresh_status: str, dirty_count: int, changed_path_count: int) -> str:
+    if last_refresh_status == "degraded":
+        return "failed"
+    if last_refresh_status == "deferred":
+        return "deferred"
+    if dirty_count > 0 or changed_path_count > 0:
+        return "needs-refresh"
+    if last_refresh_status in {"current", "refreshed"}:
+        return "current"
+    return "unknown"
+
+
+def _mlhd_source_health_status(last_refresh_status: str, dirty_count: int, changed_path_count: int) -> str:
+    if last_refresh_status == "degraded":
+        return "degraded"
+    if last_refresh_status == "deferred":
+        return "refresh-deferred"
+    if dirty_count > 0 or changed_path_count > 0:
+        return "dirty"
+    return "no-dirty-markers"
+
+
+def _mlhd_operator_summary(mlhd: dict[str, object]) -> str:
+    daemon_status = str(mlhd.get("daemon_status") or "unknown")
+    refresh_posture = str(mlhd.get("refresh_posture") or "unknown")
+    if daemon_status == "stale-pid" and refresh_posture == "current":
+        return "background daemon marker is stale, but one-shot projection refresh is current; not a product-work blocker"
+    if daemon_status == "not-running" and refresh_posture == "current":
+        return "background daemon is not running, but disposable generated-cache freshness is current"
+    if daemon_status == "running":
+        return "background daemon appears to be running; source-health still comes from projection refresh posture"
+    if refresh_posture in {"failed", "needs-refresh"}:
+        return "projection refresh posture needs attention; rerun the mlhd next_safe_command or inspect projection health"
+    return "mlhd runtime posture is advisory; repo-visible source files remain authority"
 
 
 def _mlhd_freshness_findings(inventory: Inventory, code_prefix: str = "dashboard-mlhd") -> list[Finding]:
     mlhd = mlhd_freshness_payload(inventory)
     return [
         Finding(
-            "info" if mlhd["control_status"] not in {"invalid", "stale"} else "warn",
+            "warn" if mlhd["daemon_status"] == "invalid" else "info",
             f"{code_prefix}-control-freshness",
             (
-                f"mlhd control_status={mlhd['control_status']}; runtime_cache={mlhd['runtime_cache_status']}; "
+                f"mlhd daemon_status={mlhd['daemon_status']}; control_status={mlhd['control_status']}; "
+                f"runtime_cache={mlhd['runtime_cache_status']}; "
                 f"pid_status={mlhd['pid_status']}; last_tick={mlhd['last_tick_utc'] or '<none>'}; "
-                f"last_action={mlhd['last_action'] or '<none>'}"
+                f"last_action={mlhd['last_action'] or '<none>'}; summary={mlhd['operator_summary']}"
             ),
             MLHD_RUNTIME_DIR_REL,
         ),
         Finding(
-            "info",
+            "warn" if mlhd["refresh_posture"] in {"failed", "needs-refresh"} else "info",
             f"{code_prefix}-refresh-freshness",
             (
-                f"projection dirty_count={mlhd['dirty_count']}; changed_path_count={mlhd['changed_path_count']}; "
+                f"projection refresh_posture={mlhd['refresh_posture']}; source_health={mlhd['source_health_status']}; "
+                f"dirty_count={mlhd['dirty_count']}; changed_path_count={mlhd['changed_path_count']}; "
                 f"last_refresh={mlhd['last_refresh_status'] or '<none>'}; "
                 f"last_success={mlhd['last_successful_refresh_utc'] or '<none>'}; "
                 f"last_failure={mlhd['last_failed_refresh_utc'] or '<none>'}; next_safe={mlhd['next_safe_command']}"

@@ -11288,6 +11288,35 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "mlhd", "status"]), 0)
             self.assertIn("projection_refresh_status=refreshed", status_text.getvalue())
 
+            (runtime_dir / "pid.json").write_text(
+                json.dumps({"kind": "background-worker", "pid": 999999999}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "lock.json").write_text(
+                json.dumps({"pid": 999999999, "root": str(root)}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            dashboard_json = io.StringIO()
+            with redirect_stdout(dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+
+            dashboard_payload = json.loads(dashboard_json.getvalue())
+            self.assertEqual("stale", dashboard_payload["mlhd"]["control_status"])
+            self.assertEqual("stale-pid", dashboard_payload["mlhd"]["daemon_status"])
+            self.assertEqual("current", dashboard_payload["mlhd"]["refresh_posture"])
+            self.assertEqual("no-dirty-markers", dashboard_payload["mlhd"]["source_health_status"])
+            self.assertIn("one-shot projection refresh is current", dashboard_payload["mlhd"]["operator_summary"])
+            dashboard_findings = [
+                finding
+                for section in dashboard_payload["sections"]
+                for finding in section["findings"]
+                if finding["code"] in {"dashboard-mlhd-control-freshness", "dashboard-mlhd-refresh-freshness"}
+            ]
+            self.assertEqual(
+                {"dashboard-mlhd-control-freshness": "info", "dashboard-mlhd-refresh-freshness": "info"},
+                {finding["code"]: finding["severity"] for finding in dashboard_findings},
+            )
+
             doctor_text = io.StringIO()
             with redirect_stdout(doctor_text):
                 self.assertEqual(main(["--root", str(root), "mlhd", "doctor"]), 0)
@@ -31757,6 +31786,48 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
 
+    def test_hooks_pre_tool_allows_real_codex_wrapped_thread_request_delegation_context(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_ref = (product_root / "src" / "mylittleharness" / "hooks.py").as_posix()
+            prompt = (
+                "Start in the saved MLH-dev project root on local main. Read AGENTS.md, "
+                ".codex/project-workflow.toml, project/project-state.md, and dashboard/check first. "
+                f"Treat product source {product_ref} and target/project fields as navigation context until "
+                "a legal active plan declares target artifacts. Use MLH-approved dry-run/apply lifecycle rails, "
+                "record evidence, preserve unrelated dirty work, and make exact local savepoints. "
+                "Do not push, do not release, do not bypass hooks, and do not weaken mutation guards."
+            )
+            hook_input = json.dumps(
+                {
+                    "request": {
+                        "kind": "tool_request",
+                        "target": {"project_root": str(root), "workdir": str(root)},
+                        "tool_call": {
+                            "name": "codex_app.create_thread",
+                            "arguments": json.dumps(
+                                {
+                                    "input": prompt,
+                                    "title": "MLH rough-edge follow-up",
+                                    "project": {"root": str(root), "target": "local-main"},
+                                }
+                            ),
+                        },
+                    }
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
     def test_hooks_pre_tool_allows_real_codex_send_message_delegation_navigation_context(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -31825,6 +31896,36 @@ class CliTests(unittest.TestCase):
                             "parameters": {"prompt": prompt, "title": "Unsafe delegation"},
                         }
                     ],
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+
+    def test_hooks_pre_tool_blocks_real_codex_wrapped_unsafe_delegation_prompt(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Create a project thread. Read AGENTS.md and project/project-state.md, then run "
+                "mylittleharness --root . writeback --apply and git push origin main."
+            )
+            hook_input = json.dumps(
+                {
+                    "payload": {
+                        "request": {
+                            "target": {"project_root": str(root), "workdir": str(root)},
+                            "toolCall": {
+                                "name": "codex_app.create_thread",
+                                "arguments": json.dumps({"input": prompt, "title": "Unsafe wrapped delegation"}),
+                            },
+                        }
+                    }
                 }
             )
 
