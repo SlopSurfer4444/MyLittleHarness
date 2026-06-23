@@ -2714,6 +2714,8 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         )
         return "check --quick", [*sections, ("Boundary", boundary_section)]
 
+    quick_report = getattr(args, "quick", False) and not getattr(args, "deep", False)
+    projection_cache_findings = projection_cache_status_findings(inventory, bounded=quick_report)
     sections = [
         ("Status", status_findings(inventory)),
         ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
@@ -2724,7 +2726,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         ("Work Claims", work_claim_status_findings(inventory, "check-work-claim")),
         ("Handoff Packets", handoff_packet_status_findings(inventory, "check-handoff-packet")),
         ("Coordination Evidence", coordination_evidence_identity_findings(inventory, "check-coordination-evidence")),
-        ("Projection Cache", projection_cache_status_findings(inventory)),
+        ("Projection Cache", projection_cache_findings),
         ("Drift", check_drift_findings(inventory)),
     ]
     if args.deep:

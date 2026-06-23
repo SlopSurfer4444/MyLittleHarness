@@ -43835,6 +43835,31 @@ class CliTests(unittest.TestCase):
             self.assertIn("operator_diagnostics.next_safe.command", diagnostics["stable_json_paths"])
             self.assertFalse(diagnostics["boundary"]["approves_lifecycle"])
 
+    def test_check_quick_json_bounds_projection_cache_status_without_rebuilding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            def fail_projection_rebuild(*_args: object, **_kwargs: object) -> object:
+                raise AssertionError("quick check must not rebuild full projection for cache status")
+
+            output = io.StringIO()
+            with patch("mylittleharness.checks.build_projection", side_effect=fail_projection_rebuild), redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--quick", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            payload = json.loads(output.getvalue())
+            self.assertEqual("quick", payload["report_scope"]["scope"])
+            self.assertEqual("check --quick", payload["summary"]["command"])
+            sections = payload["sections"]
+            projection_section = next(section for section in sections if section["name"] == "Projection Cache")
+            rendered_findings = "\n".join(finding["message"] for finding in projection_section["findings"])
+            self.assertIn("artifacts=not-checked", rendered_findings)
+            self.assertIn("sqlite_index=not-checked", rendered_findings)
+            self.assertIn("bounded quick check", rendered_findings)
+            self.assertFalse(payload["summary"]["authority"]["approves_cache_truth"])
+
     def test_check_quick_json_summary_only_omits_full_findings_with_stable_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

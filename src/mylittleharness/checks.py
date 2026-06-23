@@ -2658,7 +2658,10 @@ def check_drift_findings(inventory: Inventory) -> list[Finding]:
     return [Finding("info", "check-drift-ok", "no check-level docmap, root-pointer, rule/context, or remainder drift was found")]
 
 
-def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
+def projection_cache_status_findings(inventory: Inventory, *, bounded: bool = False) -> list[Finding]:
+    if bounded:
+        return _bounded_projection_cache_status_findings(inventory)
+
     projection = build_projection(inventory)
     artifact_findings = inspect_projection_artifacts(inventory, projection)
     index_findings = inspect_projection_index(inventory, projection)
@@ -2704,6 +2707,43 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
             (
                 "check inspects disposable projection freshness without refreshing generated artifacts or SQLite indexes; "
                 "intelligence path/full-text navigation may refresh the disposable cache when a query needs it"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+    ]
+
+
+def _bounded_projection_cache_status_findings(_inventory: Inventory) -> list[Finding]:
+    refresh_commands = (
+        "mylittleharness --root <root> projection --inspect --target all, "
+        "mylittleharness --root <root> check"
+    )
+    return [
+        Finding(
+            "info",
+            "projection-cache-status",
+            (
+                "disposable generated projection cache: artifacts=not-checked; sqlite_index=not-checked; "
+                "detail=bounded-quick-check; quick check does not rebuild the full projection for cache truth"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "projection-cache-posture",
+            (
+                "structured disposable cache posture: artifacts=not-checked; sqlite_index=not-checked; "
+                f"detail=bounded-quick-check; refresh_by_adapter=false; next_safe={refresh_commands}"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "projection-cache-read-only",
+            (
+                "bounded quick check reports projection cache status without refreshing generated artifacts, "
+                "SQLite indexes, or rebuilding the full in-memory projection; rerun the exact projection inspect "
+                "route or full check for cache freshness"
             ),
             ARTIFACT_DIR_REL,
         ),
