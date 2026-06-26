@@ -1187,7 +1187,10 @@ PHASE_STATUS_VALUES = {
     "complete",
     "skipped",
     "paused",
+    "deferred",
+    "abandoned",
 }
+PHASE_STATUS_GUIDANCE = ", ".join(sorted(PHASE_STATUS_VALUES))
 PHASE_BODY_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 INCOMPLETE_EVIDENCE_VALUES = {"", "pending", "uncertain", "unknown", "tbd", "todo"}
@@ -1799,6 +1802,18 @@ def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
                     "warn",
                     "lifecycle-summary",
                     f"active plan is {phase_status}{phase_label}; resolve the blocker or update lifecycle state before continuing",
+                    source,
+                )
+            ]
+        if phase_status in {"deferred", "abandoned"}:
+            return [
+                Finding(
+                    "warn",
+                    "lifecycle-summary",
+                    (
+                        f"active plan is {phase_status}{phase_label}; keep closeout honest and use a reviewed "
+                        "archive/writeback route before continuing"
+                    ),
                     source,
                 )
             ]
@@ -9954,7 +9969,7 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
                 Finding(
                     "warn",
                     "phase-status-field",
-                    "plan_status is active but phase_status is empty; record one of: active, blocked, complete, in_progress, paused, pending, skipped; next_safe_command=mylittleharness --root <root> writeback --dry-run --phase-status <value>",
+                    f"plan_status is active but phase_status is empty; record one of: {PHASE_STATUS_GUIDANCE}; next_safe_command=mylittleharness --root <root> writeback --dry-run --phase-status <value>",
                     state.rel_path if state else None,
                 )
             )
@@ -9963,7 +9978,7 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
                 Finding(
                     "warn",
                     "phase-status-value",
-                    f"phase_status is {phase_status!r}; expected one of: active, blocked, complete, in_progress, paused, pending, skipped; next_safe_command=mylittleharness --root <root> writeback --dry-run --phase-status <value>",
+                    f"phase_status is {phase_status!r}; expected one of: {PHASE_STATUS_GUIDANCE}; next_safe_command=mylittleharness --root <root> writeback --dry-run --phase-status <value>",
                     state.rel_path if state else None,
                 )
             )

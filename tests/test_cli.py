@@ -2836,6 +2836,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("phase-status-value", rendered)
             self.assertIn("writeback --dry-run --phase-status <value>", rendered)
 
+        for phase_status in ("deferred", "abandoned"):
+            with self.subTest(phase_status=phase_status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_active_live_root(Path(tmp), phase_status=phase_status)
+                    before = snapshot_tree(root)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "check"])
+
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertNotIn("phase-status-value", rendered)
+                    self.assertIn(f"active plan is {phase_status}", rendered)
+                    self.assertIn("reviewed archive/writeback route", rendered)
+
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
             (root / "project/implementation-plan.md").write_text(
@@ -15998,6 +16014,94 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("writeback-docs-decision-uncertain-closeout", apply_rendered)
 
+    def test_writeback_archive_accepts_blocked_deferred_or_abandoned_phase_status(self) -> None:
+        terminal_statuses = ("blocked", "deferred", "abandoned")
+        for phase_status in terminal_statuses:
+            with self.subTest(phase_status=phase_status), tempfile.TemporaryDirectory() as tmp:
+                root = make_active_live_root(Path(tmp), phase_status=phase_status)
+                state_path = root / "project/project-state.md"
+                state_path.write_text(
+                    state_path.read_text(encoding="utf-8").replace(
+                        'active_phase: "Phase 4 - Validation And Closeout"',
+                        'active_phase: "phase-1-implementation"',
+                    ),
+                    encoding="utf-8",
+                )
+                (root / "project/implementation-plan.md").write_text(
+                    "---\n"
+                    'plan_id: "blocked-closeout-route"\n'
+                    'title: "Blocked Closeout Route"\n'
+                    'execution_slice: "blocked-closeout-route"\n'
+                    'deliverable_class: "implementation"\n'
+                    "target_artifacts:\n"
+                    '  - "src/mylittleharness/writeback.py"\n'
+                    '  - "tests/test_cli.py"\n'
+                    f'status: "{phase_status}"\n'
+                    'active_phase: "phase-1-implementation"\n'
+                    f'phase_status: "{phase_status}"\n'
+                    "---\n"
+                    "# Blocked Closeout Route\n\n"
+                    "## Phases\n\n"
+                    "### phase-1-implementation\n\n"
+                    "- id: `phase-1-implementation`\n"
+                    f"- status: `{phase_status}`\n",
+                    encoding="utf-8",
+                )
+                args = [
+                    "--root",
+                    str(root),
+                    "writeback",
+                    "--archive-active-plan",
+                    "--phase-status",
+                    phase_status,
+                    "--docs-decision",
+                    "not-needed",
+                    "--state-writeback",
+                    "Stopped honestly through the reviewed terminal closeout route; implementation remains unresolved.",
+                    "--verification",
+                    "check --quick returned advisory warning only; no product mutation was attempted.",
+                    "--commit-decision",
+                    "manual local checkpoint after exact review",
+                    "--residual-risk",
+                    "Original implementation remains unimplemented and needs a follow-up plan.",
+                    "--next-state",
+                    "explicit-decision-required",
+                    "--carry-forward",
+                    "Reopen or replace the implementation package after the blocker is resolved.",
+                    "--work-result",
+                    "Result: blocked safely; What was done: archived terminal active plan without pretending completion.",
+                ]
+
+                dry_output = io.StringIO()
+                with redirect_stdout(dry_output):
+                    dry_code = main([*args[:3], "--dry-run", *args[3:]])
+                dry_rendered = dry_output.getvalue()
+
+                self.assertEqual(dry_code, 0)
+                self.assertNotIn("requires phase_status complete", dry_rendered)
+                self.assertIn(f"records '{phase_status}'", dry_rendered)
+
+                if phase_status != "blocked":
+                    continue
+
+                apply_output = io.StringIO()
+                with redirect_stdout(apply_output):
+                    apply_code = main([*args[:3], "--apply", *args[3:]])
+                self.assertEqual(apply_code, 0, apply_output.getvalue())
+                state_text = state_path.read_text(encoding="utf-8")
+                self.assertIn('plan_status: "none"', state_text)
+                self.assertIn('active_plan: ""', state_text)
+                self.assertIn('phase_status: "blocked"', state_text)
+                archived_match = re.search(r'last_archived_plan: "([^"]+)"', state_text)
+                self.assertIsNotNone(archived_match)
+                archived_rel = archived_match.group(1)
+                self.assertTrue(archived_rel.endswith("blocked-closeout-route.md"))
+                archived_plan = root / archived_rel
+                self.assertTrue(archived_plan.exists())
+                archived_text = archived_plan.read_text(encoding="utf-8")
+                self.assertIn('status: "blocked"', archived_text)
+                self.assertIn('phase_status: "blocked"', archived_text)
+
     def test_writeback_refuses_wrong_class_acceptance_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="pending")
@@ -28777,7 +28881,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertTrue(plan_path.exists())
             self.assertFalse(list((root / "project/archive/plans").glob("*-lifecycle-close.md")))
-            self.assertIn("archive-active-plan requires phase_status complete", output.getvalue())
+            self.assertIn("archive-active-plan requires a reviewed terminal phase_status", output.getvalue())
             roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
             self.assertIn("- `status`: `accepted`", roadmap_text.split("### Minimal Roadmap Mutation Rail", 1)[1])
 
@@ -36986,6 +37090,74 @@ class CliTests(unittest.TestCase):
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
 
+    def test_hooks_pre_tool_allows_active_plan_product_source_exact_patch_target(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            source_path = product_root / "src" / "mylittleharness" / "hooks.py"
+            out_of_scope_path = product_root / "src" / "mylittleharness" / "unowned.py"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("# hooks\n", encoding="utf-8")
+            out_of_scope_path.write_text("# unowned\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project" / "implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "product-source-exact-edit-lane"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/hooks.py"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+            allowed_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {source_path}\n"
+                "@@\n"
+                "-# hooks\n"
+                "+# hooks updated\n"
+                "*** End Patch\n"
+            )
+            blocked_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {out_of_scope_path}\n"
+                "@@\n"
+                "-# unowned\n"
+                "+# unowned updated\n"
+                "*** End Patch\n"
+            )
+
+            allowed_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": allowed_patch}),
+            )
+            blocked_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": blocked_patch}),
+            )
+
+            allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            blocked_codes = {finding["code"] for finding in blocked_payload["findings"]}
+            self.assertFalse(allowed_payload["block"])
+            self.assertIn("hooks-policy-allow-active-plan-product-source-artifact", allowed_codes)
+            self.assertTrue(blocked_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", blocked_codes)
+
     def test_hooks_pre_tool_allows_active_plan_product_fixture_state_cleanup_without_lifecycle_bleed(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -38365,6 +38537,67 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+
+    def test_hooks_pre_tool_allows_blocked_active_plan_lifecycle_checkpoint_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="blocked")
+            state_rel = "project/" + "project-state.md"
+            plan_rel = "project/" + "implementation-plan.md"
+            state_path = root / state_rel
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                .replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                )
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- phase_status: blocked\n"
+                + "- work_result: blocked safely through reviewed writeback evidence\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / plan_rel).write_text(
+                "---\n"
+                'plan_id: "blocked-active-plan-lifecycle-package"\n'
+                'status: "blocked"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "blocked"\n'
+                "---\n"
+                "# Blocked active plan lifecycle package\n",
+                encoding="utf-8",
+            )
+            note_rels = self._write_meta_feedback_checkpoint_fixture(root)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", state_rel, plan_rel, *note_rels]),
+                }
+            )
+            single_note_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", note_rels[0]]),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            single_note_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], single_note_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            single_note_codes = {finding["code"] for finding in single_note_payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertFalse(single_note_payload["block"])
+            self.assertTrue(
+                {
+                    "hooks-policy-allow-reviewed-local-vcs-checkpoint",
+                    "hooks-policy-allow-route-produced-lifecycle-route-staging",
+                }
+                & single_note_codes
+            )
 
     def test_hooks_pre_tool_allows_mlh_owner_route_apply_evidence_paths(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

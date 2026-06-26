@@ -78,6 +78,7 @@ When an operator thread starts from a live operating root but must patch reusabl
 
 - the operating root owns the active plan, roadmap item, lifecycle writeback, and closeout archive
 - product source files must be declared in the active plan `target_artifacts`
+- exact product-source edits while the plan is open are bounded to those declared target artifacts
 - product edits are made in the configured `product_source_root`, not copied through the operating root
 - focused product tests run from `product_source_root`
 - lifecycle closeout, archive, and roadmap status stay in the operating root through reviewed MLH routes

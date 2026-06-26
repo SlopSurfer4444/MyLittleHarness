@@ -31,7 +31,7 @@ and root escapes. Use `--dry-run` before every mutating default command.
 | Command | Class | Writes | Apply required | Boundary |
 | --- | --- | --- | --- | --- |
 | `plan` | active-plan scaffold | yes | yes | writes the active plan and selected lifecycle frontmatter only |
-| `writeback` | lifecycle/closeout writeback | yes | yes | records explicit lifecycle, closeout, and optional roadmap facts |
+| `writeback` | lifecycle/closeout writeback | yes | yes | records explicit lifecycle, closeout, optional roadmap facts, and reviewed terminal active-plan archive |
 | `transition` | reviewed lifecycle composition | yes | yes plus review token | composes phase completion, archive, and next-plan opening only when reviewed |
 | `roadmap` | accepted-work sequencing | yes | yes | writes `project/roadmap.md` and explicit relationship metadata |
 | `memory-hygiene` | research/incubation cleanup | yes | yes | bounded route cleanup, archive coverage, and link repair |

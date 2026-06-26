@@ -507,6 +507,7 @@ ROUTE_WRITEBACK_MARKERS = (
     "<!-- BEGIN mylittleharness-closeout-writeback v1 -->",
     "<!-- BEGIN mylittleharness-phase-writeback v1 -->",
 )
+ROUTE_PRODUCED_LIFECYCLE_PHASE_STATUSES = {"complete", "blocked", "deferred", "abandoned", "skipped"}
 EDITABLE_ROUTE_PATCH_IDS = (
     "adrs",
     "archive",
@@ -6028,7 +6029,7 @@ def _active_plan_ready_for_route_produced_lifecycle_git(inventory: Inventory) ->
     if not state or not state.exists:
         return False
     phase_status = str(state.frontmatter.data.get("phase_status") or "").strip().casefold()
-    if phase_status != "complete":
+    if phase_status not in ROUTE_PRODUCED_LIFECYCLE_PHASE_STATUSES:
         return False
     return any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS)
 
@@ -6052,6 +6053,7 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
             if _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
         )
     allowed.update(path for path in normalized if path.startswith("project/archive/plans/"))
+    allowed.update(path for path in normalized if _is_reviewed_meta_feedback_checkpoint_stage_file(inventory, path))
     if any(path not in allowed for path in normalized):
         return False
     if state_rel not in normalized:
@@ -6443,6 +6445,12 @@ def _coherent_route_produced_lifecycle_stage_paths(
     direct = _coherent_route_produced_lifecycle_paths(inventory, paths)
     if direct:
         return _normalized_route_produced_lifecycle_paths(inventory, paths)
+    meta_feedback = _coherent_meta_feedback_checkpoint_paths(
+        inventory,
+        _normalized_route_produced_lifecycle_paths(inventory, paths),
+    )
+    if meta_feedback:
+        return meta_feedback
     return _coherent_lifecycle_stage_paths_with_existing_index(inventory, paths)
 
 
@@ -6935,15 +6943,7 @@ def _is_reviewed_memory_hygiene_verification_route_file(inventory: Inventory, pa
 
 
 def _coherent_meta_feedback_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
-    if _has_active_plan(inventory):
-        return set()
-    state = inventory.state
-    if not state or not state.exists:
-        return set()
-    state_data = state.frontmatter.data
-    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
-        return set()
-    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+    if not _lifecycle_posture_allows_meta_feedback_checkpoint_stage(inventory):
         return set()
     if not paths or any(not _is_meta_feedback_incubation_route_path(path) for path in paths):
         return set()
@@ -7221,15 +7221,25 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
 
 
 def _is_reviewed_meta_feedback_checkpoint_stage_file(inventory: Inventory, path: str) -> bool:
+    if not _lifecycle_posture_allows_meta_feedback_checkpoint_stage(inventory):
+        return False
+    return _is_reviewed_meta_feedback_incubation_file(inventory, path)
+
+
+def _lifecycle_posture_allows_meta_feedback_checkpoint_stage(inventory: Inventory) -> bool:
     state = inventory.state
     if not state or not state.exists:
         return False
     state_data = state.frontmatter.data
-    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
-        return False
-    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
-        return False
-    return _is_reviewed_meta_feedback_incubation_file(inventory, path)
+    phase_status = str(state_data.get("phase_status") or "").strip().casefold()
+    plan_status = str(state_data.get("plan_status") or "").strip().casefold()
+    if plan_status == "none":
+        return phase_status == "complete"
+    if plan_status == "active" and _has_active_plan(inventory):
+        return phase_status in ROUTE_PRODUCED_LIFECYCLE_PHASE_STATUSES and any(
+            marker in state.content for marker in ROUTE_WRITEBACK_MARKERS
+        )
+    return False
 
 
 def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: str) -> bool:

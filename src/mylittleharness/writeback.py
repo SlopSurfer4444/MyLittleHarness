@@ -108,8 +108,24 @@ NEXT_STATE_DRY_RUN_COMMANDS = {
     "transition",
     "writeback",
 }
-PHASE_STATUS_VALUES = {"pending", "active", "in_progress", "blocked", "complete", "skipped", "paused"}
-UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS = {"blocked": "blocked", "superseded": "skipped"}
+PHASE_STATUS_VALUES = {
+    "pending",
+    "active",
+    "in_progress",
+    "blocked",
+    "complete",
+    "skipped",
+    "paused",
+    "deferred",
+    "abandoned",
+}
+ARCHIVABLE_PHASE_STATUS_VALUES = {"complete", "blocked", "skipped", "deferred", "abandoned"}
+UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS = {
+    "blocked": "blocked",
+    "deferred": "deferred",
+    "rejected": "abandoned",
+    "superseded": "skipped",
+}
 ARCHIVE_COLLISION_POLICY_VALUES = {"refuse", "preserve-existing"}
 PHASE_BODY_COMPLETE_STATUS = "done"
 PHASE_BODY_STATUS_VALUES = {*PHASE_STATUS_VALUES, PHASE_BODY_COMPLETE_STATUS}
@@ -576,7 +592,11 @@ def _phase_closeout_handoff_sequence_findings(inventory: Inventory, request: Wri
 def _needs_phase_closeout_handoff_sequence(request: WritebackRequest, findings: list[Finding]) -> bool:
     if request.archive_active_plan and any(field in request.lifecycle for field in ("active_phase", "last_archived_plan")):
         return True
-    if request.archive_active_plan and any("archive-active-plan requires phase_status complete" in finding.message for finding in findings):
+    if request.archive_active_plan and any(
+        "archive-active-plan requires a reviewed terminal phase_status" in finding.message
+        or "archive-active-plan requires phase_status complete" in finding.message
+        for finding in findings
+    ):
         return True
     if request.lifecycle.get("phase_status") == "complete" and request.closeout:
         return any(finding.code == "writeback-closeout-identity-refused" for finding in findings)
@@ -1214,12 +1234,16 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
                 "--archive-active-plan owns plan_status, active_plan, and last_archived_plan lifecycle updates; do not combine it with explicit active_phase or last_archived_plan fields",
             )
         )
-    if request.archive_active_plan and request.lifecycle.get("phase_status") and request.lifecycle.get("phase_status") != "complete":
+    if (
+        request.archive_active_plan
+        and request.lifecycle.get("phase_status")
+        and request.lifecycle.get("phase_status") not in ARCHIVABLE_PHASE_STATUS_VALUES
+    ):
         errors.append(
             Finding(
                 "error",
                 "writeback-refused",
-                "--archive-active-plan may combine with --phase-status complete to atomically complete and archive the current plan; other explicit phase_status values are refused",
+                "--archive-active-plan may combine only with a reviewed terminal phase_status: abandoned, blocked, complete, deferred, or skipped",
             )
         )
     docs_decision = request.closeout.get("docs_decision")
@@ -1237,7 +1261,7 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
             Finding(
                 "error",
                 "writeback-refused",
-                f"phase_status is {phase_status!r}; expected one of: active, blocked, complete, in_progress, paused, pending, skipped",
+                f"phase_status is {phase_status!r}; expected one of: {', '.join(sorted(PHASE_STATUS_VALUES))}",
             )
         )
     product_source_root = request.lifecycle.get("product_source_root")
@@ -2104,7 +2128,8 @@ def _writeback_acceptance_completion_reason(
     closeout_values: dict[str, str],
 ) -> str:
     if request.archive_active_plan:
-        return "archive-active-plan closeout"
+        phase_status = _archive_phase_status(inventory, request)
+        return "archive-active-plan closeout" if phase_status == "complete" else ""
     if request.roadmap_status in {"done", "complete"}:
         return f"roadmap status {request.roadmap_status}"
     phase_status = request.lifecycle.get("phase_status", "")
@@ -5079,13 +5104,13 @@ def _archive_preflight_errors(inventory: Inventory, request: WritebackRequest) -
         errors.append(Finding("error", "writeback-refused", "--on-archive-collision must be one of: preserve-existing, refuse"))
     if plan_status != "active":
         errors.append(Finding("error", "writeback-refused", f"archive-active-plan requires plan_status active; current plan_status is {plan_status or '<empty>'!r}", state.rel_path if state else None))
-    if phase_status != "complete" and request.roadmap_status not in UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS:
+    if phase_status not in ARCHIVABLE_PHASE_STATUS_VALUES:
         errors.append(
             Finding(
                 "error",
                 "writeback-refused",
                 (
-                    "archive-active-plan requires phase_status complete before lifecycle close; "
+                    "archive-active-plan requires a reviewed terminal phase_status before lifecycle close; "
                     f"current/requested phase_status is {phase_status or '<empty>'!r}"
                 ),
                 state.rel_path if state else None,
