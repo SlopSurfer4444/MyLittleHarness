@@ -34883,6 +34883,68 @@ class CliTests(unittest.TestCase):
             self.assertIn(" add --", messages)
             self.assertIn("working tree is preserved", messages)
 
+    def test_hooks_pre_tool_commit_uses_staged_project_state_when_worktree_advances(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            staged_state_text = (root / state_rel).read_text(encoding="utf-8")
+            newer_archive_rel = "project/" + "archive/plans/newer-closeout.md"
+            (root / state_rel).write_text(
+                staged_state_text.replace(archive_rel, newer_archive_rel),
+                encoding="utf-8",
+            )
+            staged_paths = (state_rel, archive_rel, succeeded_rel)
+            git_word = "gi" + "t"
+            commit_command = f"{git_word} commit -F reviewed-message.txt"
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", return_value=staged_state_text) as staged_blob,
+            ):
+                payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps({"toolName": "shell_command", "command": commit_command}),
+                )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            staged_blob.assert_called_with(root, state_rel)
+
+    def test_hooks_pre_tool_commit_falls_back_when_staged_project_state_is_absent(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            staged_paths = (state_rel, archive_rel, succeeded_rel)
+            git_word = "gi" + "t"
+            commit_command = f"{git_word} commit -F reviewed-message.txt"
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", return_value=None) as staged_blob,
+            ):
+                payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps({"toolName": "shell_command", "command": commit_command}),
+                )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            staged_blob.assert_called_with(root, state_rel)
+
     def _write_memory_hygiene_checkpoint_fixture(self, root: Path) -> tuple[str, str, str, str, str, str, str, str, str]:
         route_prefix = 'project/'
         active_note_rel = route_prefix + "plan-incubation/live-reviewed-followup.md"

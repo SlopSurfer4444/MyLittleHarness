@@ -5388,7 +5388,11 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
     if any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
         return bool(
             _coherent_reviewed_local_vcs_checkpoint_paths(inventory, staged_paths)
-            or _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, staged_paths)
+            or _coherent_post_closeout_mixed_vcs_finalization_paths(
+                inventory,
+                staged_paths,
+                prefer_staged_state=True,
+            )
         )
     return True
 
@@ -5396,7 +5400,11 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
 def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, command: str) -> set[str]:
     if not _is_post_closeout_local_vcs_commit_command(inventory, command):
         return set()
-    return _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, _git_staged_paths(inventory))
+    return _coherent_post_closeout_mixed_vcs_finalization_paths(
+        inventory,
+        _git_staged_paths(inventory),
+        prefer_staged_state=True,
+    )
 
 
 def _is_checkpoint_sensitive_staged_path(inventory: Inventory, path: str) -> bool:
@@ -5433,6 +5441,28 @@ def _coherent_post_closeout_lifecycle_vcs_stage_paths(
         return set()
     combined = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, tuple(staged_paths) + tuple(paths))
     return combined if combined and normalized_current <= combined else set()
+
+
+def _post_closeout_lifecycle_state_authority(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_state: bool = False,
+) -> tuple[dict[str, object], str]:
+    state_rel = "project/" + "project-state.md"
+    normalized = {_normalize_hook_path(path).casefold() for path in paths}
+    if prefer_staged_state and state_rel in normalized:
+        staged_text = _git_staged_file_text_for_root(inventory.root, state_rel)
+        if staged_text is not None:
+            try:
+                frontmatter = parse_frontmatter(staged_text)
+            except ValueError:
+                return {}, ""
+            return frontmatter.data, staged_text
+    state = inventory.state
+    if not state or not state.exists:
+        return {}, ""
+    return state.frontmatter.data, state.content
 
 
 def _coherent_archived_source_incubation_tombstone_stage_paths(
@@ -6037,25 +6067,33 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
     return True
 
 
-def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
+def _coherent_post_closeout_lifecycle_vcs_finalization_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_state: bool = False,
+) -> set[str]:
     if _has_active_plan(inventory):
         return set()
-    state = inventory.state
-    if not state or not state.exists:
+    state_data, state_content = _post_closeout_lifecycle_state_authority(
+        inventory,
+        paths,
+        prefer_staged_state=prefer_staged_state,
+    )
+    if not state_data:
         return set()
-    state_data = state.frontmatter.data
     if str(state_data.get("plan_status") or "").strip().casefold() != "none":
         return set()
     if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
         return set()
-    if not any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS):
+    if not any(marker in state_content for marker in ROUTE_WRITEBACK_MARKERS):
         return set()
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
         return set()
     state_rel = "project/" + "project-state.md"
     roadmap_rel = "project/" + "roadmap.md"
-    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    last_archive_rel = _last_archived_plan_rel_path_from_data(state_data)
     if not last_archive_rel:
         return set()
     archive_paths = {path for path in normalized if _is_deferred_archive_plan_route_path(path)}
@@ -6077,9 +6115,16 @@ def _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventor
 
 
 def _coherent_post_closeout_mixed_vcs_finalization_paths(
-    inventory: Inventory, paths: list[str] | tuple[str, ...]
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_state: bool = False,
 ) -> set[str]:
-    lifecycle_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
+    lifecycle_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(
+        inventory,
+        paths,
+        prefer_staged_state=prefer_staged_state,
+    )
     if lifecycle_paths:
         return lifecycle_paths
 
@@ -6093,7 +6138,11 @@ def _coherent_post_closeout_mixed_vcs_finalization_paths(
     if not route_candidates or not ordinary_candidates:
         return set()
 
-    lifecycle_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, route_candidates)
+    lifecycle_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(
+        inventory,
+        route_candidates,
+        prefer_staged_state=prefer_staged_state,
+    )
     if not lifecycle_paths:
         return set()
 
@@ -7594,7 +7643,11 @@ def _active_plan_rel_path(inventory: Inventory) -> str:
 
 def _last_archived_plan_rel_path(inventory: Inventory) -> str:
     state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
-    return _normalize_hook_path(str(state.get("last_archived_plan") or "")).casefold()
+    return _last_archived_plan_rel_path_from_data(state)
+
+
+def _last_archived_plan_rel_path_from_data(data: dict[str, object]) -> str:
+    return _normalize_hook_path(str(data.get("last_archived_plan") or "")).casefold()
 
 
 def _git_staged_paths(inventory: Inventory) -> tuple[str, ...]:
@@ -7616,6 +7669,16 @@ def _git_staged_paths_for_root(root: Path) -> tuple[str, ...]:
     if result.returncode != 0:
         return ()
     return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _git_staged_file_text_for_root(root: Path, rel_path: str) -> str | None:
+    clean = _normalize_hook_path(rel_path).casefold()
+    if not clean or any(char in clean for char in "*?[]"):
+        return None
+    result = _run_git_for_root(root, "show", f":{clean}")
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _git_reports_deleted_path_for_root(root: Path, rel_path: str) -> bool:
