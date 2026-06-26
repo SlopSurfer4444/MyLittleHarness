@@ -34084,6 +34084,67 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", broad_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_route_package_without_roadmap_mutation(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            (root / roadmap_rel).write_text("# Roadmap\n\n- No closeout relationship changed in this slice.\n", encoding="utf-8")
+            feedback_rel = "project/" + "plan-incubation/post-archive-no-roadmap-staging-overblock.md"
+            evidence_rel = "project/" + "verification/agent-runs/post-archive-no-roadmap-package.md"
+            (root / feedback_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / feedback_rel).write_text(
+                "---\n"
+                'topic: "post-archive-no-roadmap-staging-overblock"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-27"\n'
+                'updated: "2026-06-27"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# post-archive no-roadmap staging overblock\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                "- `canonical_id`: `post-archive-no-roadmap-staging-overblock`\n"
+                "- `signal_type`: `hook-overblock`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n\n"
+                "[MLH-Fix-Candidate] hook_classification=overblocked; "
+                "blocked_surface=git add -f -- project/project-state.md "
+                "project/archive/plans/reviewed-closeout.md "
+                "project/verification/agent-runs/post-archive-no-roadmap-package.md; "
+                "safe_boundary=evidence only; exact staging does not approve lifecycle movement, archive, "
+                "roadmap mutation, staging of unrelated paths, commit, push, release, provider routing, or cache truth.\n"
+                "authority_boundary=operating-memory capture only; no lifecycle, Git staging, commit, archive, "
+                "roadmap, release, or cache truth approval.\n",
+                encoding="utf-8",
+            )
+            (root / evidence_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / evidence_rel).write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "post-archive-no-roadmap-package"\n'
+                'status: "succeeded"\n'
+                "---\n"
+                "# Agent Run\n",
+                encoding="utf-8",
+            )
+            stage_paths = (state_rel, archive_rel, feedback_rel, evidence_rel)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -f -- " + " ".join(stage_paths),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
     def test_hooks_pre_tool_allows_post_closeout_route_package_with_source_incubation_retarget_only(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

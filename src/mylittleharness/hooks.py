@@ -4783,7 +4783,7 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
     pathspecs = [] if _has_shell_command_separator(command) else _git_stage_pathspecs(command)
     normalized = _normalized_route_produced_lifecycle_paths(inventory, pathspecs or paths)
     if not _has_shell_command_separator(command) and _coherent_post_closeout_lifecycle_route_checkpoint_paths(
-        inventory, pathspecs
+        inventory, pathspecs, allow_without_roadmap=True
     ):
         return True
     if all(_is_tracked_existing_lifecycle_route_file(inventory, path) for path in paths):
@@ -4797,7 +4797,13 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return True
     if _has_shell_command_separator(command):
         return False
-    return bool(_coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, pathspecs))
+    return bool(
+        _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+            inventory,
+            pathspecs,
+            allow_without_roadmap=True,
+        )
+    )
 
 
 def _is_post_closeout_lifecycle_route_stage_path(inventory: Inventory, path: str) -> bool:
@@ -6355,7 +6361,10 @@ def _delegated_neighbor_exact_path_blocked(path: str) -> bool:
 
 
 def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
-    inventory: Inventory, paths: list[str] | tuple[str, ...]
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    allow_without_roadmap: bool = False,
 ) -> set[str]:
     if _has_active_plan(inventory):
         return set()
@@ -6377,7 +6386,12 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
     last_archive_rel = _last_archived_plan_rel_path(inventory)
     if not last_archive_rel or not _is_deferred_archive_plan_route_path(last_archive_rel):
         return set()
-    required = {state_rel, roadmap_rel, last_archive_rel}
+    has_roadmap = roadmap_rel in normalized
+    if not has_roadmap and not allow_without_roadmap:
+        return set()
+    required = {state_rel, last_archive_rel}
+    if has_roadmap:
+        required.add(roadmap_rel)
     optional = {ACTIVE_PLAN_ROUTE_PATH}
     if not required <= normalized:
         return set()
@@ -6404,7 +6418,7 @@ def _coherent_post_closeout_lifecycle_route_checkpoint_paths(
         return set()
     if not _is_reviewed_post_closeout_archive_plan_file(inventory, last_archive_rel):
         return set()
-    if not _roadmap_references_archived_plan(inventory, last_archive_rel):
+    if has_roadmap and not _roadmap_references_archived_plan(inventory, last_archive_rel):
         return set()
     return normalized
 
@@ -6451,11 +6465,18 @@ def _coherent_route_produced_lifecycle_stage_paths(
     )
     if meta_feedback:
         return meta_feedback
-    return _coherent_lifecycle_stage_paths_with_existing_index(inventory, paths)
+    return _coherent_lifecycle_stage_paths_with_existing_index(
+        inventory,
+        paths,
+        allow_without_roadmap=True,
+    )
 
 
 def _coherent_lifecycle_stage_paths_with_existing_index(
-    inventory: Inventory, paths: list[str] | tuple[str, ...]
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    allow_without_roadmap: bool = False,
 ) -> set[str]:
     if not paths:
         return set()
@@ -6473,7 +6494,11 @@ def _coherent_lifecycle_stage_paths_with_existing_index(
     ):
         combined = _normalized_route_produced_lifecycle_paths(inventory, combined_paths)
         return combined if normalized_current <= combined else set()
-    combined = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, combined_paths)
+    combined = _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+        inventory,
+        combined_paths,
+        allow_without_roadmap=allow_without_roadmap,
+    )
     if combined and normalized_current <= combined:
         return combined
     return set()
