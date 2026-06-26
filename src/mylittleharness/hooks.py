@@ -408,6 +408,7 @@ GIT_OPTIONS_WITH_VALUES = {
     "--work-tree",
 }
 MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
+    "approval-packet",
     "claim",
     "cleanup",
     "handoff",
@@ -2021,7 +2022,10 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 Finding(
                     "info",
                     "hooks-policy-allow-mlh-owner-route-evidence-paths",
-                    "allowed MLH owner-route dry-run/apply evidence paths; direct lifecycle or product-source writes remain blocked",
+                    (
+                        "allowed MLH owner-route dry-run/apply input/source/evidence refs as route context; "
+                        "the MLH route still validates refs, and direct lifecycle or product-source writes remain blocked"
+                    ),
                     owner_route_evidence_path,
                 )
             )
@@ -7236,13 +7240,37 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
     has_route_provenance = source == "mylittleharness incubation route" or "source: mylittleharness incubation route" in content
     has_meta_feedback_cluster = "mylittleharness-meta-feedback-cluster v1" in content
     has_fix_candidate = "[mlh-fix-candidate" in content
-    has_hook_blocker_scope = "hook" in content and ("overblock" in content or "blocked_surface" in content)
+    has_hook_blocker_scope = ("hook" in content or "route" in content) and any(
+        marker in content
+        for marker in (
+            "overblock",
+            "blocked_surface",
+            "blocked progress",
+            "blocked by codex",
+            "false_positive_shape",
+        )
+    )
     has_boundary = (
         "safe_boundary" in content
         or "authority_boundary" in content
         or (("cannot approve" in content or "no approval" in content) and "lifecycle" in content)
     )
-    return has_route_provenance and has_meta_feedback_cluster and has_fix_candidate and has_hook_blocker_scope and has_boundary
+    has_minimal_route_guardrail = any(
+        marker in content
+        for marker in (
+            "preserving blocks",
+            "while preserving",
+            "direct lifecycle markdown edits",
+            "broad staging remains blocked",
+            "direct lifecycle",
+        )
+    )
+    return (
+        has_route_provenance
+        and has_fix_candidate
+        and has_hook_blocker_scope
+        and ((has_meta_feedback_cluster and has_boundary) or has_minimal_route_guardrail)
+    )
 
 
 def _is_reviewed_meta_feedback_checkpoint_stage_file(inventory: Inventory, path: str) -> bool:
@@ -8595,6 +8623,7 @@ def _is_shell_command_separator(raw: str, clean: str) -> bool:
 
 
 def _looks_like_git_stage_or_commit(lowered_command: str) -> bool:
+    lowered_command = _command_without_shell_literal_payloads(lowered_command).casefold()
     padded = f" {lowered_command} "
     return any(token in padded for token in GIT_WRITE_COMMANDS) or _git_subcommand(lowered_command) in GIT_MUTATION_COMMANDS
 
@@ -8666,8 +8695,31 @@ def _shell_tokens(command: str) -> list[str]:
 
 
 def _command_without_shell_literal_payloads(command: str) -> str:
-    text = POWERSHELL_HERE_STRING_RE.sub(" <MLH_STDIN_PAYLOAD> ", command or "")
+    text = _command_without_powershell_here_string_payloads(command or "")
     return _command_without_posix_heredoc_payloads(text)
+
+
+def _command_without_powershell_here_string_payloads(command: str) -> str:
+    lines = str(command or "").splitlines(keepends=True)
+    if not lines:
+        return ""
+    result: list[str] = []
+    pending_quote = ""
+    for line in lines:
+        if pending_quote:
+            stripped = line.lstrip()
+            closing = pending_quote + "@"
+            if stripped.startswith(closing):
+                result.append(" <MLH_STDIN_PAYLOAD> " + stripped[len(closing) :])
+                pending_quote = ""
+            continue
+        match = re.search(r"@(['\"])\s*$", line)
+        if match:
+            result.append(line[: match.start()] + " <MLH_STDIN_PAYLOAD> ")
+            pending_quote = match.group(1)
+            continue
+        result.append(line)
+    return "".join(result)
 
 
 def _command_without_posix_heredoc_payloads(command: str) -> str:

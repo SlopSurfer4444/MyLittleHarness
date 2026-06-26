@@ -31814,6 +31814,142 @@ class CliTests(unittest.TestCase):
             self.assertTrue(check_then_route_apply_payload["block"])
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", check_then_route_apply_codes)
 
+    def test_hooks_pre_tool_allows_approval_packet_input_refs_in_codex_payload_shapes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            base_args = [
+                "mylittleharness",
+                "--root",
+                ".",
+                "approval-packet",
+                "--dry-run",
+                "--approval-id",
+                "h10-owner-decision",
+                "--requester",
+                "codex",
+                "--subject",
+                "H10 owner decision",
+                "--requested-decision",
+                "choose the H10 owner path",
+                "--gate-class",
+                "lifecycle",
+                "--status",
+                "pending",
+                "--input-ref",
+                "project/project-state.md",
+                "--input-ref",
+                "project\\roadmap.md",
+                "--human-gate-condition",
+                "owner decision required",
+            ]
+            approval_command = subprocess.list2cmdline(base_args)
+            powershell_splat_args = ", ".join("'" + arg.replace("'", "''") + "'" for arg in base_args[1:])
+            powershell_splat_command = f"$MlhArgs = @({powershell_splat_args}); mylittleharness @MlhArgs"
+            hook_inputs = (
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": approval_command,
+                        "workdir": str(root),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "toolName": "functions.shell_command",
+                        "arguments": json.dumps({"command": approval_command, "workdir": str(root)}),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "tool_uses": [
+                            {
+                                "recipient_name": "functions.shell_command",
+                                "parameters": {"command": approval_command, "workdir": str(root)},
+                            }
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": powershell_splat_command,
+                        "workdir": str(root),
+                    }
+                ),
+            )
+
+            for hook_input in hook_inputs:
+                with self.subTest(hook_input=hook_input):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+
+            direct_write_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": "Set-Content project/project-state.md '# bypass'"}),
+            )
+            direct_stage_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": "git add -- project"}),
+            )
+            direct_write_codes = {finding["code"] for finding in direct_write_payload["findings"]}
+            direct_stage_codes = {finding["code"] for finding in direct_stage_payload["findings"]}
+
+            self.assertTrue(direct_write_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", direct_write_codes)
+            self.assertTrue(direct_stage_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", direct_stage_codes)
+
+    def test_hooks_pre_tool_treats_replay_script_route_literals_as_fixture_context(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            inert_replay_command = (
+                "@'\n"
+                "from mylittleharness.hooks import hook_event_payload\n"
+                "fixture = {'command': 'git add -- project/project-state.md'}\n"
+                "print(fixture)\n"
+                "'@ | python -"
+            )
+            mutating_replay_command = (
+                "@'\n"
+                "from pathlib import Path\n"
+                "Path('project/project-state.md').write_text('# bypass')\n"
+                "'@ | python -"
+            )
+
+            inert_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": inert_replay_command}),
+            )
+            mutating_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": mutating_replay_command}),
+            )
+
+            inert_codes = {finding["code"] for finding in inert_payload["findings"]}
+            mutating_codes = {finding["code"] for finding in mutating_payload["findings"]}
+            self.assertFalse(inert_payload["block"])
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", inert_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", inert_codes)
+            self.assertTrue(mutating_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", mutating_codes)
+
     def test_hooks_pre_tool_allows_grouped_read_only_ledger_extraction_but_blocks_grouped_writes(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -38304,6 +38440,79 @@ class CliTests(unittest.TestCase):
             self.assertTrue(broad_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", broad_codes)
+
+    def test_hooks_pre_tool_allows_minimal_route_created_fix_candidate_note_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            note_rel = "project/" + "plan-incubation/approval-packet-input-ref-hook-overblock.md"
+            bad_note_rel = "project/" + "plan-incubation/unreviewed-hook-overblock.md"
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / note_rel).write_text(
+                "---\n"
+                'topic: "approval-packet-input-ref-hook-overblock"\n'
+                'status: "incubating"\n'
+                'created: "2026-06-27"\n'
+                'updated: "2026-06-27"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# approval-packet-input-ref-hook-overblock\n\n"
+                "[MLH-Fix-Candidate] Symptom: source-bound approval-packet dry-run for a pending owner "
+                "decision is blocked by the Codex pre-tool hook when required Markdown input refs are supplied. "
+                "Suggested next action: allow approval-packet dry-run/apply commands to carry root-relative "
+                "input refs after route validation, while preserving blocks on direct lifecycle Markdown edits. "
+                "Blocked progress: yes.\n",
+                encoding="utf-8",
+            )
+            (root / bad_note_rel).write_text(
+                "---\n"
+                'topic: "unreviewed-hook-overblock"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# unreviewed-hook-overblock\n\n"
+                "[MLH-Fix-Candidate] Hook overblock mention without route provenance or safety boundary.\n",
+                encoding="utf-8",
+            )
+
+            exact_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": " ".join(["git", "add", "--", note_rel])}),
+            )
+            broad_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": "git add -- project/plan-incubation"}),
+            )
+            bad_note_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": " ".join(["git", "add", "--", bad_note_rel])}),
+            )
+
+            exact_codes = {finding["code"] for finding in exact_payload["findings"]}
+            broad_codes = {finding["code"] for finding in broad_payload["findings"]}
+            bad_note_codes = {finding["code"] for finding in bad_note_payload["findings"]}
+            self.assertFalse(exact_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", exact_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", exact_codes)
+            self.assertTrue(broad_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
+            self.assertTrue(bad_note_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", bad_note_codes)
 
     def test_hooks_pre_tool_gives_split_steps_for_route_produced_lifecycle_evidence_package(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
