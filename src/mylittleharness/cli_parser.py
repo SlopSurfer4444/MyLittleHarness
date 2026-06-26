@@ -354,6 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_import.add_argument("--topic", help="Optional frontmatter topic. Defaults to --title.")
     research_import.add_argument("--source", dest="source_label", help="Optional source/provenance label for the imported research.")
     research_import.add_argument("--related-prompt", dest="related_prompt", help="Optional root-relative prompt or framing artifact.")
+    research_import.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative route source evidence for source_members metadata. May be repeated.")
     attachment_import = subparsers.add_parser(
         "attachment-import",
         help=argparse.SUPPRESS,
@@ -479,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     writeback_mode = writeback.add_mutually_exclusive_group(required=True)
     writeback_mode.add_argument("--dry-run", action="store_true", help="Preview closeout/state writeback without writing files.")
     writeback_mode.add_argument("--apply", action="store_true", help="Write the MLH-owned closeout/state writeback block and synchronized derived copies.")
+    writeback.add_argument("--json", action="store_true", help="Emit a structured JSON writeback report.")
     writeback.add_argument("--worktree-start-state", dest="worktree_start_state", help="Closeout worktree_start_state value to record.")
     writeback.add_argument("--task-scope", dest="task_scope", help="Closeout task_scope value to record.")
     writeback.add_argument("--docs-decision", dest="docs_decision", help="Closeout docs_decision value: updated, not-needed, or uncertain.")

@@ -77,6 +77,32 @@ class ResearchIntakeTests(unittest.TestCase):
             self.assertIn("The result is evidence, not authority.", text)
             self.assertIn("It does not promote findings to stable specs", text)
 
+    def test_apply_writes_source_members_and_hashes_for_research_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/source-note.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("# Source\n\nReviewed source note.\n", encoding="utf-8")
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    "Source Bound Import",
+                    "Imported synthesis.",
+                    target="project/research/source-bound-import.md",
+                    source_members=(source_rel,),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertIn("research-import-written", rendered)
+            text = (root / "project/research/source-bound-import.md").read_text(encoding="utf-8")
+            self.assertIn("source_members:\n", text)
+            self.assertIn(f'  - "{source_rel}"', text)
+            self.assertIn(f"- source_members: `{source_rel}`", text)
+            self.assertIn(f"{source_rel} sha256=", text)
+
     def test_apply_from_attachment_writes_research_handoff_with_attachment_source_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -252,6 +278,78 @@ class ResearchIntakeTests(unittest.TestCase):
                     self.assertEqual(before, snapshot_tree(root))
                     self.assertIn("research-import-adopt-existing-already-route-visible", rendered)
                     self.assertNotIn("research-import-adopt-existing-route-write", rendered)
+
+    def test_adopt_existing_repairs_missing_source_members_when_explicit_refs_are_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/verification/source-evidence.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("# Evidence\n", encoding="utf-8")
+            target = root / "project/research/imported.md"
+            target.parent.mkdir(parents=True)
+            body = "# Imported\n\nExisting route-visible body.\n"
+            target.write_text("---\nstatus: \"imported\"\ntitle: \"Imported\"\n---\n" + body, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    None,
+                    None,
+                    target="project/research/imported.md",
+                    adopt_existing=True,
+                    source_members=(source_rel,),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertIn("research-import-adopt-existing-source-members-repaired", rendered)
+            self.assertIn("research-import-adopt-existing-route-write", rendered)
+            changed = [rel for rel, text in snapshot_tree(root).items() if before.get(rel) != text]
+            self.assertEqual(["project/research/imported.md"], changed)
+            text = target.read_text(encoding="utf-8")
+            self.assertIn("source_members:\n", text)
+            self.assertIn(f'  - "{source_rel}"', text)
+            self.assertTrue(text.endswith(body))
+
+    def test_adopt_existing_is_noop_when_source_members_are_already_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/verification/source-evidence.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("# Evidence\n", encoding="utf-8")
+            target = root / "project/research/imported.md"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                "---\n"
+                'status: "imported"\n'
+                'title: "Imported"\n'
+                "source_members:\n"
+                f'  - "{source_rel}"\n'
+                "---\n"
+                "# Imported\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    None,
+                    None,
+                    target="project/research/imported.md",
+                    adopt_existing=True,
+                    source_members=(source_rel,),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-adopt-existing-already-route-visible", rendered)
+            self.assertNotIn("research-import-adopt-existing-source-members-repaired", rendered)
+            self.assertNotIn("research-import-adopt-existing-route-write", rendered)
 
     def test_adopt_existing_refuses_malformed_or_nonresearch_frontmatter_without_writes(self) -> None:
         cases = (

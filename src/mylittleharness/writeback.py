@@ -1555,7 +1555,7 @@ def _writeback_root_state_preflight_errors(inventory: Inventory) -> list[Finding
             Finding(
                 "error",
                 "writeback-refused",
-                "target is a product-source compatibility fixture; writeback --apply is refused",
+                "target is a product-source compatibility fixture; use the live operating-root product-fixture cleanup route instead of writeback on the product source",
                 inventory.state.rel_path if inventory.state else "project/project-state.md",
             )
         )

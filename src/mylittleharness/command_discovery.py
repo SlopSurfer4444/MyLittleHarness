@@ -145,7 +145,31 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
             "git diff --check",
         ),
         "MyLittleHarness product source checkout or another MLH source tree with a repo-visible tests/ directory",
-        "local test commands are verification evidence only; suggest does not install dependencies, choose pytest, approve release, closeout, archive, roadmap movement, staging, commit, push, or lifecycle decisions",
+        "local test commands are verification evidence only; suggest does not install dependencies or choose pytest/package-manager fallbacks, approve release, closeout, archive, roadmap movement, staging, commit, push, or lifecycle decisions",
+    ),
+    CommandIntent(
+        "product-source-fixture-cleanup",
+        "Route reviewed product-source compatibility fixture residue through an operating-root plan before cleanup.",
+        (
+            "product source fixture cleanup",
+            "product-source fixture cleanup",
+            "product fixture cleanup",
+            "product project-state cleanup",
+            "product project state cleanup",
+            "dirty product state cleanup",
+            "dirty product-source fixture",
+            "misplaced product fixture residue",
+            "product fixture residue",
+            "operational memory in product fixture",
+        ),
+        'mylittleharness --root <operating-root> plan --dry-run --title "<cleanup-title>" --objective "<review-and-clean-product-fixture-residue>" --target-artifact project/project-state.md',
+        (
+            "mylittleharness --root <operating-root> check --quick",
+            "git -C <product_source_root> diff -- project/project-state.md",
+            "git -C <product_source_root> add -- project/project-state.md",
+        ),
+        "live operating root with product_source_root configured; only the product compatibility fixture path should be in scope",
+        "fixture cleanup is a reviewed active-plan product-source lane only; it cannot mutate the operating-root lifecycle state file, infer cleanup from prose, approve closeout/archive, broad-stage product work, commit, push, or treat product fixture metadata as live memory authority",
     ),
     CommandIntent(
         "repair-preview",
@@ -913,7 +937,10 @@ def command_suggestions_for_intent(intent: str, limit: int = 3) -> tuple[Command
     docs_route_recovery_context = _docs_route_recovery_context(normalized)
     research_route_recovery_context = _research_route_recovery_context(normalized)
     coordination_packet_context = _coordination_packet_context(normalized)
+    product_fixture_cleanup_context = _product_source_fixture_cleanup_context(normalized)
     for index, command_intent in enumerate(COMMAND_INTENTS):
+        if product_fixture_cleanup_context and _product_fixture_cleanup_context_excludes_intent(command_intent.intent_id):
+            continue
         if docs_route_recovery_context and _docs_route_context_excludes_intent(normalized, command_intent.intent_id):
             continue
         if research_route_recovery_context and _research_route_context_excludes_intent(normalized, command_intent.intent_id):
@@ -1092,6 +1119,32 @@ def _research_route_recovery_context(normalized: str) -> bool:
         "provenance",
     )
     return any(term in normalized for term in research_route_terms) and any(term in normalized for term in recovery_terms)
+
+
+def _product_source_fixture_cleanup_context(normalized: str) -> bool:
+    fixture_terms = (
+        "product source fixture",
+        "product fixture",
+        "product project state",
+        "product state",
+        "project state",
+        "compatibility fixture",
+    )
+    cleanup_terms = (
+        "cleanup",
+        "clean up",
+        "dirty",
+        "residue",
+        "misplaced",
+        "wrongly placed",
+        "operational memory",
+        "must not accumulate",
+    )
+    return any(term in normalized for term in fixture_terms) and any(term in normalized for term in cleanup_terms)
+
+
+def _product_fixture_cleanup_context_excludes_intent(intent_id: str) -> bool:
+    return intent_id in {"attachment-import-route"}
 
 
 def _docs_route_context_excludes_intent(normalized: str, intent_id: str) -> bool:

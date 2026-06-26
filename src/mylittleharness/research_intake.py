@@ -86,6 +86,7 @@ class ResearchImportRequest:
     related_prompt: str = ""
     input_path: str = ""
     source_attachment: str = ""
+    source_members: tuple[str, ...] = ()
     adopt_existing: bool = False
 
 
@@ -101,6 +102,7 @@ class ResearchImportTarget:
     related_prompt: str
     input_path: str
     source_attachment: str
+    source_members: tuple[str, ...]
     imported_text_hash: str
     adopt_existing: bool = False
 
@@ -156,6 +158,7 @@ def make_research_import_request(
     related_prompt: str | None = None,
     input_path: str | None = None,
     source_attachment: str | None = None,
+    source_members: Sequence[str] | None = None,
     adopt_existing: bool = False,
 ) -> ResearchImportRequest:
     return ResearchImportRequest(
@@ -168,6 +171,7 @@ def make_research_import_request(
         related_prompt=_normalize_rel(related_prompt),
         input_path=_normalized_note(input_path),
         source_attachment=_normalize_rel(source_attachment),
+        source_members=_normalize_rel_sequence(source_members),
         adopt_existing=adopt_existing,
     )
 
@@ -437,6 +441,7 @@ def _research_import_target(inventory: Inventory, request: ResearchImportRequest
         related_prompt=request.related_prompt,
         input_path=request.input_path,
         source_attachment=request.source_attachment,
+        source_members=request.source_members,
         imported_text_hash=imported_text_hash,
         adopt_existing=request.adopt_existing,
     )
@@ -499,6 +504,9 @@ def _research_import_preflight_errors(
         errors.append(Finding("error", "research-import-refused", f"target {_root_relative_path_conflict(request.target)}", request.target))
     if request.related_prompt and _root_relative_path_conflict(request.related_prompt):
         errors.append(Finding("error", "research-import-refused", f"related prompt {_root_relative_path_conflict(request.related_prompt)}", request.related_prompt))
+    for source_member in request.source_members:
+        if _root_relative_path_conflict(source_member):
+            errors.append(Finding("error", "research-import-refused", f"source member {_root_relative_path_conflict(source_member)}", source_member))
     if request.source_attachment:
         errors.extend(_source_attachment_preflight_errors(inventory, request.source_attachment))
 
@@ -806,6 +814,7 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
         frontmatter.append('  - "none"')
     frontmatter.extend(
         (
+            *_optional_yaml_list_lines("source_members", target.source_members),
             *_yaml_source_attachments_lines(target),
             "source_hashes:",
             *(f'  - "{_yaml_double_quoted_value(entry)}"' for entry in source_hashes),
@@ -827,6 +836,7 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
         f"- Imported text sha256: `{target.imported_text_hash}`",
         f"- Related prompt: `{target.related_prompt or 'not supplied'}`",
         f"- Source attachment: `{target.source_attachment or 'not supplied'}`",
+        *_markdown_ref_lines("source_members", target.source_members),
         "",
         "## Source Hashes",
         "",
@@ -865,6 +875,17 @@ def _render_research_adoption(root: Path, target: ResearchImportTarget) -> tuple
         Finding("info", "research-import-non-authority", NON_AUTHORITY_NOTE, target.rel_path),
     ]
     if frontmatter.has_frontmatter:
+        repaired = _adopt_existing_text_with_source_members(text, frontmatter, target.source_members)
+        if repaired != text:
+            findings.append(
+                Finding(
+                    "info",
+                    "research-import-adopt-existing-source-members-repaired",
+                    "would add explicit source_members metadata to existing route-visible research artifact",
+                    target.rel_path,
+                )
+            )
+            return repaired, findings, False
         findings.append(
             Finding(
                 "info",
@@ -894,6 +915,7 @@ def _render_research_adoption(root: Path, target: ResearchImportTarget) -> tuple
         metadata.append('  - "none"')
     metadata.extend(
         (
+            *_optional_yaml_list_lines("source_members", target.source_members),
             "source_attachments: []",
             "source_hashes:",
             *(f'  - "{_yaml_double_quoted_value(entry)}"' for entry in source_hashes),
@@ -1037,6 +1059,10 @@ def _render_discovery_packet(root: Path, target: DiscoveryPacketTarget) -> tuple
 
 def _source_hash_entries(root: Path, target: ResearchImportTarget) -> tuple[str, ...]:
     entries = [f"imported_text sha256={target.imported_text_hash}"]
+    for source_member in target.source_members:
+        path = root / source_member
+        if path.is_file():
+            entries.append(_source_ref_hash(root, source_member))
     if target.source_attachment:
         attachment_path = root / target.source_attachment
         if attachment_path.is_file():
@@ -1057,6 +1083,53 @@ def _source_hash_entries(root: Path, target: ResearchImportTarget) -> tuple[str,
             except OSError:
                 entries.append(f"{rel} unreadable")
     return tuple(entries)
+
+
+def _adopt_existing_text_with_source_members(text: str, frontmatter: object, source_members: tuple[str, ...]) -> str:
+    if not source_members:
+        return text
+    existing = dict(getattr(frontmatter, "data", {}) or {})
+    existing_members = tuple(_frontmatter_string_values(existing.get("source_members")))
+    merged_members = tuple(_dedupe((*existing_members, *source_members)))
+    if merged_members == existing_members:
+        return text
+    existing["source_members"] = list(merged_members)
+    order = list(existing)
+    if "source_members" not in order:
+        order.append("source_members")
+    updated_frontmatter = "\n".join(("---", *_yaml_frontmatter_lines(existing, order), "---"))
+    body_lines = text.splitlines()[getattr(frontmatter, "body_start_line", 1) - 1 :]
+    body = "\n".join(body_lines)
+    if body and text.endswith("\n"):
+        body += "\n"
+    return f"{updated_frontmatter}\n{body}" if body else f"{updated_frontmatter}\n"
+
+
+def _frontmatter_string_values(value: object) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value in (None, ""):
+        return []
+    return [str(value).strip()]
+
+
+def _yaml_frontmatter_lines(metadata: dict[str, object], order: Sequence[str]) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for key in (*order, *tuple(metadata)):
+        if key in seen or key not in metadata:
+            continue
+        seen.add(key)
+        value = metadata[key]
+        if isinstance(value, (list, tuple)):
+            values = tuple(str(item).strip() for item in value if str(item).strip())
+            if not values:
+                continue
+            lines.append(f"{key}:")
+            lines.extend(f'  - "{_yaml_double_quoted_value(item)}"' for item in values)
+        elif value not in (None, ""):
+            lines.append(f'{key}: "{_yaml_double_quoted_value(value)}"')
+    return lines
 
 
 def _attachment_binary_rel(root: Path, rel_path: str) -> str:
@@ -1415,6 +1488,12 @@ def _discovery_quality_gate_issues(target: DiscoveryPacketTarget) -> tuple[str, 
 def _yaml_list_lines(key: str, values: tuple[str, ...]) -> list[str]:
     if not values:
         return [f"{key}:", '  - "none"']
+    return [f"{key}:", *(f'  - "{_yaml_double_quoted_value(value)}"' for value in values)]
+
+
+def _optional_yaml_list_lines(key: str, values: tuple[str, ...]) -> list[str]:
+    if not values:
+        return []
     return [f"{key}:", *(f'  - "{_yaml_double_quoted_value(value)}"' for value in values)]
 
 

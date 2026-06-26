@@ -144,7 +144,7 @@ class PlanningTests(unittest.TestCase):
             "- write_scope: `src/mylittleharness/planning.py`, `src/mylittleharness/grain.py`, `tests/test_planning.py`, `tests/test_cli.py`",
             rendered,
         )
-        self.assertIn("tests/test_planning.py tests/test_cli.py", rendered)
+        self.assertIn("python -m unittest tests.test_planning tests.test_cli", rendered)
         self.assertIn("current-phase-only execution", rendered)
         self.assertNotIn("Generated as one explicit current phase", rendered)
 
@@ -414,7 +414,8 @@ class PlanningTests(unittest.TestCase):
 
         rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
 
-        self.assertIn("pytest -q 'tests/test command.py'", rendered)
+        self.assertIn("python -m unittest discover -s tests", rendered)
+        self.assertNotIn("pytest", rendered)
 
 
 def make_live_root(root: Path) -> Path:

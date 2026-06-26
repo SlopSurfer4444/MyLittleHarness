@@ -1246,12 +1246,13 @@ def _focused_verification_gate(
     test_scope: tuple[str, ...],
     verification_profile: VerificationGateProfile | None = None,
 ) -> str:
-    if test_scope:
-        quoted_tests = " ".join(shell_arg(target) for target in test_scope)
+    if verification_profile and _verification_profile_is_explicit_repo_command(verification_profile):
         return (
-            "`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q "
-            f"{quoted_tests}` exits 0"
+            f"`{verification_profile.command}` exits 0 "
+            f"(repo-visible candidate from {verification_profile.source}; {verification_profile.reason})"
         )
+    if test_scope:
+        return f"`{_unittest_command_for_test_scope(test_scope)}` exits 0"
     if verification_profile and verification_profile.status == "candidate" and verification_profile.command:
         return (
             f"`{verification_profile.command}` exits 0 "
@@ -1263,7 +1264,33 @@ def _focused_verification_gate(
             "Makefile/just/task files, CI workflows, docs, prior evidence, or roadmap verification_summary; "
             "agent must record a concrete gate before confident closeout."
         )
-    return "`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q` exits 0 or a narrower deterministic command is recorded before completion"
+    return "`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests` exits 0 or a narrower deterministic command is recorded before completion"
+
+
+def _verification_profile_is_explicit_repo_command(profile: VerificationGateProfile) -> bool:
+    return profile.status == "candidate" and bool(profile.command) and "Python test layout" not in profile.source
+
+
+def _unittest_command_for_test_scope(test_scope: tuple[str, ...]) -> str:
+    modules = tuple(_unittest_module_for_test_target(target) for target in test_scope)
+    modules = tuple(module for module in modules if module)
+    if modules:
+        return "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest " + " ".join(shell_arg(module) for module in modules)
+    return "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests"
+
+
+def _unittest_module_for_test_target(target: str) -> str:
+    normalized = _normalize_rel(target)
+    if not normalized.endswith(".py") or not normalized.startswith("tests/"):
+        return ""
+    parts = tuple(part for part in normalized[:-3].split("/") if part)
+    if not parts or any(not _is_python_import_part(part) for part in parts):
+        return ""
+    return ".".join(parts)
+
+
+def _is_python_import_part(part: str) -> bool:
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", part or ""))
 
 
 def _repo_verification_gate_profile(
@@ -1569,7 +1596,7 @@ def _python_test_command(target_root: Path, target_artifacts: tuple[str, ...]) -
         return ""
     if (target_root / "package.json").is_file() and _target_artifacts_look_js(target_artifacts):
         return ""
-    return "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q"
+    return "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests"
 
 
 def _clean_command_candidate(candidate: str) -> str:
@@ -1580,6 +1607,8 @@ def _clean_command_candidate(candidate: str) -> str:
         return ""
     lowered = command.casefold()
     command_markers = (
+        "python -m unittest",
+        "unittest",
         "pytest",
         "npm ",
         "pnpm ",

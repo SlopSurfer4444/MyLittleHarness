@@ -1140,6 +1140,7 @@ def main(argv: list[str] | None = None) -> int:
             related_prompt=args.related_prompt,
             input_path=input_path,
             source_attachment=args.from_attachment,
+            source_members=tuple(args.source_members or ()),
             adopt_existing=args.adopt_existing,
         )
         report_name = "research-import --apply" if args.apply else "research-import --dry-run"
@@ -1238,7 +1239,11 @@ def main(argv: list[str] | None = None) -> int:
             findings.extend(writeback_apply_findings(inventory, request) if args.apply else writeback_dry_run_findings(inventory, request))
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
-        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        suggestions = _suggestions(command, findings)
+        if args.json:
+            emit_text(render_json_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions, route_manifest=route_manifest()))
+        else:
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions))
         return 2 if args.apply and result == "error" else 0
     if command == "transition":
         report_name = "transition --apply" if args.apply else "transition --dry-run"

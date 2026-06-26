@@ -1147,9 +1147,44 @@ class CliTests(unittest.TestCase):
             self.assertIn("python -m unittest discover -s tests", rendered)
             self.assertIn("python -m unittest tests.test_memory_hygiene tests.test_cli tests.test_package_metadata", rendered)
             self.assertIn("git diff --check", rendered)
-            self.assertIn("suggest does not install dependencies, choose pytest", rendered)
+            self.assertIn("suggest does not install dependencies or choose pytest/package-manager fallbacks", rendered)
             self.assertNotIn("roadmap-acceptance-readiness", rendered)
             self.assertNotIn("operator-audit-loop", rendered)
+
+    def test_suggest_intent_routes_product_fixture_cleanup_without_pdf_attachment_false_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "suggest",
+                        "--intent",
+                        "dirty product-source fixture project-state cleanup note mentions PDF tooling residue",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("product-source-fixture-cleanup", rendered)
+            self.assertIn("--target-artifact project/project-state.md", rendered)
+            self.assertNotIn("attachment-import-route", rendered)
+
+    def test_suggest_intent_still_routes_true_pdf_attachment_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "import PDF attachment from email"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("attachment-import-route", rendered)
+            self.assertIn("attachment-import --dry-run", rendered)
 
     def test_suggest_intent_routes_verification_evidence_without_path_literal_guesswork(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -23861,6 +23896,47 @@ class CliTests(unittest.TestCase):
             self.assertIn("docs ownership stays on `docs/specs/plan-synthesis.md`", plan_text)
             self.assertIn("- write_scope: `docs/specs/plan-synthesis.md`", plan_text)
 
+    def test_plan_apply_uses_stdlib_unittest_for_declared_product_test_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operating")
+            product_root = Path(tmp) / "product"
+            (product_root / "src/mylittleharness").mkdir(parents=True)
+            (product_root / "tests").mkdir(parents=True)
+            (product_root / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
+            (product_root / "tests/test_cli.py").write_text("import unittest\n\nclass Smoke(unittest.TestCase):\n    pass\n", encoding="utf-8")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"\n',
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Unittest Gate",
+                        "--objective",
+                        "Use repo-visible stdlib unittest commands.",
+                        "--target-artifact",
+                        "src/mylittleharness/planning.py",
+                        "--target-artifact",
+                        "tests/test_cli.py",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn("PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest tests.test_cli", plan_text)
+            self.assertNotIn("uv run --no-project --with pytest", plan_text)
+
     def test_plan_apply_requires_exact_scope_for_broad_docs_source_route_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -30346,6 +30422,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("writeback-refused", output.getvalue())
+            self.assertIn("live operating-root product-fixture cleanup route", output.getvalue())
+
+    def test_writeback_dry_run_json_refuses_product_fixture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=True, mirrors=False)
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--dry-run", "--json", "--docs-decision", "uncertain"])
+            rendered = output.getvalue()
+            payload = json.loads(rendered)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertEqual("writeback --dry-run", payload["command"])
+            self.assertEqual("warn", payload["summary"]["status"])
+            self.assertIn("writeback-refused", {finding["code"] for finding in payload["findings"]})
+            self.assertIn("live operating-root product-fixture cleanup route", rendered)
+            self.assertNotIn("MyLittleHarness writeback --dry-run", rendered)
 
     def test_preflight_product_fixture_no_active_plan_no_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -33384,6 +33479,82 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(checked_payload["block"])
                 self.assertIn("hooks-policy-block-product-root-mlh-mutation", finding_codes)
                 self.assertNotIn("hooks-policy-allow-read-only-product-source-inspection", finding_codes)
+
+    def test_hooks_pre_tool_allows_read_only_mlh_route_help_with_product_pythonpath(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_src = product_root / "src"
+            product_src.mkdir(exist_ok=True)
+            hook_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": f"$env:PYTHONPATH='{product_src}'; python -m mylittleharness --root {root} evidence --help",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], hook_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+            self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_read_only_product_source_unittest_payload_shapes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            product_src = product_root / "src"
+            product_src.mkdir(exist_ok=True)
+            commands = {
+                "product_workdir": {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(product_root),
+                    "command": "python -m unittest discover -s tests",
+                },
+                "absolute_pythonpath": {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": f"$env:PYTHONPATH='{product_src}'; python -m unittest tests.test_cli",
+                },
+                "json_arguments": {
+                    "toolName": "functions.shell_command",
+                    "arguments": json.dumps({"workdir": str(product_root), "command": "python -m unittest tests.test_cli"}),
+                },
+                "parallel_wrapper": {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"workdir": str(product_root), "command": "python -m unittest tests.test_cli"},
+                        }
+                    ],
+                },
+            }
+
+            for name, hook_input in commands.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-read-only-product-source-test", finding_codes)
+                    self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+            unsafe_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(product_root),
+                    "command": f"Set-Content -Path '{product_root / 'src/rogue.py'}' -Value 'x'",
+                }
+            )
+            unsafe_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], unsafe_input)
+            unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
+            self.assertTrue(unsafe_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-product-source-test", unsafe_codes)
 
     def test_hooks_pre_tool_allows_read_only_roadmap_list_json_report_payloads(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -36650,6 +36821,76 @@ class CliTests(unittest.TestCase):
                     self.assertTrue(payload["block"])
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+
+    def test_hooks_pre_tool_allows_active_plan_product_fixture_state_cleanup_without_lifecycle_bleed(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            product_state = product_root / "project" / "project-state.md"
+            product_state.parent.mkdir(parents=True)
+            product_state.write_text("fixture residue\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                .replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    'active_phase: "phase-1-implementation"\nphase_status: "pending"',
+                )
+                .replace('phase_status: "pending"\n---', f'phase_status: "pending"\nproduct_source_root: "{product_root}"\n---'),
+                encoding="utf-8",
+            )
+            (root / "project" / "implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "product-fixture-cleanup"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                "target_artifacts:\n"
+                '  - "project/project-state.md"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+
+            product_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {product_state}\n"
+                "@@\n"
+                "-fixture residue\n"
+                "*** End Patch\n"
+            )
+            product_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": product_patch}),
+            )
+            product_codes = {finding["code"] for finding in product_payload["findings"]}
+
+            self.assertFalse(product_payload["block"])
+            self.assertIn("hooks-policy-allow-active-plan-product-source-artifact", product_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", product_codes)
+
+            operating_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {state_path}\n"
+                "@@\n"
+                "-# Sample\n"
+                "*** End Patch\n"
+            )
+            operating_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": operating_patch}),
+            )
+            operating_codes = {finding["code"] for finding in operating_payload["findings"]}
+
+            self.assertTrue(operating_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", operating_codes)
+            self.assertNotIn("hooks-policy-allow-active-plan-product-source-artifact", operating_codes)
 
     def test_hooks_pre_tool_allows_live_product_source_main_push_when_active_phase_complete(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

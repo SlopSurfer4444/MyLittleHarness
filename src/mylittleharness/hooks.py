@@ -1759,6 +1759,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         )
     ]
     allow_read_only_product_source_smoke = _is_read_only_product_source_smoke_command(inventory, command)
+    allow_read_only_product_source_test = _is_read_only_product_source_test_command(inventory, command_data, command, paths)
     allow_read_only_product_source_inspection = _is_read_only_product_source_inspection_command(inventory, command_data, command)
     allow_read_only_product_source_vcs_inspection = _is_read_only_product_source_vcs_inspection_command(
         inventory, command, paths
@@ -1780,6 +1781,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         or allow_read_only_hook_simulation
         or _is_bounded_mlh_read_tool_request(data)
         or allow_read_only_product_source_smoke
+        or allow_read_only_product_source_test
         or allow_read_only_product_source_inspection
         or allow_read_only_product_source_vcs_inspection
         or allow_read_only_subagent_delegation
@@ -2238,6 +2240,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed read-only Python smoke importing configured product_source_root for MLH inspect JSON; "
                     "writes, apply/rebuild/cache/runtime launch, lifecycle mutation, and Git mutation remain blocked"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_read_only_product_source_test:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-product-source-test",
+                (
+                    "allowed read-only stdlib unittest command for configured product_source_root; "
+                    "verification output is advisory and does not approve lifecycle, staging, commit, push, or product mutation"
                 ),
                 paths[0] if paths else None,
             )
@@ -3570,7 +3584,8 @@ def _path_policy_findings(
                     rel,
                 )
             )
-        route_rel = (_hook_route_rel_path(inventory, rel) or _normalize_hook_path(rel)).casefold()
+        route_rel_display = _hook_route_rel_path(inventory, rel) or _normalize_hook_path(rel)
+        route_rel = route_rel_display.casefold()
         if route_rel in finalization_paths:
             continue
         if route_rel in checkpoint_paths:
@@ -3583,9 +3598,9 @@ def _path_policy_findings(
             continue
         if allow_delegation_prompt_context and _is_delegation_prompt_context_path(inventory, rel):
             continue
-        if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and _is_lifecycle_route_path(rel):
+        if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and _is_lifecycle_route_path(route_rel_display):
             continue
-        if allow_read_only_roadmap_path and _is_roadmap_path(rel):
+        if allow_read_only_roadmap_path and _is_roadmap_path(route_rel_display):
             continue
         if allow_existing_route_patch and _is_editable_route_patch_path(inventory, rel):
             continue
@@ -3599,31 +3614,6 @@ def _path_policy_findings(
             or _is_reviewed_meta_feedback_checkpoint_stage_file(inventory, rel)
         ):
             continue
-        if _is_lifecycle_authority_path(rel):
-            findings.append(
-                Finding(
-                    severity,
-                    "hooks-policy-block-lifecycle-authority-path",
-                    (
-                        "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes "
-                        f"and record docs_decision/verification as required; next_safe_command={_hook_route_next_safe_command(inventory, rel)}"
-                    ),
-                    rel,
-                )
-            )
-        elif _is_lifecycle_markdown_path(rel):
-            next_safe = _hook_lifecycle_markdown_path_next_safe_command(inventory, rel)
-            findings.append(
-                Finding(
-                    severity,
-                    "hooks-policy-block-lifecycle-markdown-path",
-                    (
-                        "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence "
-                        f"must stay intact; next_safe_command={next_safe}"
-                    ),
-                    rel,
-                )
-            )
         if _is_under_configured_product_root(inventory, rel):
             if allow_product_source_vcs_command:
                 continue
@@ -3650,6 +3640,32 @@ def _path_policy_findings(
                         f"next_safe_command={next_safe}"
                     ),
                     rel,
+                )
+            )
+            continue
+        if _is_lifecycle_authority_path(route_rel_display):
+            findings.append(
+                Finding(
+                    severity,
+                    "hooks-policy-block-lifecycle-authority-path",
+                    (
+                        "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes "
+                        f"and record docs_decision/verification as required; next_safe_command={_hook_route_next_safe_command(inventory, rel)}"
+                    ),
+                    route_rel_display,
+                )
+            )
+        elif _is_lifecycle_markdown_path(route_rel_display):
+            next_safe = _hook_lifecycle_markdown_path_next_safe_command(inventory, route_rel_display)
+            findings.append(
+                Finding(
+                    severity,
+                    "hooks-policy-block-lifecycle-markdown-path",
+                    (
+                        "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence "
+                        f"must stay intact; next_safe_command={next_safe}"
+                    ),
+                    route_rel_display,
                 )
             )
     return findings
@@ -4051,6 +4067,8 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
         )
     if subcommand == "evidence":
         return not _looks_like_write_command(command) and (
+            bool(tokens.intersection({"--help", "-h"}))
+            or
             _is_mlh_evidence_record_route_command(policy_command)
             or _is_mlh_evidence_receipt_refresh_route_command(policy_command)
             or _is_mlh_evidence_fixture_update_route_command(policy_command)
@@ -4585,6 +4603,49 @@ def _is_read_only_product_source_smoke_command(inventory: Inventory, command: st
     if _is_python_mlh_module_inspect_command(command):
         return True
     return any(_python_inline_payload_is_read_only_mlh_inspect(payload) for payload in _python_inline_payloads(command))
+
+
+def _is_read_only_product_source_test_command(
+    inventory: Inventory,
+    data: dict[str, object],
+    command: str,
+    paths: list[str],
+) -> bool:
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is None:
+        return False
+    if _looks_like_write_command(command):
+        return False
+    if not _command_has_python_executable(command):
+        return False
+    tokens = [_clean_shell_command_token(token) for token in _shell_tokens(command)]
+    if "-m" not in tokens or "unittest" not in tokens:
+        return False
+    lowered = command.casefold()
+    if any(marker in lowered for marker in READ_ONLY_PRODUCT_SOURCE_SMOKE_FORBIDDEN_MARKERS):
+        return False
+    workdir = _hook_command_workdir_path(inventory, data)
+    if workdir is not None:
+        try:
+            workdir.resolve().relative_to(product_root.resolve())
+            return True
+        except (OSError, RuntimeError, ValueError):
+            pass
+    if any(_is_under_configured_product_root(inventory, path) for path in paths):
+        return True
+    return _pythonpath_mentions_product_source_root(product_root, command)
+
+
+def _pythonpath_mentions_product_source_root(product_root: Path, command: str) -> bool:
+    try:
+        product_src = (product_root / "src").resolve()
+        product_root_resolved = product_root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    normalized = command.replace("\\\\", "\\").replace("/", "\\").casefold()
+    product_src_text = str(product_src).replace("/", "\\").casefold()
+    product_root_text = str(product_root_resolved).replace("/", "\\").casefold()
+    return product_src_text in normalized or product_root_text in normalized
 
 
 def _is_read_only_product_source_inspection_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
