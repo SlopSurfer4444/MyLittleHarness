@@ -34781,6 +34781,108 @@ class CliTests(unittest.TestCase):
         )
         return hook_note_rel, commit_note_rel
 
+    def test_hooks_pre_tool_allows_exact_index_only_split_of_mixed_post_closeout_checkpoint(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(root)
+            feedback_paths = self._write_meta_feedback_checkpoint_fixture(root)
+            staged_paths = (state_rel, archive_rel, succeeded_rel, *feedback_paths)
+            git_word = "gi" + "t"
+            restore_word = "res" + "tore"
+            reset_word = "res" + "et"
+            commands = (
+                f"{git_word} {restore_word} --staged -- {' '.join(feedback_paths)}",
+                f"{git_word} {reset_word} -- {feedback_paths[0]}",
+                f"{git_word} {reset_word} HEAD -- {feedback_paths[1]}",
+                f'{git_word} -C "{root}" {restore_word} --staged -- {" ".join(feedback_paths)}',
+            )
+
+            for command in commands:
+                with self.subTest(command=command):
+                    with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths):
+                        payload = hook_event_payload(
+                            load_inventory(root),
+                            HOOK_PRE_TOOL_USE,
+                            [],
+                            json.dumps({"toolName": "shell_command", "command": command}),
+                        )
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-post-closeout-index-split", finding_codes)
+                    self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertIn("index-only", messages)
+                    self.assertIn("working-tree content remains untouched", messages)
+
+    def test_hooks_pre_tool_blocks_unsafe_index_split_forms(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(root)
+            feedback_paths = self._write_meta_feedback_checkpoint_fixture(root)
+            staged_paths = (state_rel, archive_rel, succeeded_rel, *feedback_paths)
+            git_word = "gi" + "t"
+            restore_word = "res" + "tore"
+            reset_word = "res" + "et"
+            blocked_commands = {
+                "worktree": f"{git_word} {restore_word} --staged --worktree -- {feedback_paths[0]}",
+                "source": f"{git_word} {restore_word} --staged --source HEAD~1 -- {feedback_paths[0]}",
+                "hard": f"{git_word} {reset_word} --hard -- {feedback_paths[0]}",
+                "directory": f"{git_word} {reset_word} -- project/plan-incubation",
+                "unstaged": f"{git_word} {reset_word} -- project/plan-incubation/not-staged.md",
+            }
+
+            for name, command in blocked_commands.items():
+                with self.subTest(name=name):
+                    with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths):
+                        payload = hook_event_payload(
+                            load_inventory(root),
+                            HOOK_PRE_TOOL_USE,
+                            [],
+                            json.dumps({"toolName": "shell_command", "command": command}),
+                        )
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-post-closeout-index-split", finding_codes)
+
+    def test_hooks_pre_tool_mixed_commit_guides_exact_index_only_checkpoint_split(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(root)
+            feedback_paths = self._write_meta_feedback_checkpoint_fixture(root)
+            staged_paths = (state_rel, archive_rel, succeeded_rel, *feedback_paths)
+            git_word = "gi" + "t"
+            commit_command = f"{git_word} commit -F reviewed-message.txt"
+
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths):
+                payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps({"toolName": "shell_command", "command": commit_command}),
+                )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            self.assertIn("detected_checkpoint_classes=", messages)
+            self.assertIn(" restore --staged --", messages)
+            for path in feedback_paths:
+                self.assertIn(path, messages)
+            self.assertIn(" add --", messages)
+            self.assertIn("working tree is preserved", messages)
+
     def _write_memory_hygiene_checkpoint_fixture(self, root: Path) -> tuple[str, str, str, str, str, str, str, str, str]:
         route_prefix = 'project/'
         active_note_rel = route_prefix + "plan-incubation/live-reviewed-followup.md"

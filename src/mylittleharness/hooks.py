@@ -571,6 +571,9 @@ POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS = {
 }
 POST_CLOSEOUT_STAGE_BROAD_PATHS = {".", "./", "*", ":/", ":/."}
 GIT_STAGE_EXACT_PATHSPEC_OPTIONS = {"-f", "--force", "-n", "--dry-run"}
+GIT_INDEX_SPLIT_RESTORE_ALLOWED_OPTIONS = {"--staged", "-S", "--quiet", "-q"}
+GIT_INDEX_SPLIT_RESET_ALLOWED_OPTIONS = {"--quiet", "-q"}
+GIT_INDEX_SPLIT_RESET_ALLOWED_REFS = {"head"}
 POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES = (
     ".git/",
     ".mylittleharness/generated/",
@@ -1839,6 +1842,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     )
     reviewed_local_vcs_checkpoint = _reviewed_local_vcs_checkpoint(inventory, command_data, command)
     allow_reviewed_local_vcs_checkpoint = bool(reviewed_local_vcs_checkpoint.paths)
+    reviewed_local_vcs_index_split = _reviewed_post_closeout_index_split(inventory, command_data, command)
+    allow_post_closeout_index_split = bool(reviewed_local_vcs_index_split.paths)
     allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
     delegation_prompt_shortcut = (
         _is_subagent_delegation_tool_request(data)
@@ -1891,8 +1896,10 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         allow_post_closeout_lifecycle_vcs_finalization_paths=post_closeout_lifecycle_vcs_finalization_paths,
         allow_delegation_prompt_context=allow_delegation_prompt_path_context,
         allow_product_source_vcs_command=allow_product_source_vcs_command,
-        reviewed_local_vcs_checkpoint_root=reviewed_local_vcs_checkpoint.root,
-        reviewed_local_vcs_checkpoint_paths=set(reviewed_local_vcs_checkpoint.paths),
+        reviewed_local_vcs_checkpoint_root=reviewed_local_vcs_checkpoint.root or reviewed_local_vcs_index_split.root,
+        reviewed_local_vcs_checkpoint_paths=(
+            set(reviewed_local_vcs_checkpoint.paths) | set(reviewed_local_vcs_index_split.paths)
+        ),
     ):
         findings.append(finding)
     if _is_product_source_root_mlh_mutation_command(inventory, command_data, command):
@@ -2068,6 +2075,22 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "operator request and prior staged-diff review, and does not approve push, amend, reset, "
                     "clean, release, archive, or future lifecycle movement"
                 ),
+            )
+        )
+    if allow_post_closeout_index_split:
+        split_root = reviewed_local_vcs_index_split.root
+        split_root_text = str(split_root.resolve()) if split_root else "unknown"
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-post-closeout-index-split",
+                (
+                    "allowed exact index-only checkpoint split for already staged post-closeout lifecycle/evidence "
+                    f"files in the actual command workdir/root ({split_root_text}); working-tree content remains untouched; "
+                    "broad pathspecs, wildcards, directories, ref-changing reset/restore forms, worktree restore, "
+                    "push, release, provider routing, and lifecycle authority remain blocked"
+                ),
+                paths[0] if paths else None,
             )
         )
     if post_closeout_lifecycle_vcs_finalization_paths:
@@ -2471,6 +2494,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_route_produced_lifecycle_route_stage
         and not allow_post_closeout_local_vcs_stage
         and not allow_post_closeout_local_vcs_commit
+        and not allow_post_closeout_index_split
         and not allow_route_produced_lifecycle_commit
         and not allow_product_source_vcs_command
         and not allow_mlh_owner_route_git_literals
@@ -5359,8 +5383,13 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
         return False
     staged_paths = _git_staged_paths(inventory)
     staged = {_normalize_hook_path(path).casefold() for path in staged_paths}
-    if any(_is_top_level_verification_checkpoint_path(path) for path in staged):
-        return bool(_coherent_post_closeout_mixed_vcs_finalization_paths(inventory, staged_paths))
+    if not staged:
+        return True
+    if any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
+        return bool(
+            _coherent_reviewed_local_vcs_checkpoint_paths(inventory, staged_paths)
+            or _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, staged_paths)
+        )
     return True
 
 
@@ -5368,6 +5397,26 @@ def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, comman
     if not _is_post_closeout_local_vcs_commit_command(inventory, command):
         return set()
     return _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, _git_staged_paths(inventory))
+
+
+def _is_checkpoint_sensitive_staged_path(inventory: Inventory, path: str) -> bool:
+    rel = _normalize_hook_path(_hook_route_rel_path(inventory, path) or path).casefold()
+    if not rel:
+        return False
+    return (
+        rel == "project/project-state.md"
+        or rel == "project/roadmap.md"
+        or rel == ACTIVE_PLAN_ROUTE_PATH
+        or rel.startswith("project/archive/plans/")
+        or _is_agent_run_evidence_route_path(rel)
+        or _is_worker_run_receipt_route_path(rel)
+        or _is_retention_receipt_route_path(rel)
+        or _is_checkpoint_decision_route_path(rel)
+        or _is_verification_checkpoint_route_path(rel)
+        or _is_top_level_verification_checkpoint_path(rel)
+        or _is_meta_feedback_incubation_route_path(rel)
+        or _is_existing_lifecycle_route_file(inventory, rel)
+    )
 
 
 def _coherent_post_closeout_lifecycle_vcs_stage_paths(
@@ -5544,6 +5593,217 @@ def _reviewed_local_vcs_checkpoint_review_bundle(
         mode="staging-review-bundle",
         visible_workdir=_checkpoint_uses_visible_workdir(inventory, data, target_inventory.root),
     )
+
+
+def _reviewed_post_closeout_index_split(
+    inventory: Inventory,
+    data: dict[str, object],
+    command: str,
+) -> ReviewedLocalVcsCheckpoint:
+    if len(_shell_command_segments(command)) > 1:
+        return ReviewedLocalVcsCheckpoint()
+    pathspecs = _git_index_split_pathspecs(command)
+    if not pathspecs:
+        return ReviewedLocalVcsCheckpoint()
+    target_inventory, root_reason = _index_split_target_inventory(inventory, data, command)
+    if target_inventory is None:
+        return ReviewedLocalVcsCheckpoint(blocked_reason=root_reason) if root_reason else ReviewedLocalVcsCheckpoint()
+    staged_paths = _git_staged_paths_for_root(target_inventory.root)
+    split_paths = _coherent_post_closeout_index_split_paths(target_inventory, pathspecs, staged_paths)
+    if not split_paths:
+        return ReviewedLocalVcsCheckpoint(
+            root=target_inventory.root,
+            blocked_reason=_reviewed_local_vcs_checkpoint_rejection_reason(target_inventory, pathspecs, "index split pathspecs"),
+        )
+    return ReviewedLocalVcsCheckpoint(
+        root=target_inventory.root,
+        paths=frozenset(split_paths),
+        mode="index-split",
+        visible_workdir=_checkpoint_uses_visible_workdir(inventory, data, target_inventory.root),
+    )
+
+
+def _index_split_target_inventory(
+    inventory: Inventory,
+    data: dict[str, object],
+    command: str,
+) -> tuple[Inventory | None, str]:
+    actual_root = _git_effective_workdir_path(inventory, data, command)
+    if actual_root is None:
+        return None, "actual command workdir/root is ambiguous because git work-tree/git-dir options were used"
+    try:
+        actual_root_resolved = actual_root.resolve()
+        current_root = inventory.root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None, "actual command workdir/root could not be resolved"
+    if actual_root_resolved == current_root:
+        return inventory, ""
+    try:
+        actual_root_resolved.relative_to(current_root)
+        return None, "actual command workdir must be the operating root for index-only checkpoint split"
+    except ValueError:
+        pass
+    except (OSError, RuntimeError):
+        return None, "actual command workdir/root could not be compared with the current root"
+    product_root = _configured_product_source_root_path(inventory)
+    if product_root is not None:
+        try:
+            product_root_resolved = product_root.resolve()
+            if actual_root_resolved == product_root_resolved:
+                return None, ""
+            actual_root_resolved.relative_to(product_root_resolved)
+            return None, ""
+        except ValueError:
+            pass
+        except (OSError, RuntimeError):
+            return None, "actual command workdir/root could not be compared with the configured product source root"
+    try:
+        target_inventory = load_inventory(actual_root_resolved)
+    except Exception:
+        return None, "actual command workdir/root is not a readable MLH root"
+    if target_inventory.root_kind != LIVE_OPERATING_ROOT:
+        return None, f"actual command workdir/root is not a live MLH operating root (root_kind={target_inventory.root_kind})"
+    return target_inventory, ""
+
+
+def _coherent_post_closeout_index_split_paths(
+    inventory: Inventory,
+    pathspecs: list[str] | tuple[str, ...],
+    staged_paths: list[str] | tuple[str, ...],
+) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    staged = _normalized_exact_staged_paths(inventory, staged_paths)
+    selected = _normalized_exact_index_split_pathspecs(inventory, pathspecs, staged)
+    if not staged or not selected:
+        return set()
+    if not any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
+        return set()
+    if _coherent_checkpoint_path_set(inventory, staged):
+        return set()
+    remaining = tuple(path for path in staged if path not in selected)
+    if _coherent_checkpoint_path_set(inventory, selected) or _coherent_checkpoint_path_set(inventory, remaining):
+        return selected
+    return set()
+
+
+def _normalized_exact_staged_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for path in paths:
+        clean = _normalize_hook_path(_hook_route_rel_path(inventory, path) or path).casefold()
+        if clean:
+            normalized.append(clean)
+    return tuple(normalized)
+
+
+def _normalized_exact_index_split_pathspecs(
+    inventory: Inventory,
+    pathspecs: list[str] | tuple[str, ...],
+    staged_paths: list[str] | tuple[str, ...],
+) -> set[str]:
+    staged = set(staged_paths)
+    normalized: set[str] = set()
+    for pathspec in pathspecs:
+        clean = _normalize_hook_path(_hook_route_rel_path(inventory, pathspec) or pathspec).casefold()
+        if not clean:
+            return set()
+        if clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+            return set()
+        if any(char in clean for char in "*?[]"):
+            return set()
+        if clean.startswith(":") or any(clean.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
+            return set()
+        if clean not in staged:
+            return set()
+        normalized.add(clean)
+    return normalized
+
+
+def _coherent_checkpoint_path_set(inventory: Inventory, paths: set[str] | tuple[str, ...]) -> set[str]:
+    if not paths:
+        return set()
+    ordered = tuple(paths)
+    return (
+        _coherent_reviewed_local_vcs_checkpoint_paths(inventory, ordered)
+        or _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, ordered)
+    )
+
+
+def _git_index_split_pathspecs(command: str) -> list[str]:
+    if _has_shell_command_separator(command):
+        return []
+    subcommand, tokens, raw_tokens, subcommand_index = _git_command_context_tokens(command)
+    if subcommand == "restore":
+        return _git_restore_index_split_pathspecs(tokens, raw_tokens, subcommand_index)
+    if subcommand == "reset":
+        return _git_reset_index_split_pathspecs(tokens, raw_tokens, subcommand_index)
+    return []
+
+
+def _git_restore_index_split_pathspecs(tokens: list[str], raw_tokens: list[str], subcommand_index: int) -> list[str]:
+    if subcommand_index < 0:
+        return []
+    has_staged = False
+    saw_separator = False
+    pathspecs: list[str] = []
+    for token, raw_token in zip(tokens[subcommand_index + 1 :], raw_tokens[subcommand_index + 1 :]):
+        clean = _clean_token(token)
+        option = _clean_git_commit_option_token(raw_token)
+        if not clean:
+            continue
+        if _is_shell_command_separator(raw_token, clean):
+            return []
+        if clean == "--":
+            saw_separator = True
+            continue
+        if not saw_separator:
+            if option == "--staged" or clean == "-S":
+                has_staged = True
+                continue
+            if option in GIT_INDEX_SPLIT_RESTORE_ALLOWED_OPTIONS:
+                continue
+            return []
+        pathspec = _clean_hook_path_token(str(raw_token))
+        if pathspec:
+            pathspecs.append(pathspec)
+    return pathspecs if has_staged and saw_separator and pathspecs else []
+
+
+def _git_reset_index_split_pathspecs(tokens: list[str], raw_tokens: list[str], subcommand_index: int) -> list[str]:
+    if subcommand_index < 0:
+        return []
+    saw_separator = False
+    saw_ref = False
+    pathspecs: list[str] = []
+    for token, raw_token in zip(tokens[subcommand_index + 1 :], raw_tokens[subcommand_index + 1 :]):
+        clean = _clean_token(token)
+        option = _clean_git_commit_option_token(raw_token)
+        if not clean:
+            continue
+        if _is_shell_command_separator(raw_token, clean):
+            return []
+        if clean == "--":
+            saw_separator = True
+            continue
+        if not saw_separator:
+            if option in GIT_INDEX_SPLIT_RESET_ALLOWED_OPTIONS:
+                continue
+            if clean in GIT_INDEX_SPLIT_RESET_ALLOWED_REFS and not saw_ref:
+                saw_ref = True
+                continue
+            return []
+        pathspec = _clean_hook_path_token(str(raw_token))
+        if pathspec:
+            pathspecs.append(pathspec)
+    return pathspecs if saw_separator and pathspecs else []
 
 
 def _is_reviewed_local_vcs_checkpoint_review_segment(command: str) -> bool:
@@ -7955,6 +8215,9 @@ def _git_mutation_next_safe_command(inventory: Inventory, data: dict[str, object
         paths = _route_produced_lifecycle_suggested_stage_paths(inventory, _git_stage_pathspecs(command))
         if paths:
             return "gi" + "t add -- " + " ".join(shell_arg(path) for path in paths)
+    split_next_safe = _post_closeout_checkpoint_split_next_safe_command(inventory, data, command)
+    if split_next_safe:
+        return split_next_safe
     if _has_active_plan(inventory):
         return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
     actual_root_next_safe = _actual_root_vcs_next_safe_command(inventory, data, command)
@@ -7964,6 +8227,55 @@ def _git_mutation_next_safe_command(inventory: Inventory, data: dict[str, object
     if product_source_next_safe:
         return product_source_next_safe
     return "gi" + "t add -- <exact-reviewed-files>; " + "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
+
+
+def _post_closeout_checkpoint_split_next_safe_command(inventory: Inventory, data: dict[str, object], command: str) -> str:
+    if _has_active_plan(inventory) or _git_subcommand(command) != "commit":
+        return ""
+    target_inventory, _root_reason = _index_split_target_inventory(inventory, data, command)
+    if target_inventory is None:
+        return ""
+    staged_paths = _git_staged_paths_for_root(target_inventory.root)
+    staged = _normalized_exact_staged_paths(target_inventory, staged_paths)
+    if not staged or _coherent_checkpoint_path_set(target_inventory, staged):
+        return ""
+    split_paths = _post_closeout_checkpoint_split_candidate_paths(target_inventory, staged)
+    if not split_paths:
+        return ""
+    visible_workdir = _checkpoint_uses_visible_workdir(inventory, data, target_inventory.root)
+    git_prefix = "gi" + "t" if visible_workdir else "gi" + "t -C " + shell_arg(str(target_inventory.root))
+    split_args = " ".join(shell_arg(path) for path in split_paths)
+    classes = _reviewed_local_vcs_checkpoint_path_classes(set(staged))
+    return (
+        f"detected_checkpoint_classes={classes}; "
+        "next_safe_command=split exact checkpoint classes with index-only unstage while the working tree is preserved: "
+        f"{git_prefix} restore --staged -- {split_args}; "
+        f"{git_prefix} diff --cached --check; "
+        f"{git_prefix} commit -F <message-file>; "
+        f"{git_prefix} add -- {split_args}; "
+        f"{git_prefix} diff --cached --check; "
+        f"{git_prefix} commit -F <message-file>"
+    )
+
+
+def _post_closeout_checkpoint_split_candidate_paths(inventory: Inventory, staged: tuple[str, ...]) -> tuple[str, ...]:
+    candidate_groups = [
+        tuple(path for path in staged if _is_meta_feedback_incubation_route_path(path)),
+        tuple(
+            path
+            for path in staged
+            if _is_worker_run_receipt_route_path(path) or _is_retention_receipt_route_path(path)
+        ),
+        tuple(path for path in staged if _is_checkpoint_decision_route_path(path) or _is_verification_checkpoint_route_path(path)),
+    ]
+    for group in candidate_groups:
+        if not group:
+            continue
+        split = set(group)
+        remaining = tuple(path for path in staged if path not in split)
+        if _coherent_checkpoint_path_set(inventory, split) or _coherent_checkpoint_path_set(inventory, remaining):
+            return group
+    return ()
 
 
 def _actual_root_vcs_next_safe_command(inventory: Inventory, data: dict[str, object], command: str) -> str:
