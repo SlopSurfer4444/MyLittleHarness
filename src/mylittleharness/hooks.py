@@ -5186,7 +5186,7 @@ def _release_publication_tag_name(refspec: str) -> str:
     if target and target != source:
         return ""
     tag_name = source.removeprefix("refs/tags/")
-    if not re.match(r"^v\d+\.\d+\.\d+-rc\d+$", tag_name):
+    if not re.match(r"^v\d+\.\d+\.\d+(?:-rc\d+)?$", tag_name):
         return ""
     return tag_name
 

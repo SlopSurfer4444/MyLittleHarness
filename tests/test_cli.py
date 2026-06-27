@@ -38248,6 +38248,18 @@ class CliTests(unittest.TestCase):
                 "RC1",
             )
             self.assertEqual(tag.returncode, 0, tag.stderr)
+            final_tag = run_git(
+                "-c",
+                "user.name=MLH Test",
+                "-c",
+                "user.email=mlh-test@example.invalid",
+                "tag",
+                "-a",
+                "v1.0.1",
+                "-m",
+                "1.0.1",
+            )
+            self.assertEqual(final_tag.returncode, 0, final_tag.stderr)
             self.assertEqual(run_git("remote", "add", "origin", "https://example.invalid/mlh.git").returncode, 0)
 
             state_path = root / "project" / "project-state.md"
@@ -38281,6 +38293,23 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
             self.assertIn("remote=origin", messages)
             self.assertIn("tag commit matches main", messages)
+
+            final_command = (
+                "git "
+                + "push --dry-run origin "
+                + "refs/heads/main:refs/heads/main "
+                + "refs/tags/v1.0.1:refs/tags/v1.0.1"
+            )
+            final_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "workdir": str(product_root), "command": final_command}),
+            )
+            final_codes = {finding["code"] for finding in final_payload["findings"]}
+            self.assertFalse(final_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-push", final_codes)
+            self.assertIn("hooks-policy-allow-product-source-release-publication-push", final_codes)
 
             (product_root / "README.md").write_text("# Product\n\nPost-tag hook fix.\n", encoding="utf-8")
             self.assertEqual(run_git("add", "README.md").returncode, 0)
@@ -38324,6 +38353,7 @@ class CliTests(unittest.TestCase):
 
             unsafe_commands = {
                 "ordinary_tag_only": "git " + "push origin refs/tags/v1.0.0-rc1",
+                "ordinary_final_tag_only": "git " + "push origin refs/tags/v1.0.1",
                 "bare_tag": "git " + "push origin main v1.0.0-rc1",
                 "wrong_remote": tag_source_command.replace(" origin ", " upstream "),
                 "force": tag_source_command.replace("push --dry-run", "push --force"),
