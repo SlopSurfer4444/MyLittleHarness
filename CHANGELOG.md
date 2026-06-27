@@ -2,6 +2,29 @@
 
 All notable changes for MyLittleHarness are recorded here once they are ready for a public release checkpoint.
 
+## 1.0.1 - Source Release Refresh - 2026-06-27
+
+This release publishes the post-1.0.0 operator-lane hardening that was already verified locally, including checkpoint hook classifier fixes and owner-decision route discoverability polish. It remains a GitHub source release; package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, and workstation adoption are still outside this release.
+
+### Added
+
+- Explicit `approval-decision` route support for recording reviewed owner decisions from approval-packet evidence.
+- Top-level help discoverability for the owner-decision route without treating the route as approval authority.
+- Product docs and command-surface references for the owner-decision workflow.
+
+### Fixed
+
+- Hook checkpoint classification for archived plans, neighbor closeout routes, route-imported research, approval-packet refs, no-roadmap post-archive staging, and terminal active-plan closeout lanes.
+- GitHub Actions portability failure around staged project-state hook tests on macOS and Windows path forms.
+- A release-readiness docs contract drift in `docs/README.md`.
+
+### Verification Expectations
+
+- `pyproject.toml` and `mylittleharness.__version__` both report `1.0.1`.
+- Product tests run with bytecode disabled from the source checkout.
+- GitHub Actions `Tests` passes on the pushed `main` release commit before the GitHub release is treated as green.
+- The GitHub release includes the standard source archive plus an attached `mylittleharness-1.0.1-source.zip` asset.
+
 ## 1.0.0 - First Public GitHub Release - 2026-06-23
 
 This release publishes MyLittleHarness as a public GitHub source release for local use and review. It does not claim package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, or workstation adoption.

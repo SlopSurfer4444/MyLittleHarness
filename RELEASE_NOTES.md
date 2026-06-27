@@ -1,10 +1,10 @@
-# MyLittleHarness 1.0.0
+# MyLittleHarness 1.0.1
 
 ## Summary
 
-MyLittleHarness `1.0.0` is the first public GitHub source release for the repo-visible workflow safety utility built around one direct model: `MyLittleHarness -> target repository`.
+MyLittleHarness `1.0.1` is a fresh public GitHub source release for the repo-visible workflow safety utility built around one direct model: `MyLittleHarness -> target repository`.
 
-It is ready for public GitHub use and local validation from source or from GitHub's source archives. Package-index publication, signed binary artifacts, global workstation adoption, and hosted services remain future distribution work rather than hidden assumptions in this release.
+It refreshes the post-1.0.0 source baseline with owner-decision route support, checkpoint hook classifier hardening, and the GitHub Actions portability fixes needed for a green release. Package-index publication, signed binary artifacts, global workstation adoption, and hosted services remain future distribution work rather than hidden assumptions in this release.
 
 ## What This Release Is
 
@@ -12,6 +12,7 @@ It is ready for public GitHub use and local validation from source or from GitHu
 - A repository authority pattern built from ordinary files: `AGENTS.md`, `.mylittleharness/project-workflow.toml`, `project/project-state.md`, optional roadmap/evidence files, and explicit dry-run/apply routes.
 - A stdlib-first package with no required runtime dependencies, Apache-2.0 licensing metadata, Python `>=3.11`, and the `mylittleharness` console script.
 - A bounded public source-release baseline before package-index publication or installer work.
+- A source release archive attached to GitHub Releases for operators who want a direct zip asset in addition to GitHub's generated source archives.
 
 ## What It Can Do Now
 
@@ -23,6 +24,7 @@ It is ready for public GitHub use and local validation from source or from GitHu
 - Verify package install/import/console-script behavior with `bootstrap --package-smoke`.
 - Provide optional read-only navigation through dashboards, suggestions, intelligence search, adapter reports, and generated projections.
 - Provide tighter hook guidance for real Codex/tool payloads, prompt/delegation boundaries, route-owned checkpointing, and exact publication pushes.
+- Record reviewed owner decisions through `approval-decision --dry-run|--apply` when approval-packet evidence and human authority exist.
 
 ## What It Does Not Claim
 
@@ -33,11 +35,12 @@ It is ready for public GitHub use and local validation from source or from GitHu
 
 ## Local Verification Checklist
 
-- Confirm package metadata and runtime version both report `1.0.0`.
+- Confirm package metadata and runtime version both report `1.0.1`.
 - Run product tests from the source checkout with bytecode disabled.
 - Build wheel and sdist artifacts into a temporary directory outside the product root.
 - Install the freshly built wheel into a new temporary virtual environment with no dependency resolution surprises.
 - Run the installed console script against a fresh target repository through the README quick-start path.
+- Confirm GitHub Actions `Tests` passes for the pushed release commit.
 - Record verification facts in the serviced operating root.
 - Create exact local Git savepoints for the product source and operating-root evidence.
 
