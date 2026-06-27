@@ -2188,7 +2188,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "delegated neighbor-root exact eligible file sets, project evidence/reference routes, "
                     "and initial scaffold packages, "
                     "meta-feedback/incubation blocker notes, "
-                    "and reviewed decision-backed verification evidence packages; "
+                    "route-owned decision artifacts, and reviewed decision-backed verification evidence packages; "
                     "stage ordinary source/test files separately by exact path, then stage route-produced "
                     "lifecycle/evidence/archive artifacts separately by exact path; if Git ignore rules hide a "
                     "route-created artifact, use git add -f -- <exact-route-artifact> for that artifact only; "
@@ -6273,6 +6273,13 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     approval_packet_paths = {path for path in normalized if _verification_checkpoint_path_class(path) == "approval-packets"}
     if approval_packet_paths and normalized == approval_packet_paths:
         return normalized if all(_is_reviewed_pending_approval_packet_file(inventory, path) for path in approval_packet_paths) else set()
+    decision_artifact_paths = {path for path in normalized if _is_checkpoint_decision_route_path(path)}
+    if decision_artifact_paths and normalized == decision_artifact_paths:
+        return (
+            normalized
+            if all(_is_reviewed_decision_checkpoint_artifact_file(inventory, path) for path in decision_artifact_paths)
+            else set()
+        )
     agent_run_paths = {path for path in normalized if _is_agent_run_evidence_route_path(path)}
     if agent_run_paths and normalized == agent_run_paths:
         return normalized if all(_is_reviewed_agent_run_evidence_file(inventory, path) for path in agent_run_paths) else set()
@@ -6332,6 +6339,11 @@ def _coherent_delegated_neighbor_project_evidence_checkpoint_paths(inventory: In
     if project_paths & NEIGHBOR_PROJECT_EVIDENCE_EXACT_CORE_PATHS:
         return set()
     if not all(_delegated_neighbor_project_evidence_path_allowed(path) for path in project_paths):
+        return set()
+    decision_artifact_paths = {path for path in project_paths if _is_checkpoint_decision_route_path(path)}
+    if decision_artifact_paths and not all(
+        _is_reviewed_decision_checkpoint_artifact_file(inventory, path) for path in decision_artifact_paths
+    ):
         return set()
     approval_packet_paths = {
         path for path in project_paths if _verification_checkpoint_path_class(path) == "approval-packets"
@@ -7161,6 +7173,50 @@ def _is_reviewed_pending_approval_packet_file(inventory: Inventory, path: str) -
     return _route_evidence_text_has_non_authority_boundary(encoded)
 
 
+def _is_reviewed_decision_checkpoint_artifact_file(inventory: Inventory, path: str) -> bool:
+    if not _is_checkpoint_decision_route_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    if _route_frontmatter_grants_checkpoint_authority(frontmatter.data):
+        return False
+    content = text.casefold()
+    route_value = str(frontmatter.data.get("route") or frontmatter.data.get("classification") or "").strip().casefold()
+    source_value = str(frontmatter.data.get("source") or "").strip().casefold()
+    has_route_ownership = route_value == "decisions" and (
+        "intake_source" in frontmatter.data or "intake" in source_value or "mylittleharness" in source_value
+    )
+    has_checkpoint_or_prep_scope = (
+        "decision-prep" in content
+        or "design evidence" in content
+        or "local savepoint" in content
+        or "local checkpoint" in content
+        or "local-only" in content
+    )
+    has_non_authority_boundary = (
+        ("does not approve" in content or "cannot approve" in content or "do not approve" in content)
+        and "lifecycle" in content
+        and ("git" in content or "staging" in content or "commit" in content)
+    )
+    fabricates_approval = (
+        "safe_to_continue_existing_sequence: true" in content
+        or "owner approved" in content
+        or "approved for lifecycle" in content
+        or "approved for roadmap" in content
+    )
+    return has_route_ownership and has_checkpoint_or_prep_scope and has_non_authority_boundary and not fabricates_approval
+
+
 def _is_reviewed_decision_backed_verification_checkpoint_file(inventory: Inventory, path: str) -> bool:
     if _is_reviewed_verification_checkpoint_file(inventory, path):
         return True
@@ -7467,7 +7523,7 @@ def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths:
         "post-closeout-route-package,worker-run-receipt-refs,retention-receipt-refs,verification/decision-evidence-package,"
         "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
         "roadmap-promotion-package,post-closeout-source-incubation-relationship-package,"
-        "meta-feedback/incubation-blocker-notes,delegated-neighbor-exact-files,"
+        "meta-feedback/incubation-blocker-notes,route-owned-decision-artifacts,delegated-neighbor-exact-files,"
         "delegated-neighbor-bootstrap-scaffold"
     )
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
