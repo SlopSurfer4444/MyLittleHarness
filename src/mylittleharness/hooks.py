@@ -6253,6 +6253,11 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     if roadmap_promotion_paths:
         return roadmap_promotion_paths
     post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
+    if not post_closeout_route_paths:
+        post_closeout_route_paths = _coherent_minimal_post_closeout_lifecycle_route_checkpoint_paths_without_roadmap(
+            inventory,
+            paths,
+        )
     if post_closeout_route_paths:
         return post_closeout_route_paths
     staged_lifecycle_paths = _coherent_lifecycle_stage_paths_with_existing_index(inventory, paths)
@@ -6314,6 +6319,26 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     if meta_feedback_paths:
         return meta_feedback_paths
     return set()
+
+
+def _coherent_minimal_post_closeout_lifecycle_route_checkpoint_paths_without_roadmap(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+) -> set[str]:
+    post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+        inventory,
+        paths,
+        allow_without_roadmap=True,
+    )
+    if not post_closeout_route_paths:
+        return set()
+    state_rel = "project/" + "project-state.md"
+    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    if not last_archive_rel:
+        return set()
+    required = {state_rel, last_archive_rel}
+    optional = {ACTIVE_PLAN_ROUTE_PATH}
+    return post_closeout_route_paths if required <= post_closeout_route_paths <= required | optional else set()
 
 
 def _coherent_delegated_neighbor_exact_file_checkpoint_paths(

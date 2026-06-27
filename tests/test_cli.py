@@ -34341,6 +34341,155 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_neighbor_post_closeout_route_package_without_roadmap_mutation(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            product_root = Path(tmp) / "product-source"
+            product_root.mkdir()
+            current_state = current_root / "project/project-state.md"
+            current_state.write_text(
+                current_state.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            target_root = make_live_root(Path(tmp) / "mlh-dev")
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(target_root)
+            (target_root / roadmap_rel).write_text("# Roadmap\n\n- No closeout relationship changed in this slice.\n", encoding="utf-8")
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            exact_paths = (state_rel, archive_rel)
+            target_stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -f -- " + " ".join(exact_paths),
+                    "workdir": str(target_root),
+                }
+            )
+            neighbor_stage_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {
+                        "command": f'git -C "{target_root}" add -f -- ' + " ".join(exact_paths),
+                        "workdir": str(current_root),
+                    }
+                ),
+            }
+            neighbor_commit_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {
+                        "command": f'git -C "{target_root}" commit -F "{message_file}"',
+                        "workdir": str(current_root),
+                    }
+                ),
+            }
+            unrelated_archive_rel = "project/" + "archive/plans/unrelated-closeout.md"
+            (target_root / unrelated_archive_rel).write_text(
+                (target_root / archive_rel).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            unrelated_stage_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {
+                        "command": f'git -C "{target_root}" add -- '
+                        + " ".join((*exact_paths, unrelated_archive_rel)),
+                        "workdir": str(current_root),
+                    }
+                ),
+            }
+            markerless_root = make_live_root(Path(tmp) / "markerless")
+            markerless_state_rel, _markerless_roadmap_rel, markerless_archive_rel = (
+                self._write_post_closeout_route_package_checkpoint_fixture(markerless_root)
+            )
+            markerless_state = markerless_root / markerless_state_rel
+            markerless_state.write_text(
+                markerless_state.read_text(encoding="utf-8").replace(
+                    "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                    "- docs_decision: not-needed\n"
+                    "- commit_decision: commit exact route package only\n"
+                    "- residual_risk: broad Git, push, release, and lifecycle authority remain blocked\n"
+                    "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                    "\n",
+                ),
+                encoding="utf-8",
+            )
+            markerless_stage_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {
+                        "command": f'git -C "{markerless_root}" add -- {markerless_state_rel} {markerless_archive_rel}',
+                        "workdir": str(current_root),
+                    }
+                ),
+            }
+
+            def staged_paths(root: Path) -> tuple[str, ...]:
+                if root.resolve() == target_root.resolve():
+                    return exact_paths
+                return ()
+
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths):
+                target_payload = hook_event_payload(
+                    load_inventory(target_root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    target_stage_input,
+                )
+                neighbor_stage_payload = hook_event_payload(
+                    load_inventory(current_root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(neighbor_stage_input),
+                )
+                neighbor_commit_payload = hook_event_payload(
+                    load_inventory(current_root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(neighbor_commit_input),
+                )
+                unrelated_payload = hook_event_payload(
+                    load_inventory(current_root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(unrelated_stage_input),
+                )
+                markerless_payload = hook_event_payload(
+                    load_inventory(current_root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(markerless_stage_input),
+                )
+
+            target_codes = {finding["code"] for finding in target_payload["findings"]}
+            neighbor_stage_codes = {finding["code"] for finding in neighbor_stage_payload["findings"]}
+            neighbor_commit_codes = {finding["code"] for finding in neighbor_commit_payload["findings"]}
+            unrelated_codes = {finding["code"] for finding in unrelated_payload["findings"]}
+            markerless_codes = {finding["code"] for finding in markerless_payload["findings"]}
+            neighbor_messages = "\n".join(str(finding["message"]) for finding in neighbor_stage_payload["findings"])
+            commit_messages = "\n".join(str(finding["message"]) for finding in neighbor_commit_payload["findings"])
+
+            self.assertFalse(target_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", target_codes)
+            self.assertFalse(neighbor_stage_payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", neighbor_stage_codes)
+            self.assertFalse(neighbor_commit_payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", neighbor_commit_codes)
+            self.assertIn(str(target_root.resolve()), neighbor_messages)
+            self.assertIn(str(target_root.resolve()), commit_messages)
+            self.assertNotIn(str(product_root.resolve()), neighbor_messages)
+            self.assertNotIn(str(product_root.resolve()), commit_messages)
+            self.assertTrue(unrelated_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unrelated_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unrelated_codes)
+            self.assertTrue(markerless_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", markerless_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", markerless_codes)
+
     def test_hooks_pre_tool_allows_post_closeout_route_package_with_source_incubation_retarget_only(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
