@@ -4827,6 +4827,10 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return False
     pathspecs = [] if _has_shell_command_separator(command) else _git_stage_pathspecs(command)
     normalized = _normalized_route_produced_lifecycle_paths(inventory, pathspecs or paths)
+    if not _has_shell_command_separator(command) and _coherent_post_closeout_roadmap_promotion_finalization_paths(
+        inventory, pathspecs
+    ):
+        return True
     if not _has_shell_command_separator(command) and _coherent_post_closeout_lifecycle_route_checkpoint_paths(
         inventory, pathspecs, allow_without_roadmap=True
     ):
@@ -4843,6 +4847,7 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
     if _has_shell_command_separator(command):
         return False
     return bool(
+        _coherent_post_closeout_roadmap_promotion_finalization_paths(inventory, pathspecs) or
         _coherent_post_closeout_lifecycle_route_checkpoint_paths(
             inventory,
             pathspecs,
@@ -5415,6 +5420,8 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
     pathspecs = _git_stage_pathspecs(command)
     if not pathspecs:
         return False
+    if _coherent_post_closeout_roadmap_promotion_finalization_paths(inventory, pathspecs):
+        return True
     normalized = {_normalize_hook_path(_hook_route_rel_path(inventory, pathspec) or pathspec).casefold() for pathspec in pathspecs}
     if any(_is_top_level_verification_checkpoint_path(path) for path in normalized):
         if _coherent_post_closeout_lifecycle_vcs_stage_paths(inventory, pathspecs):
@@ -6220,6 +6227,53 @@ def _coherent_post_closeout_mixed_vcs_finalization_paths(
     return lifecycle_paths | ordinary_paths
 
 
+def _coherent_post_closeout_roadmap_promotion_finalization_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
+) -> set[str]:
+    normalized = _normalized_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
+    if not normalized:
+        return set()
+    roadmap_rel = "project/" + "roadmap.md"
+    if roadmap_rel not in normalized:
+        return set()
+    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    if not last_archive_rel:
+        return set()
+    promoted_incubation_paths: set[str] = set()
+    for path in normalized:
+        if not _is_meta_feedback_incubation_route_path(path) or not _is_existing_lifecycle_route_file(inventory, path):
+            continue
+        if _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel):
+            continue
+        data = _reviewed_mlh_incubation_file_frontmatter(
+            inventory,
+            path,
+            prefer_staged_content=prefer_staged_content,
+        )
+        if data is None or _incubation_frontmatter_declares_archive_plan_relationship(data):
+            return set()
+        promoted_incubation_paths.add(path)
+    if not promoted_incubation_paths:
+        return set()
+    promotion_subset = promoted_incubation_paths | {roadmap_rel}
+    if not _coherent_roadmap_promotion_checkpoint_paths(
+        inventory,
+        tuple(sorted(promotion_subset)),
+        prefer_staged_content=prefer_staged_content,
+    ):
+        return set()
+    lifecycle_subset = normalized - promoted_incubation_paths
+    if not _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+        inventory,
+        tuple(sorted(lifecycle_subset)),
+    ):
+        return set()
+    return normalized
+
+
 def _post_closeout_archived_plan_target_artifacts(inventory: Inventory, paths: set[str]) -> set[str]:
     targets: set[str] = set()
     for path in paths:
@@ -6267,6 +6321,13 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(
         return roadmap_promotion_paths
     if _looks_like_roadmap_promotion_checkpoint_paths(inventory, paths):
         return set()
+    roadmap_promotion_finalization_paths = _coherent_post_closeout_roadmap_promotion_finalization_paths(
+        inventory,
+        paths,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if roadmap_promotion_finalization_paths:
+        return roadmap_promotion_finalization_paths
     post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
     if not post_closeout_route_paths:
         post_closeout_route_paths = _coherent_minimal_post_closeout_lifecycle_route_checkpoint_paths_without_roadmap(
@@ -7754,6 +7815,14 @@ def _is_reviewed_post_closeout_source_incubation_retarget(data: dict[str, object
         if value and value != expected_archive:
             return False
     return True
+
+
+def _incubation_frontmatter_declares_archive_plan_relationship(data: dict[str, object]) -> bool:
+    for field in ("archived_plan", "implemented_by"):
+        if _normalize_hook_path(str(data.get(field) or "")).casefold():
+            return True
+    related_plan = _normalize_hook_path(str(data.get("related_plan") or "")).casefold()
+    return related_plan.startswith("project/archive/plans/")
 
 
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:

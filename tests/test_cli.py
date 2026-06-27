@@ -37082,6 +37082,136 @@ class CliTests(unittest.TestCase):
             self.assertTrue(bad_payload["block"])
             self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", bad_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_finalization_with_roadmap_promotion_notes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, archive_rel, _blocked_rel, succeeded_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            roadmap_rel = "project/" + "roadmap.md"
+            note_a_rel = "project/" + "plan-incubation/promoted-a.md"
+            note_b_rel = "project/" + "plan-incubation/promoted-b.md"
+            unpromoted_rel = "project/" + "plan-incubation/unpromoted.md"
+            roadmap_text = (
+                "# Roadmap\n\n"
+                f"- Compacted done roadmap item `reviewed-closeout`: archived plan `{archive_rel}`.\n\n"
+                "## Items\n\n"
+                "### Promotion Bundle\n\n"
+                "- `id`: `promotion-bundle`\n"
+                "- `status`: `accepted`\n"
+                f"- `source_members`: `[\"{note_a_rel}\", \"{note_b_rel}\"]`\n"
+            )
+            note_a_text = (
+                "---\n"
+                'topic: "promoted-a"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# Promoted A\n"
+            )
+            note_b_text = (
+                "---\n"
+                'topic: "promoted-b"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                'related_roadmap: "project/roadmap.md"\n'
+                'related_roadmap_item: "promotion-bundle"\n'
+                'promoted_to: "project/roadmap.md"\n'
+                "---\n"
+                "# Promoted B\n"
+            )
+            unpromoted_text = (
+                "---\n"
+                'topic: "unpromoted"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# Unpromoted\n"
+            )
+            (root / roadmap_rel).write_text(roadmap_text, encoding="utf-8")
+            for rel, text in (
+                (note_a_rel, note_a_text),
+                (note_b_rel, note_b_text),
+                (unpromoted_rel, unpromoted_text),
+            ):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+
+            stage_paths = (state_rel, roadmap_rel, archive_rel, succeeded_rel, note_a_rel, note_b_rel)
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -f -- " + " ".join(stage_paths),
+                }
+            )
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+
+            bad_stage_paths = stage_paths + (unpromoted_rel,)
+            bad_stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -f -- " + " ".join(bad_stage_paths),
+                }
+            )
+            bad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bad_stage_input)
+            bad_codes = {finding["code"] for finding in bad_payload["findings"]}
+            self.assertTrue(bad_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", bad_codes)
+
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "commit -F " + str(message_file),
+                }
+            )
+
+            def staged_paths_for_root(git_root: Path) -> tuple[str, ...]:
+                if git_root.resolve() == root.resolve():
+                    return stage_paths
+                return ()
+
+            def valid_staged_text(git_root: Path, rel_path: str) -> str | None:
+                if git_root.resolve() != root.resolve():
+                    return None
+                if rel_path == roadmap_rel:
+                    return roadmap_text
+                if rel_path == note_a_rel:
+                    return note_a_text
+                if rel_path == note_b_rel:
+                    return note_b_text
+                return None
+
+            def invalid_staged_text(git_root: Path, rel_path: str) -> str | None:
+                if rel_path == note_a_rel:
+                    return note_a_text.replace("MyLittleHarness incubation route", "manual note")
+                return valid_staged_text(git_root, rel_path)
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths_for_root),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=valid_staged_text),
+            ):
+                commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths_for_root),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=invalid_staged_text),
+            ):
+                invalid_commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            invalid_commit_codes = {finding["code"] for finding in invalid_commit_payload["findings"]}
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", commit_codes)
+            self.assertTrue(invalid_commit_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", invalid_commit_codes)
+
     def test_hooks_pre_tool_keeps_unsafe_post_closeout_lifecycle_vcs_finalization_blocked(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
