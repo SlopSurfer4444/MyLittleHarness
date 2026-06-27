@@ -55,6 +55,15 @@ MLHD_MANAGED_RUNTIME_FILE_NAMES = (
 MLHD_PROJECTION_QUIET_PERIOD_SECONDS = 1.0
 MLHD_WORKER_INTERVAL_SECONDS = 2.0
 MLHD_PRODUCT_SOURCE_REFUSED_ACTIONS = {"install", "run-once", "start", "stop", "uninstall"}
+MLHD_RUN_ONCE_STATUS_COMMAND = "mylittleharness --root <root> mlhd status --json"
+MLHD_RUN_ONCE_DASHBOARD_COMMAND = "mylittleharness --root <root> dashboard --inspect --json"
+MLHD_RUN_ONCE_CHECK_COMMAND = "mylittleharness --root <root> check --quick --json"
+MLHD_RUN_ONCE_APPLY_COMMAND = "mylittleharness --root <root> mlhd run-once --apply"
+MLHD_RUN_ONCE_DUPLICATE_GUARD = "inspect-status-first"
+MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE = (
+    "after a shell timeout, inspect mlhd status/dashboard/check first; do not start another run-once until the "
+    "bounded outcome marker is completed or interrupted and projection freshness still needs refresh"
+)
 _MLHD_WORKER_LOOP_CODE = "\n".join(
     [
         "import json, os, subprocess, sys, time",
@@ -141,6 +150,18 @@ def mlhd_control_payload(
         "projection_quiet_period_seconds": quiet_period_seconds,
         "projection_pulse": projection_pulse_payload(inventory, quiet_period_seconds=quiet_period_seconds),
         "context_memory": context_memory_capsule_payload(inventory),
+        "run_once_status": state["run_once_status"],
+        "run_once_started_at_utc": state["run_once_started_at_utc"],
+        "run_once_completed_at_utc": state["run_once_completed_at_utc"],
+        "run_once_updated_at_utc": state["run_once_updated_at_utc"],
+        "run_once_bounded_outcome": state["run_once_bounded_outcome"],
+        "run_once_operator_diagnostic": state["run_once_operator_diagnostic"],
+        "run_once_status_command": state["run_once_status_command"],
+        "run_once_dashboard_command": state["run_once_dashboard_command"],
+        "run_once_check_command": state["run_once_check_command"],
+        "run_once_post_timeout_recipe": state["run_once_post_timeout_recipe"],
+        "run_once_duplicate_refresh_guard": state["run_once_duplicate_refresh_guard"],
+        "run_once_completion_handoff": state["run_once_completion_handoff"],
         "approves_lifecycle": False,
         "stores_provider_credentials": False,
         "durable_mutations_delegate_to_cli": True,
@@ -220,6 +241,8 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
     autostart_payload = _read_runtime_json(root, MLHD_AUTOSTART_FILE_NAME)
     refresh_payload = _read_runtime_json(root, MLHD_PROJECTION_REFRESH_FILE_NAME)
     run_once_payload = _read_runtime_json(root, MLHD_LAST_RUN_ONCE_FILE_NAME)
+    run_once_status = str(run_once_payload.get("run_once_status") or run_once_payload.get("status") or "")
+    run_once_handoff = _run_once_handoff_payload(run_once_status)
     pid = _payload_pid(pid_payload)
     state_pid = _payload_pid(state_payload)
     pid_status = "absent"
@@ -228,14 +251,15 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
     state_pid_status = "absent"
     if state_pid:
         state_pid_status = "alive" if _pid_is_alive(state_pid) else "stale"
+    run_once_state_running = state_payload.get("last_action") == "run-once" and state_payload.get("status") == "running"
     if runtime_status == "invalid":
         control_status = "invalid"
+    elif run_once_state_running:
+        control_status = "run-once-active" if state_pid_status == "alive" else "run-once-interrupted"
     elif pid_status == "alive" and lock_payload:
         control_status = "running"
     elif pid_status == "stale":
         control_status = "stale"
-    elif state_payload.get("last_action") == "run-once" and state_payload.get("status") == "running":
-        control_status = "run-once-active" if state_pid_status == "alive" else "run-once-interrupted"
     elif state_payload.get("status") == "stopped":
         control_status = "stopped"
     elif state_payload.get("last_action") == "run-once":
@@ -260,11 +284,30 @@ def inspect_mlhd_control_state(inventory: Inventory) -> dict[str, object]:
         "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
         "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
         "projection_stale_reason": str(refresh_payload.get("stale_reason") or ""),
-        "run_once_status": str(run_once_payload.get("run_once_status") or run_once_payload.get("status") or ""),
+        "run_once_status": run_once_status,
         "run_once_started_at_utc": str(run_once_payload.get("started_at_utc") or ""),
         "run_once_completed_at_utc": str(run_once_payload.get("completed_at_utc") or ""),
         "run_once_updated_at_utc": str(run_once_payload.get("updated_at_utc") or ""),
         "run_once_bounded_outcome": str(run_once_payload.get("bounded_outcome") or ""),
+        "run_once_operator_diagnostic": str(
+            run_once_payload.get("run_once_operator_diagnostic")
+            or run_once_payload.get("operator_diagnostic")
+            or run_once_handoff["run_once_operator_diagnostic"]
+        ),
+        "run_once_status_command": str(run_once_payload.get("run_once_status_command") or run_once_handoff["run_once_status_command"]),
+        "run_once_dashboard_command": str(
+            run_once_payload.get("run_once_dashboard_command") or run_once_handoff["run_once_dashboard_command"]
+        ),
+        "run_once_check_command": str(run_once_payload.get("run_once_check_command") or run_once_handoff["run_once_check_command"]),
+        "run_once_post_timeout_recipe": str(
+            run_once_payload.get("run_once_post_timeout_recipe") or run_once_handoff["run_once_post_timeout_recipe"]
+        ),
+        "run_once_duplicate_refresh_guard": str(
+            run_once_payload.get("run_once_duplicate_refresh_guard") or run_once_handoff["run_once_duplicate_refresh_guard"]
+        ),
+        "run_once_completion_handoff": str(
+            run_once_payload.get("run_once_completion_handoff") or run_once_handoff["run_once_completion_handoff"]
+        ),
     }
 
 
@@ -397,6 +440,13 @@ def mlhd_runtime_payload(inventory: Inventory) -> dict[str, object]:
         "run_once_started_at_utc": str(state.get("run_once_started_at_utc") or ""),
         "run_once_completed_at_utc": str(state.get("run_once_completed_at_utc") or ""),
         "run_once_bounded_outcome": str(state.get("run_once_bounded_outcome") or ""),
+        "run_once_operator_diagnostic": str(state.get("run_once_operator_diagnostic") or ""),
+        "run_once_status_command": str(state.get("run_once_status_command") or MLHD_RUN_ONCE_STATUS_COMMAND),
+        "run_once_dashboard_command": str(state.get("run_once_dashboard_command") or MLHD_RUN_ONCE_DASHBOARD_COMMAND),
+        "run_once_check_command": str(state.get("run_once_check_command") or MLHD_RUN_ONCE_CHECK_COMMAND),
+        "run_once_post_timeout_recipe": str(state.get("run_once_post_timeout_recipe") or MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE),
+        "run_once_duplicate_refresh_guard": str(state.get("run_once_duplicate_refresh_guard") or MLHD_RUN_ONCE_DUPLICATE_GUARD),
+        "run_once_completion_handoff": str(state.get("run_once_completion_handoff") or ""),
     }
 
 
@@ -407,14 +457,7 @@ def projection_pulse_payload(
 ) -> dict[str, object]:
     runtime_refresh_allowed = _mlhd_runtime_refresh_allowed(inventory)
     refresh_command = (
-        "mylittleharness --root <root> mlhd run-once --apply"
-        if runtime_refresh_allowed
-        else "mylittleharness --root <root> projection --warm-cache --target all"
-    )
-    next_safe_command = (
-        "mylittleharness --root <root> mlhd run-once --dry-run"
-        if runtime_refresh_allowed
-        else "mylittleharness --root <root> projection --warm-cache --target all"
+        MLHD_RUN_ONCE_APPLY_COMMAND if runtime_refresh_allowed else "mylittleharness --root <root> projection --warm-cache --target all"
     )
     dirty_payloads = [_read_json_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME), _read_json_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)]
     dirty_payloads = [payload for payload in dirty_payloads if payload]
@@ -428,6 +471,15 @@ def projection_pulse_payload(
     )
     refresh_payload = _read_runtime_json(inventory.root, MLHD_PROJECTION_REFRESH_FILE_NAME)
     run_once_payload = _read_runtime_json(inventory.root, MLHD_LAST_RUN_ONCE_FILE_NAME)
+    run_once_status = str(run_once_payload.get("run_once_status") or run_once_payload.get("status") or "")
+    run_once_handoff = _run_once_handoff_payload(run_once_status)
+    next_safe_command = (
+        MLHD_RUN_ONCE_STATUS_COMMAND
+        if run_once_status == "in-progress"
+        else "mylittleharness --root <root> mlhd run-once --dry-run"
+        if runtime_refresh_allowed
+        else "mylittleharness --root <root> projection --warm-cache --target all"
+    )
     status = (
         "updating-or-interrupted"
         if operation_payload
@@ -454,10 +506,29 @@ def projection_pulse_payload(
         "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
         "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
         "stale_reason": str(refresh_payload.get("stale_reason") or ""),
-        "run_once_status": str(run_once_payload.get("run_once_status") or run_once_payload.get("status") or ""),
+        "run_once_status": run_once_status,
         "run_once_started_at_utc": str(run_once_payload.get("started_at_utc") or ""),
         "run_once_completed_at_utc": str(run_once_payload.get("completed_at_utc") or ""),
         "run_once_bounded_outcome": str(run_once_payload.get("bounded_outcome") or ""),
+        "run_once_operator_diagnostic": str(
+            run_once_payload.get("run_once_operator_diagnostic")
+            or run_once_payload.get("operator_diagnostic")
+            or run_once_handoff["run_once_operator_diagnostic"]
+        ),
+        "run_once_status_command": str(run_once_payload.get("run_once_status_command") or run_once_handoff["run_once_status_command"]),
+        "run_once_dashboard_command": str(
+            run_once_payload.get("run_once_dashboard_command") or run_once_handoff["run_once_dashboard_command"]
+        ),
+        "run_once_check_command": str(run_once_payload.get("run_once_check_command") or run_once_handoff["run_once_check_command"]),
+        "run_once_post_timeout_recipe": str(
+            run_once_payload.get("run_once_post_timeout_recipe") or run_once_handoff["run_once_post_timeout_recipe"]
+        ),
+        "run_once_duplicate_refresh_guard": str(
+            run_once_payload.get("run_once_duplicate_refresh_guard") or run_once_handoff["run_once_duplicate_refresh_guard"]
+        ),
+        "run_once_completion_handoff": str(
+            run_once_payload.get("run_once_completion_handoff") or run_once_handoff["run_once_completion_handoff"]
+        ),
         "owner_command": refresh_command,
         "warm_cache_command": "mylittleharness --root <root> projection --warm-cache --target all",
         "manual_recovery_command": "mylittleharness --root <root> projection --warm-cache --target all",
@@ -551,11 +622,33 @@ def _mlhd_status_findings(inventory: Inventory) -> list[Finding]:
                 f"projection_refresh_status={state['projection_refresh_status'] or '<none>'}; "
                 f"last_success={state['last_successful_refresh_utc'] or '<none>'}; "
                 f"last_failure={state['last_failed_refresh_utc'] or '<none>'}; "
-                f"stale_reason={state['projection_stale_reason'] or '<none>'}"
+                f"stale_reason={state['projection_stale_reason'] or '<none>'}; "
+                f"run_once_status={state['run_once_status'] or '<none>'}; "
+                f"run_once_outcome={state['run_once_bounded_outcome'] or '<none>'}; "
+                f"post_timeout_status={state['run_once_status_command']}"
             ),
             MLHD_RUNTIME_DIR_REL,
         )
     ]
+    if state["run_once_status"]:
+        findings.append(
+            Finding(
+                "warn" if state["control_status"] == "run-once-interrupted" else "info",
+                "mlhd-run-once-timeout-handoff",
+                (
+                    f"run_once_status={state['run_once_status']}; "
+                    f"bounded_outcome={state['run_once_bounded_outcome'] or '<none>'}; "
+                    f"started={state['run_once_started_at_utc'] or '<none>'}; "
+                    f"completed={state['run_once_completed_at_utc'] or '<none>'}; "
+                    f"post_timeout_status={state['run_once_status_command']}; "
+                    f"dashboard={state['run_once_dashboard_command']}; "
+                    f"check={state['run_once_check_command']}; "
+                    f"duplicate_refresh_guard={state['run_once_duplicate_refresh_guard']}; "
+                    f"diagnostic={state['run_once_operator_diagnostic']}"
+                ),
+                f"{MLHD_RUNTIME_DIR_REL}/{MLHD_LAST_RUN_ONCE_FILE_NAME}",
+            )
+        )
     if state["pid_status"] == "stale":
         findings.append(
             Finding(
@@ -899,6 +992,9 @@ def _apply_mlhd_run_once(
     *,
     quiet_period_seconds: float = MLHD_PROJECTION_QUIET_PERIOD_SECONDS,
 ) -> list[Finding]:
+    previous = inspect_mlhd_control_state(inventory)
+    if previous["run_once_status"] == "in-progress" and previous["control_status"] == "run-once-active":
+        return [_run_once_duplicate_refusal_finding(previous)]
     runtime_dir = _ensure_runtime_dir(inventory.root)
     started_at = _utc_now()
     pid = os.getpid()
@@ -944,6 +1040,23 @@ def _apply_mlhd_run_once(
         *projection_findings,
         *context_memory_findings,
     ]
+
+
+def _run_once_duplicate_refusal_finding(state: dict[str, object]) -> Finding:
+    return Finding(
+        "error",
+        "mlhd-run-once-duplicate-refused",
+        (
+            "existing run-once marker is still active; duplicate_refresh_guard=inspect-status-first; "
+            f"pid={state['pid'] or '<none>'}; "
+            f"started={state['run_once_started_at_utc'] or '<none>'}; "
+            f"post_timeout_status={state['run_once_status_command']}; "
+            f"dashboard={state['run_once_dashboard_command']}; "
+            f"check={state['run_once_check_command']}; "
+            "no runtime files were written and no duplicate refresh was started"
+        ),
+        f"{MLHD_RUNTIME_DIR_REL}/{MLHD_LAST_RUN_ONCE_FILE_NAME}",
+    )
 
 
 def _apply_mlhd_install(inventory: Inventory) -> list[Finding]:
@@ -1088,6 +1201,7 @@ def _run_once_payload(
     completed_at: str = "",
 ) -> dict[str, object]:
     bounded_outcome = "in-progress" if status == "in-progress" else status
+    handoff = _run_once_handoff_payload(status)
     payload = _state_payload(status, "run-once", pid, updated_at)
     payload.update(
         {
@@ -1096,14 +1210,35 @@ def _run_once_payload(
             "started_at_utc": started_at,
             "completed_at_utc": completed_at,
             "quiet_period_seconds": quiet_period_seconds,
-            "operator_diagnostic": (
-                "run-once refresh is still working or was interrupted before completion"
-                if status == "in-progress"
-                else "run-once refresh completed; inspect projection_refresh_status for cache outcome"
-            ),
+            "operator_diagnostic": handoff["run_once_operator_diagnostic"],
+            **handoff,
         }
     )
     return payload
+
+
+def _run_once_handoff_payload(status: str) -> dict[str, object]:
+    if status == "in-progress":
+        diagnostic = "run-once refresh is still working or was interrupted before completion"
+        completion_handoff = "wait for completion when the pid is alive; otherwise inspect status, dashboard, and check before rerunning"
+    elif status == "completed":
+        diagnostic = "run-once refresh completed; inspect projection_refresh_status for cache outcome"
+        completion_handoff = "completion marker is present; use check --quick when an external wrapper timed out before returning"
+    elif status:
+        diagnostic = f"run-once marker reports {status}; inspect runtime status before starting another one-shot refresh"
+        completion_handoff = "non-standard run-once status; inspect status, dashboard, and check before rerunning"
+    else:
+        diagnostic = ""
+        completion_handoff = ""
+    return {
+        "run_once_operator_diagnostic": diagnostic,
+        "run_once_status_command": MLHD_RUN_ONCE_STATUS_COMMAND,
+        "run_once_dashboard_command": MLHD_RUN_ONCE_DASHBOARD_COMMAND,
+        "run_once_check_command": MLHD_RUN_ONCE_CHECK_COMMAND,
+        "run_once_post_timeout_recipe": MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE,
+        "run_once_duplicate_refresh_guard": MLHD_RUN_ONCE_DUPLICATE_GUARD,
+        "run_once_completion_handoff": completion_handoff,
+    }
 
 
 def _projection_refresh_stale_reason(findings: list[Finding]) -> str:

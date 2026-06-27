@@ -6,7 +6,17 @@ from pathlib import Path
 from .adapter import codex_mcp_adoption_payload
 from .claims import work_claim_status_findings
 from .context_memory import context_memory_capsule_findings, context_memory_capsule_payload
-from .daemon import inspect_mlhd_control_state, mlhd_runtime_findings, mlhd_runtime_payload
+from .daemon import (
+    MLHD_RUN_ONCE_APPLY_COMMAND,
+    MLHD_RUN_ONCE_CHECK_COMMAND,
+    MLHD_RUN_ONCE_DASHBOARD_COMMAND,
+    MLHD_RUN_ONCE_DUPLICATE_GUARD,
+    MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE,
+    MLHD_RUN_ONCE_STATUS_COMMAND,
+    inspect_mlhd_control_state,
+    mlhd_runtime_findings,
+    mlhd_runtime_payload,
+)
 from .evidence import agent_run_record_findings, lifecycle_mutation_provenance_findings
 from .handoff import handoff_packet_status_findings
 from .inventory import Inventory
@@ -38,7 +48,6 @@ DASHBOARD_DETAIL_MODES = ("auto", "full", "degraded")
 DASHBOARD_DEGRADED_SOURCE_THRESHOLD = 120
 DASHBOARD_DEGRADED_SOURCE_SAMPLE_LIMIT = 40
 MLHD_RUNTIME_DIR_REL = ".mylittleharness/runtime/mlhd"
-MLHD_RUN_ONCE_APPLY_COMMAND = "mylittleharness --root <root> mlhd run-once --apply"
 PROJECT_ROUTE_DIR = "project"
 STATE_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/project-state.md"
 ROADMAP_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/roadmap.md"
@@ -788,7 +797,7 @@ def connect_readiness_packet(
         if isinstance(agent_packet, dict) and isinstance(agent_packet.get("authorityCards"), list)
         else _authority_cards_payload(inventory, next_legal)
     )
-    next_safe_command = _readiness_next_safe_command(next_legal, cache, repair_targets)
+    next_safe_command = _readiness_next_safe_command(next_legal, cache, repair_targets, mlhd=mlhd)
     recovery_command = _readiness_recovery_command(cache, repair_targets)
     return {
         "schema": CONNECT_READINESS_SCHEMA,
@@ -839,6 +848,13 @@ def connect_readiness_packet(
             "runOnceStartedAtUtc": str(mlhd.get("run_once_started_at_utc") or ""),
             "runOnceCompletedAtUtc": str(mlhd.get("run_once_completed_at_utc") or ""),
             "runOnceBoundedOutcome": str(mlhd.get("run_once_bounded_outcome") or ""),
+            "runOnceOperatorDiagnostic": str(mlhd.get("run_once_operator_diagnostic") or ""),
+            "runOnceStatusCommand": str(mlhd.get("run_once_status_command") or MLHD_RUN_ONCE_STATUS_COMMAND),
+            "runOnceDashboardCommand": str(mlhd.get("run_once_dashboard_command") or MLHD_RUN_ONCE_DASHBOARD_COMMAND),
+            "runOnceCheckCommand": str(mlhd.get("run_once_check_command") or MLHD_RUN_ONCE_CHECK_COMMAND),
+            "runOncePostTimeoutRecipe": str(mlhd.get("run_once_post_timeout_recipe") or MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE),
+            "runOnceDuplicateRefreshGuard": str(mlhd.get("run_once_duplicate_refresh_guard") or MLHD_RUN_ONCE_DUPLICATE_GUARD),
+            "runOnceCompletionHandoff": str(mlhd.get("run_once_completion_handoff") or ""),
             "lastTickUtc": str(mlhd.get("last_tick_utc") or ""),
             "lastAction": str(mlhd.get("last_action") or ""),
             "lastRefreshStatus": str(mlhd.get("last_refresh_status") or ""),
@@ -1093,7 +1109,7 @@ def _authority_cards_finding(inventory: Inventory, code_prefix: str) -> Finding:
 
 def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
     runtime_refresh_allowed = _runtime_refresh_allowed(inventory)
-    mlhd_refresh_command = MLHD_RUN_ONCE_APPLY_COMMAND if runtime_refresh_allowed else ""
+    mlhd_refresh_command = _runtime_refresh_command(inventory) if runtime_refresh_allowed else ""
     codex_hook_adapter_command = "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project"
     first_contact_hook_command = "mylittleharness --root <root> hooks --run session-start --json"
     return {
@@ -1141,7 +1157,7 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
             "dashboard packet",
             "MCP read/search/bundle when mounted",
             "Codex native hook adapter when project-local hooks are explicitly applied",
-            "mlhd projection refresh tick when stale or missing" if runtime_refresh_allowed else "projection warm-cache manual recovery for product-source generated cache",
+            _runtime_refresh_sequence_step(inventory),
             "projection warm-cache only as manual recovery/debug",
             "rg exact verification before edits or closeout claims",
         ],
@@ -1195,18 +1211,20 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
 def _cache_posture_payload(inventory: Inventory, projection=None, *, detail: str = "full") -> dict[str, object]:
     if detail != "full":
         artifact_findings, index_findings = quick_projection_cache_posture_findings(inventory)
-        return projection_cache_posture_payload(
+        payload = projection_cache_posture_payload(
             artifact_findings,
             index_findings,
             runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
         )
+        return _cache_posture_with_run_once_guard(inventory, payload)
 
     projection = projection or build_projection(inventory)
-    return projection_cache_posture_payload(
+    payload = projection_cache_posture_payload(
         inspect_projection_artifacts(inventory, projection),
         inspect_projection_index(inventory, projection),
         runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
     )
+    return _cache_posture_with_run_once_guard(inventory, payload)
 
 
 def _runtime_refresh_allowed(inventory: Inventory) -> bool:
@@ -1214,10 +1232,15 @@ def _runtime_refresh_allowed(inventory: Inventory) -> bool:
 
 
 def _runtime_refresh_command(inventory: Inventory) -> str:
+    guard_command = _run_once_in_progress_refresh_guard_command(inventory)
+    if guard_command:
+        return guard_command
     return MLHD_RUN_ONCE_APPLY_COMMAND if _runtime_refresh_allowed(inventory) else PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND
 
 
 def _runtime_refresh_sequence_step(inventory: Inventory) -> str:
+    if _run_once_in_progress_refresh_guard_command(inventory):
+        return "mlhd status --json before another run-once while last-run-once is in-progress"
     if _runtime_refresh_allowed(inventory):
         return "mlhd run-once --apply when cache posture or context capsule is stale or missing"
     return "projection warm-cache when product-source generated cache needs explicit recovery"
@@ -1226,7 +1249,70 @@ def _runtime_refresh_sequence_step(inventory: Inventory) -> str:
 def _context_memory_next_safe_command(inventory: Inventory, context_memory: dict[str, object]) -> str:
     if not _runtime_refresh_allowed(inventory):
         return "mylittleharness --root <root> check"
+    guard_command = _run_once_in_progress_refresh_guard_command(inventory)
+    if guard_command:
+        return guard_command
     return str(context_memory.get("next_safe_command") or MLHD_RUN_ONCE_APPLY_COMMAND)
+
+
+def _run_once_in_progress_refresh_guard_command(inventory: Inventory) -> str:
+    if not _runtime_refresh_allowed(inventory):
+        return ""
+    state = inspect_mlhd_control_state(inventory)
+    if str(state.get("run_once_status") or "") != "in-progress":
+        return ""
+    return str(state.get("run_once_status_command") or MLHD_RUN_ONCE_STATUS_COMMAND)
+
+
+def _cache_posture_with_run_once_guard(inventory: Inventory, payload: dict[str, object]) -> dict[str, object]:
+    guard_command = _run_once_in_progress_refresh_guard_command(inventory)
+    if not guard_command:
+        return payload
+    guarded = dict(payload)
+    guarded["self_heal_command"] = guard_command
+    guarded["self_healable_by_command"] = False
+    guarded["refresh_policy"] = (
+        f"run-once marker is in-progress; inspect {guard_command} before any new mlhd run-once; "
+        f"{guarded.get('refresh_policy') or ''}"
+    ).strip()
+    boundary = dict(guarded.get("command_boundary") or {})
+    self_heal = dict(boundary.get("selfHealCommand") or {})
+    self_heal.update(
+        {
+            "command": guard_command,
+            "requiresExplicitApply": False,
+            "writeClass": "read-only-inspect",
+            "writeBoundary": "",
+            "runOnceDuplicateRefreshGuard": MLHD_RUN_ONCE_DUPLICATE_GUARD,
+        }
+    )
+    boundary["selfHealCommand"] = self_heal
+    guarded["command_boundary"] = boundary
+    guarded["recommended_refresh_commands"] = [
+        guard_command if str(command) == MLHD_RUN_ONCE_APPLY_COMMAND else command
+        for command in guarded.get("recommended_refresh_commands", [])
+    ]
+    guarded["recommended_refresh_actions"] = [
+        _cache_refresh_action_with_run_once_guard(action, guard_command)
+        for action in guarded.get("recommended_refresh_actions", [])
+    ]
+    return guarded
+
+
+def _cache_refresh_action_with_run_once_guard(action: object, guard_command: str) -> object:
+    if not isinstance(action, dict) or str(action.get("command") or "") != MLHD_RUN_ONCE_APPLY_COMMAND:
+        return action
+    guarded = dict(action)
+    guarded.update(
+        {
+            "command": guard_command,
+            "writeClass": "read-only-inspect",
+            "writeBoundary": "",
+            "requiresExplicitApply": False,
+            "runOnceDuplicateRefreshGuard": MLHD_RUN_ONCE_DUPLICATE_GUARD,
+        }
+    )
+    return guarded
 
 
 def _component_status(components: dict[str, object], name: str) -> str:
@@ -1309,7 +1395,13 @@ def _readiness_next_safe_command(
     next_legal: dict[str, object],
     cache: dict[str, object],
     repair_targets: dict[str, object],
+    *,
+    mlhd: dict[str, object] | None = None,
 ) -> str:
+    if isinstance(mlhd, dict) and str(mlhd.get("run_once_status") or "") == "in-progress":
+        mlhd_next_safe = str(mlhd.get("next_safe_command") or "")
+        if mlhd_next_safe:
+            return mlhd_next_safe
     if int(repair_targets.get("requiredMissingCount") or 0) > 0:
         return str(repair_targets.get("repairDryRunCommand") or "mylittleharness --root <root> repair --dry-run")
     components = cache.get("components", {}) if isinstance(cache, dict) else {}
@@ -1357,6 +1449,48 @@ def mlhd_freshness_payload(inventory: Inventory) -> dict[str, object]:
         or control.get("run_once_bounded_outcome")
         or ""
     )
+    run_once_operator_diagnostic = str(
+        pulse.get("run_once_operator_diagnostic")
+        or runtime.get("run_once_operator_diagnostic")
+        or control.get("run_once_operator_diagnostic")
+        or ""
+    )
+    run_once_status_command = str(
+        pulse.get("run_once_status_command")
+        or runtime.get("run_once_status_command")
+        or control.get("run_once_status_command")
+        or MLHD_RUN_ONCE_STATUS_COMMAND
+    )
+    run_once_dashboard_command = str(
+        pulse.get("run_once_dashboard_command")
+        or runtime.get("run_once_dashboard_command")
+        or control.get("run_once_dashboard_command")
+        or MLHD_RUN_ONCE_DASHBOARD_COMMAND
+    )
+    run_once_check_command = str(
+        pulse.get("run_once_check_command")
+        or runtime.get("run_once_check_command")
+        or control.get("run_once_check_command")
+        or MLHD_RUN_ONCE_CHECK_COMMAND
+    )
+    run_once_post_timeout_recipe = str(
+        pulse.get("run_once_post_timeout_recipe")
+        or runtime.get("run_once_post_timeout_recipe")
+        or control.get("run_once_post_timeout_recipe")
+        or MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE
+    )
+    run_once_duplicate_refresh_guard = str(
+        pulse.get("run_once_duplicate_refresh_guard")
+        or runtime.get("run_once_duplicate_refresh_guard")
+        or control.get("run_once_duplicate_refresh_guard")
+        or MLHD_RUN_ONCE_DUPLICATE_GUARD
+    )
+    run_once_completion_handoff = str(
+        pulse.get("run_once_completion_handoff")
+        or runtime.get("run_once_completion_handoff")
+        or control.get("run_once_completion_handoff")
+        or ""
+    )
     dirty_count = int(pulse.get("dirty_marker_count") or 0)
     changed_path_count = int(pulse.get("changed_path_count") or 0)
     runtime.update(
@@ -1375,6 +1509,13 @@ def mlhd_freshness_payload(inventory: Inventory) -> dict[str, object]:
             "run_once_started_at_utc": run_once_started_at,
             "run_once_completed_at_utc": run_once_completed_at,
             "run_once_bounded_outcome": run_once_bounded_outcome,
+            "run_once_operator_diagnostic": run_once_operator_diagnostic,
+            "run_once_status_command": run_once_status_command,
+            "run_once_dashboard_command": run_once_dashboard_command,
+            "run_once_check_command": run_once_check_command,
+            "run_once_post_timeout_recipe": run_once_post_timeout_recipe,
+            "run_once_duplicate_refresh_guard": run_once_duplicate_refresh_guard,
+            "run_once_completion_handoff": run_once_completion_handoff,
             "source_health_status": _mlhd_source_health_status(last_refresh_status, dirty_count, changed_path_count),
             "refresh_posture": _mlhd_refresh_posture(
                 last_refresh_status,
@@ -1395,6 +1536,8 @@ def _mlhd_daemon_status(control_status: str, pid_status: str, runtime_cache_stat
         return "invalid"
     if control_status == "running":
         return "running"
+    if control_status in {"run-once-active", "run-once-interrupted"}:
+        return control_status
     if pid_status == "stale" or control_status == "stale":
         return "stale-pid"
     if control_status in {"idle", "stopped", "absent"}:
@@ -1438,10 +1581,17 @@ def _mlhd_operator_summary(mlhd: dict[str, object]) -> str:
     refresh_posture = str(mlhd.get("refresh_posture") or "unknown")
     run_once_status = str(mlhd.get("run_once_status") or "")
     run_once_bounded_outcome = str(mlhd.get("run_once_bounded_outcome") or "")
+    run_once_status_command = str(mlhd.get("run_once_status_command") or MLHD_RUN_ONCE_STATUS_COMMAND)
     if run_once_status == "in-progress" and daemon_status == "run-once-active":
-        return "one-shot refresh is in progress; last-run-once is the bounded outcome marker and source/cache truth is not complete yet"
+        return (
+            "one-shot refresh is in progress; last-run-once is the bounded outcome marker; "
+            f"after wrapper timeout inspect {run_once_status_command} before starting another run-once"
+        )
     if run_once_status == "in-progress" and daemon_status == "run-once-interrupted":
-        return "one-shot refresh started but has no completion marker; rerun mlhd status/dashboard or mlhd run-once before treating cache health as current"
+        return (
+            "one-shot refresh started but has no completion marker; inspect "
+            f"{run_once_status_command}, dashboard, and check before starting another run-once"
+        )
     if daemon_status == "stale-pid" and refresh_posture == "current":
         return "background daemon marker is stale, but one-shot projection refresh is current; not a product-work blocker"
     if daemon_status == "not-running" and refresh_posture == "current":
@@ -1469,6 +1619,8 @@ def _mlhd_freshness_findings(inventory: Inventory, code_prefix: str = "dashboard
                 f"run_once={mlhd['run_once_status'] or '<none>'}; "
                 f"run_once_started={mlhd['run_once_started_at_utc'] or '<none>'}; "
                 f"run_once_completed={mlhd['run_once_completed_at_utc'] or '<none>'}; "
+                f"post_timeout_status={mlhd['run_once_status_command']}; "
+                f"duplicate_refresh_guard={mlhd['run_once_duplicate_refresh_guard']}; "
                 f"summary={mlhd['operator_summary']}"
             ),
             MLHD_RUNTIME_DIR_REL,

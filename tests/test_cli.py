@@ -11700,6 +11700,148 @@ class CliTests(unittest.TestCase):
             self.assertTrue(final_marker["completed_at_utc"])
             self.assertIn("bounded one-shot start/completion markers", output.getvalue())
 
+    def test_mlhd_status_reports_run_once_timeout_handoff_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            runtime_dir.mkdir(parents=True)
+            started_at = "2026-06-23T10:00:00Z"
+            stale_pid = 999999999
+            (runtime_dir / "last-run-once.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.mlhd-control-plane.v1",
+                        "status": "in-progress",
+                        "last_action": "run-once",
+                        "pid": stale_pid,
+                        "updated_at_utc": started_at,
+                        "run_once_status": "in-progress",
+                        "bounded_outcome": "in-progress",
+                        "started_at_utc": started_at,
+                        "completed_at_utc": "",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.mlhd-control-plane.v1",
+                        "status": "running",
+                        "last_action": "run-once",
+                        "pid": stale_pid,
+                        "updated_at_utc": started_at,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "pid.json").write_text(
+                json.dumps({"kind": "background-worker", "pid": stale_pid}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "lock.json").write_text(
+                json.dumps({"pid": stale_pid, "root": str(root)}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            status_json = io.StringIO()
+            with redirect_stdout(status_json):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(status_json.getvalue())
+            self.assertEqual("run-once-interrupted", payload["control_status"])
+            self.assertEqual("in-progress", payload["run_once_status"])
+            self.assertEqual("in-progress", payload["run_once_bounded_outcome"])
+            self.assertEqual(started_at, payload["run_once_started_at_utc"])
+            self.assertEqual("mylittleharness --root <root> mlhd status --json", payload["run_once_status_command"])
+            self.assertEqual(
+                "mylittleharness --root <root> dashboard --inspect --json",
+                payload["run_once_dashboard_command"],
+            )
+            self.assertEqual("mylittleharness --root <root> check --quick --json", payload["run_once_check_command"])
+            self.assertIn("do not start another run-once", payload["run_once_post_timeout_recipe"])
+            self.assertEqual(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["projection_pulse"]["next_safe_command"],
+            )
+            self.assertEqual(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["projection_pulse"]["run_once_status_command"],
+            )
+            status_findings = {finding["code"]: finding for finding in payload["findings"]}
+            self.assertEqual("warn", status_findings["mlhd-run-once-timeout-handoff"]["severity"])
+            self.assertIn("duplicate_refresh_guard=inspect-status-first", status_findings["mlhd-run-once-timeout-handoff"]["message"])
+
+            status_text = io.StringIO()
+            with redirect_stdout(status_text):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = status_text.getvalue()
+            self.assertIn("run_once_status=in-progress", rendered)
+            self.assertIn("post_timeout_status=mylittleharness --root <root> mlhd status --json", rendered)
+            self.assertIn("duplicate_refresh_guard=inspect-status-first", rendered)
+
+    def test_mlhd_run_once_apply_refuses_duplicate_active_marker_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            runtime_dir.mkdir(parents=True)
+            started_at = "2026-06-23T10:00:00Z"
+            active_pid = os.getpid()
+            (runtime_dir / "last-run-once.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.mlhd-control-plane.v1",
+                        "status": "in-progress",
+                        "last_action": "run-once",
+                        "pid": active_pid,
+                        "updated_at_utc": started_at,
+                        "run_once_status": "in-progress",
+                        "bounded_outcome": "in-progress",
+                        "started_at_utc": started_at,
+                        "completed_at_utc": "",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.mlhd-control-plane.v1",
+                        "status": "running",
+                        "last_action": "run-once",
+                        "pid": active_pid,
+                        "updated_at_utc": started_at,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            def fail_refresh(_inventory, *, quiet_period_seconds: float):
+                raise AssertionError("duplicate run-once should not start projection refresh")
+
+            output = io.StringIO()
+            with patch("mylittleharness.daemon.warm_projection_artifacts", side_effect=fail_refresh), redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply"]), 1)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("mlhd-run-once-duplicate-refused", rendered)
+            self.assertIn("duplicate_refresh_guard=inspect-status-first", rendered)
+            self.assertIn("post_timeout_status=mylittleharness --root <root> mlhd status --json", rendered)
+
     def test_mlhd_run_once_warms_dirty_projection_cache_after_quiet_period(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -11841,6 +11983,14 @@ class CliTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            (runtime_dir / "pid.json").write_text(
+                json.dumps({"kind": "background-worker", "pid": stale_pid}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "lock.json").write_text(
+                json.dumps({"pid": stale_pid, "root": str(root)}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
             dashboard_json = io.StringIO()
             with redirect_stdout(dashboard_json):
@@ -11853,10 +12003,46 @@ class CliTests(unittest.TestCase):
             self.assertEqual("in-progress", payload["mlhd"]["refresh_posture"])
             self.assertEqual("no-dirty-markers", payload["mlhd"]["source_health_status"])
             self.assertIn("no completion marker", payload["mlhd"]["operator_summary"])
+            self.assertEqual(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["connectReadiness"]["nextSafeCommand"],
+            )
+            self.assertIn(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["agentPacket"]["recommendedCommands"],
+            )
+            self.assertNotIn(
+                "mylittleharness --root <root> mlhd run-once --apply",
+                payload["agentPacket"]["recommendedCommands"],
+            )
+            self.assertEqual(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["acceleratorAdoption"]["mlhdRefreshCommand"],
+            )
+            self.assertEqual(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["connectReadiness"]["contextMemory"]["nextSafeCommand"],
+            )
+            self.assertEqual(
+                "mylittleharness --root <root> mlhd status --json",
+                payload["cachePosture"]["self_heal_command"],
+            )
+            self.assertEqual(
+                "read-only-inspect",
+                payload["cachePosture"]["command_boundary"]["selfHealCommand"]["writeClass"],
+            )
+            self.assertEqual(
+                payload["connectReadiness"]["nextSafeCommand"],
+                payload["connectReadiness"]["nextSafeAction"]["command"],
+            )
+            self.assertEqual("connect-readiness", payload["connectReadiness"]["nextSafeAction"]["source_code"])
             readiness = payload["connectReadiness"]["mlhd"]
             self.assertEqual("in-progress", readiness["runOnceStatus"])
             self.assertEqual(started_at, readiness["runOnceStartedAtUtc"])
             self.assertEqual("", readiness["runOnceCompletedAtUtc"])
+            self.assertEqual("mylittleharness --root <root> mlhd status --json", readiness["nextSafeCommand"])
+            self.assertEqual("mylittleharness --root <root> mlhd status --json", readiness["runOnceStatusCommand"])
+            self.assertIn("do not start another run-once", readiness["runOncePostTimeoutRecipe"])
             dashboard_findings = [
                 finding
                 for section in payload["sections"]
