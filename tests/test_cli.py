@@ -19519,6 +19519,117 @@ class CliTests(unittest.TestCase):
             second_block = roadmap_text.split("### Batch Roadmap Two", 1)[1]
             self.assertIn('- `dependencies`: `["batch-roadmap-one"]`', second_block)
 
+    def test_roadmap_add_many_validates_sibling_relationships_against_full_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            manifest = root / "roadmap-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "batch-sibling-one",
+                                "title": "Batch Sibling One",
+                                "status": "accepted",
+                                "order": 65,
+                                "slice_members": ["batch-sibling-one", "batch-sibling-two"],
+                                "slice_dependencies": ["batch-sibling-two"],
+                                "dependency": "batch-sibling-two",
+                                "target_artifacts": ["src/mylittleharness/roadmap.py"],
+                                "verification_summary": "Batch dry-run validates forward sibling refs.",
+                                "docs_decision": "not-needed",
+                            },
+                            {
+                                "item_id": "batch-sibling-two",
+                                "title": "Batch Sibling Two",
+                                "status": "accepted",
+                                "order": 66,
+                                "dependency": "minimal-roadmap-mutation-rail",
+                                "target_artifacts": ["tests/test_cli.py"],
+                                "verification_summary": "Batch apply validates sibling refs.",
+                                "docs_decision": "not-needed",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "roadmap", "--dry-run", "--action", "add-many", "--items-file", str(manifest)])
+
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0, dry_rendered)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("would create item 1: batch-sibling-one", dry_rendered)
+            self.assertIn("would create item 2: batch-sibling-two", dry_rendered)
+            self.assertNotIn("target item id is missing", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "roadmap", "--apply", "--action", "add-many", "--items-file", str(manifest)])
+
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0, apply_rendered)
+            self.assertIn("roadmap-batch-written", apply_rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/roadmap.md"], changed)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            first_block = roadmap_text.split("### Batch Sibling One", 1)[1].split("### Batch Sibling Two", 1)[0]
+            self.assertIn('- `slice_members`: `["batch-sibling-one", "batch-sibling-two"]`', first_block)
+            self.assertIn('- `slice_dependencies`: `["batch-sibling-two"]`', first_block)
+            self.assertIn('- `dependencies`: `["batch-sibling-two"]`', first_block)
+
+    def test_roadmap_add_many_refuses_relationship_id_outside_existing_or_batch_without_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            manifest = root / "roadmap-batch.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "batch-roadmap-one",
+                                "title": "Batch Roadmap One",
+                                "status": "accepted",
+                                "order": 65,
+                                "dependency": "not-in-roadmap-or-batch",
+                                "target_artifacts": ["src/mylittleharness/roadmap.py"],
+                                "verification_summary": "Batch apply should refuse unknown item refs.",
+                                "docs_decision": "not-needed",
+                            },
+                            {
+                                "item_id": "batch-roadmap-two",
+                                "title": "Batch Roadmap Two",
+                                "status": "accepted",
+                                "order": 66,
+                                "dependency": "batch-roadmap-one",
+                                "target_artifacts": ["tests/test_cli.py"],
+                                "verification_summary": "Batch apply should not partially write.",
+                                "docs_decision": "not-needed",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "roadmap", "--apply", "--action", "add-many", "--items-file", str(manifest)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2, rendered)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("--dependencies target item id is missing: not-in-roadmap-or-batch", rendered)
+            self.assertNotIn("roadmap-batch-written", rendered)
+
     def test_roadmap_add_many_allows_shared_source_incubation_without_duplicate_relationship_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

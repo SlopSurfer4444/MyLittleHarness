@@ -2767,6 +2767,7 @@ def _roadmap_batch_plan(
     current_text = original_text
     current_target_existed = target_existed
     claimed_source_incubations: set[str] = set()
+    batch_item_ids = {request.item_id for request in requests if request.item_id}
     for request in requests:
         source_incubation_rel = _normalize_rel(request.source_incubation)
         plan, request_errors = _roadmap_plan_from_text(
@@ -2778,6 +2779,7 @@ def _roadmap_batch_plan(
             allow_empty_items=not current_target_existed and request.action == "add",
             target_existed=current_target_existed,
             batch_claimed_source_incubations=claimed_source_incubations,
+            batch_item_ids=batch_item_ids,
         )
         if request_errors:
             return None, request_errors
@@ -2849,6 +2851,7 @@ def _roadmap_plan_from_text(
     allow_empty_items: bool = False,
     target_existed: bool = True,
     batch_claimed_source_incubations: set[str] | None = None,
+    batch_item_ids: set[str] | None = None,
 ) -> tuple[RoadmapPlan | None, list[Finding]]:
     parse_result = _parse_roadmap_items_for_sync(text, allow_empty_items=allow_empty_items)
     if parse_result[1]:
@@ -2884,7 +2887,9 @@ def _roadmap_plan_from_text(
             ]
 
     errors: list[Finding] = []
-    errors.extend(_relationship_errors(inventory, request, set(items), archived_history, allowed_missing_paths or set()))
+    relationship_item_ids = set(items)
+    relationship_item_ids.update(batch_item_ids or set())
+    errors.extend(_relationship_errors(inventory, request, relationship_item_ids, archived_history, allowed_missing_paths or set()))
     if errors:
         return None, errors
     relationship_plan = None
