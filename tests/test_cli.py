@@ -903,11 +903,19 @@ class CliTests(unittest.TestCase):
             route_ids = {row["route_id"] for row in payload["route_manifest"]}
             self.assertIn("state", route_ids)
             self.assertIn("active-plan", route_ids)
+            self.assertIn("symphony-queue", route_ids)
             self.assertIn("generated-cache", route_ids)
             route_rows = {row["route_id"]: row for row in payload["route_manifest"]}
             self.assertEqual("sequential_only", route_rows["roadmap"]["parallelism_class"])
             self.assertEqual(["route", "lifecycle"], route_rows["roadmap"]["claim_scope"])
             self.assertEqual("review_token", route_rows["roadmap"]["fan_in_gate"][0])
+            symphony_intake = route_rows["symphony-queue"]["intake_policy"]
+            self.assertEqual("compatibility-gated", symphony_intake["source_neutrality"])
+            self.assertIn("Symphony queue identifiers", symphony_intake["compatibility_surface"])
+            self.assertIn("public-neutrality gate", symphony_intake["release_gate"])
+            product_source_intake = route_rows["product-source"]["intake_policy"]
+            self.assertEqual("public-package-source", product_source_intake["public_surface"])
+            self.assertEqual("public-neutral", product_source_intake["source_neutrality"])
             self.assertEqual("safe_parallel", route_rows["generated-cache"]["parallelism_class"])
             self.assertFalse(route_rows["generated-cache"]["claim_required"])
             roles = {row["role_id"]: row for row in payload["role_manifest"]}
@@ -2337,6 +2345,87 @@ class CliTests(unittest.TestCase):
             self.assertIn("no automatic install, mirror", rendered)
             self.assertNotIn("installed-cli-command-surface-lag", rendered)
             self.assertNotIn("installed-cli-command-surface-current", rendered)
+
+    def test_check_reports_public_neutrality_gate_from_package_facing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operating")
+            product_root = base / "product"
+            product_src = product_root / "src/mylittleharness"
+            product_src.mkdir(parents=True)
+            (product_src / "routes.py").write_text(
+                'SYMPHONY_QUEUE_DIR_REL = "project/symphony/queue"\n',
+                encoding="utf-8",
+            )
+            (product_src / "meta_feedback.py").write_text(
+                'CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"\n',
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            before_root = snapshot_tree(root)
+            before_product = snapshot_tree(product_root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before_root, snapshot_tree(root))
+            self.assertEqual(before_product, snapshot_tree(product_root))
+            self.assertEqual(2, rendered.count("route-public-neutrality-gate"))
+            self.assertIn("route 'symphony-queue'", rendered)
+            self.assertIn("source_neutrality=compatibility-gated", rendered)
+            self.assertIn("project/symphony/queue", rendered)
+            self.assertIn("route 'incubation'", rendered)
+            self.assertIn("source_neutrality=public-gated", rendered)
+            self.assertIn("MyLittleHarness-dev", rendered)
+            self.assertIn("next_safe_command=mylittleharness --root <root> roadmap --dry-run", rendered)
+            self.assertIn("route-public-neutrality-boundary", rendered)
+            self.assertIn("cannot rename routes, approve compatibility exceptions", rendered)
+
+    def test_check_public_neutrality_scan_ignores_its_detector_policy_constants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "operating")
+            product_root = base / "product"
+            product_src = product_root / "src/mylittleharness"
+            product_src.mkdir(parents=True)
+            (product_src / "checks.py").write_text(
+                "PUBLIC_NEUTRALITY_ROUTE_TERMS = {\n"
+                "    'symphony-queue': ('project/symphony/queue', 'SYMPHONY_QUEUE_DIR_REL'),\n"
+                "    'incubation': ('MyLittleHarness-dev',),\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            before_root = snapshot_tree(root)
+            before_product = snapshot_tree(product_root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_root, snapshot_tree(root))
+            self.assertEqual(before_product, snapshot_tree(product_root))
+            self.assertNotIn("route-public-neutrality-gate", output.getvalue())
 
     def test_installed_console_fallback_quotes_product_source_pythonpath(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5144,7 +5233,12 @@ class CliTests(unittest.TestCase):
             ("Target architecture Markdown should become visible as an MLH source route.", "adrs"),
             ("Decision record: do not rediscover the route rationale.", "decisions"),
             ("Verification: pytest passed for route fixtures.", "verification"),
+            ("Public RC source neutrality gate: package scan found Symphony queue identifiers.", "verification"),
             ("Docs impact: update README wording.", "product-docs"),
+            ("Docs impact: update public surface wording.", "product-docs"),
+            ("Docs impact: update package scan wording.", "product-docs"),
+            ("Decision: keep release readiness wording advisory.", "decisions"),
+            ("Decision: keep source neutrality wording advisory.", "decisions"),
             ("Archive reference: historical reference for old plans.", "archive"),
             ("This note needs human classification.", "ambiguous"),
         )
@@ -5166,6 +5260,33 @@ class CliTests(unittest.TestCase):
                     if expected_route in {"adrs", "decisions"}:
                         self.assertIn("reviewed", rendered)
                         self.assertIn("intake never marks", rendered)
+
+    def test_intake_targeted_docs_and_decisions_keep_public_scan_words_in_their_route(self) -> None:
+        cases = (
+            ("Docs impact: update package scan wording.", "docs/public.md", "product-docs"),
+            ("Docs impact: document public RC package scan wording.", "docs/public-rc.md", "product-docs"),
+            ("Decision: keep source neutrality wording advisory.", "project/decisions/source-neutrality.md", "decisions"),
+            (
+                "Decision: accept public RC source neutrality exception as advisory.",
+                "project/decisions/public-rc-source-neutrality.md",
+                "decisions",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            for text, target, expected_route in cases:
+                with self.subTest(expected_route=expected_route):
+                    before = snapshot_tree(root)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "intake", "--dry-run", "--text", text, "--target", target])
+                    rendered = output.getvalue()
+
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn(f"classify input as {expected_route}", rendered)
+                    self.assertIn("classifier compatibility: compatible", rendered)
+                    self.assertNotIn("input is ambiguous", rendered)
 
     def test_intake_apply_writes_architecture_decision_as_draft_without_accepting_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

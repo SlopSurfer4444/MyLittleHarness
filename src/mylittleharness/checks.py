@@ -133,6 +133,7 @@ from .routes import (
     normalize_route_path,
     route_destination_problem,
     route_id_is_known,
+    route_intake_policy_for_id,
 )
 from .writeback import (
     CLOSEOUT_WRITEBACK_FIELDS,
@@ -178,6 +179,27 @@ BUG_HUNT_COVERAGE_REL = "project/verification/bug-hunt-roadmap-coverage.md"
 BUG_HUNT_DISPOSITION_STATUSES = {"fixed", "delegated", "rejected-with-reason", "still-open"}
 BUG_HUNT_ROADMAP_OWNER_STATUSES = {"accepted", "active", "done"}
 COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
+PUBLIC_NEUTRALITY_SCAN_PREFIXES = (
+    "src/mylittleharness/",
+    "docs/",
+    "README.md",
+    "AGENTS.md",
+    "pyproject.toml",
+)
+PUBLIC_NEUTRALITY_SCAN_EXCLUDED_RELS = ("src/mylittleharness/checks.py",)
+PUBLIC_NEUTRALITY_SCAN_SUFFIXES = (".py", ".md", ".toml", ".txt", ".yaml", ".yml", ".json")
+PUBLIC_NEUTRALITY_SCAN_MAX_BYTES = 512_000
+PUBLIC_NEUTRALITY_SAMPLE_LIMIT = 5
+PUBLIC_NEUTRALITY_ROUTE_TERMS = {
+    "symphony-queue": (
+        "project/symphony/queue",
+        "symphony-queue",
+        "SYMPHONY_QUEUE_DIR_REL",
+    ),
+    "incubation": (
+        CENTRAL_META_FEEDBACK_PROJECT,
+    ),
+}
 COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
 RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
 TEMPORARY_ROADMAP_MANIFEST_RE = re.compile(r"^project/verification/roadmap-routing-\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.json$")
@@ -2154,6 +2176,7 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_validation_status_scope_findings(inventory))
     findings.extend(_incubation_contract_findings(inventory))
     findings.extend(_product_posture_findings(inventory))
+    findings.extend(_route_public_neutrality_gate_findings(inventory))
     findings.extend(_active_plan_findings(inventory))
     findings.extend(_spec_findings(inventory))
     findings.extend(_spec_lifecycle_posture_findings(inventory))
@@ -9622,6 +9645,103 @@ def _live_product_source_root_findings(inventory: Inventory, state: Surface) -> 
     if not resolved:
         return []
     return [Finding("info", "product-source-root-ok", f"product_source_root exists: {resolved}", state.rel_path)]
+
+
+def _route_public_neutrality_gate_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    state = inventory.state
+    if not state or not state.exists:
+        return []
+    product_root, problem = _resolve_live_product_source_root(inventory, state)
+    if problem or not product_root:
+        return []
+
+    hits_by_route = _public_neutrality_scan_hits(product_root)
+    findings: list[Finding] = []
+    for route_id in sorted(hits_by_route):
+        policy = route_intake_policy_for_id(route_id)
+        samples = "; ".join(
+            f"product-source:{rel_path}:{line} matched {term!r}" if line else f"product-source:{rel_path} matched {term!r}"
+            for rel_path, line, term in hits_by_route[route_id][:PUBLIC_NEUTRALITY_SAMPLE_LIMIT]
+        )
+        if len(hits_by_route[route_id]) > PUBLIC_NEUTRALITY_SAMPLE_LIMIT:
+            samples = f"{samples}; +{len(hits_by_route[route_id]) - PUBLIC_NEUTRALITY_SAMPLE_LIMIT} more"
+        first_rel, first_line, _first_term = hits_by_route[route_id][0]
+        findings.append(
+            Finding(
+                "warn",
+                "route-public-neutrality-gate",
+                (
+                    f"package-facing source mentions route {route_id!r} public-surface vocabulary; "
+                    f"source_neutrality={policy['source_neutrality']}; public_surface={policy['public_surface']}; "
+                    f"compatibility_surface={policy['compatibility_surface']}; observed: {samples}; "
+                    f"next_safe_command={policy['owner_command']}; release_gate={policy['release_gate']}"
+                ),
+                f"product-source:{first_rel}",
+                first_line,
+                route_id=route_id,
+            )
+        )
+
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "route-public-neutrality-boundary",
+                (
+                    "package-facing source scan is advisory; it can surface public-neutrality or compatibility gates, "
+                    "but it cannot rename routes, approve compatibility exceptions, claim package/public RC readiness, "
+                    "publish, release, tag, push, stage, commit, or move lifecycle state"
+                ),
+                state.rel_path,
+                route_id="product-source",
+            )
+        )
+    return findings
+
+
+def _public_neutrality_scan_hits(product_root: Path) -> dict[str, list[tuple[str, int, str]]]:
+    hits: dict[str, list[tuple[str, int, str]]] = {}
+    for path in sorted(product_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            rel_path = path.relative_to(product_root).as_posix()
+        except ValueError:
+            continue
+        if not _public_neutrality_scan_candidate(rel_path, path):
+            continue
+        try:
+            if path.stat().st_size > PUBLIC_NEUTRALITY_SCAN_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        lowered = text.casefold()
+        for route_id, terms in PUBLIC_NEUTRALITY_ROUTE_TERMS.items():
+            for term in terms:
+                if term.casefold() not in lowered:
+                    continue
+                hits.setdefault(route_id, []).append((rel_path, _first_text_line(text, term), term))
+    return hits
+
+
+def _public_neutrality_scan_candidate(rel_path: str, path: Path) -> bool:
+    rel = rel_path.replace("\\", "/")
+    if rel in PUBLIC_NEUTRALITY_SCAN_EXCLUDED_RELS:
+        return False
+    if not any(rel == prefix or rel.startswith(prefix) for prefix in PUBLIC_NEUTRALITY_SCAN_PREFIXES):
+        return False
+    return path.suffix.casefold() in PUBLIC_NEUTRALITY_SCAN_SUFFIXES or "." not in Path(rel).name
+
+
+def _first_text_line(text: str, needle: str) -> int:
+    needle_lower = needle.casefold()
+    for index, line in enumerate(text.splitlines(), start=1):
+        if needle_lower in line.casefold():
+            return index
+    return 0
 
 
 def _resolve_live_product_source_root(inventory: Inventory, state: Surface) -> tuple[Path | None, Finding | None]:

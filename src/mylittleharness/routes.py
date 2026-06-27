@@ -27,6 +27,17 @@ class IntakeRouteAdvice:
 
 
 @dataclass(frozen=True)
+class RouteIntakePolicy:
+    route_id: str
+    intake_mode: str
+    public_surface: str
+    compatibility_surface: str
+    source_neutrality: str
+    owner_command: str
+    release_gate: str
+
+
+@dataclass(frozen=True)
 class RouteOrchestrationPolicy:
     parallelism_class: str
     authority_lane: str
@@ -258,6 +269,125 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
 
 ROUTE_REGISTRY: tuple[MemoryRoute, ...] = LIVE_LIFECYCLE_ROUTES + SUPPORT_ROUTES
 ROUTE_BY_ID = {route.route_id: route for route in ROUTE_REGISTRY}
+DEFAULT_ROUTE_INTAKE_POLICY = RouteIntakePolicy(
+    route_id="unclassified",
+    intake_mode="manual-classification",
+    public_surface="not-a-public-product-surface",
+    compatibility_surface="unknown route; require explicit classification before writes",
+    source_neutrality="unclassified",
+    owner_command="mylittleharness --root <root> intake --dry-run --text \"<note>\"",
+    release_gate="unclassified route output cannot support package or release readiness",
+)
+ROUTE_INTAKE_POLICIES: dict[str, RouteIntakePolicy] = {
+    "adrs": RouteIntakePolicy(
+        "adrs",
+        "first-class-intake",
+        "operating-root-authority-surface",
+        "architecture decision records are reviewed target-repo authority, not package defaults",
+        "target-bound",
+        "mylittleharness --root <root> intake --dry-run --target project/adrs/<name>.md --text-file <reviewed-note>",
+        "draft/accepted ADR intake is not release approval",
+    ),
+    "archive": RouteIntakePolicy(
+        "archive",
+        "reference-only",
+        "historical-reference-surface",
+        "archive routes preserve history and must not become current package evidence",
+        "target-bound",
+        "mylittleharness --root <root> memory-hygiene --dry-run ...",
+        "archive references cannot approve package readiness",
+    ),
+    "decisions": RouteIntakePolicy(
+        "decisions",
+        "first-class-intake",
+        "operating-root-authority-surface",
+        "decision records are reviewed target-repo authority, not implicit product decisions",
+        "target-bound",
+        "mylittleharness --root <root> intake --dry-run --target project/decisions/<name>.md --text-file <reviewed-note>",
+        "draft/accepted decision intake is not release approval",
+    ),
+    "drafts": RouteIntakePolicy(
+        "drafts",
+        "draft-only",
+        "operating-root-draft-surface",
+        "drafts are working notes before route promotion",
+        "target-bound",
+        "mylittleharness --root <root> intake --dry-run --target project/drafts/<name>.md --text-file <reviewed-note>",
+        "draft intake cannot support package readiness",
+    ),
+    "incubation": RouteIntakePolicy(
+        "incubation",
+        "first-class-intake",
+        "public-gated-when-shipped-labels-appear",
+        "meta-feedback and future-work notes belong to the operating root; product-specific labels in shipped source need an explicit compatibility or rename decision",
+        "public-gated",
+        "mylittleharness --root <root> meta-feedback --dry-run --topic <topic> --note-file <reviewed-note>",
+        "incubation/meta-feedback labels in package-facing source are a public-neutrality gate, not release approval",
+    ),
+    "product-docs": RouteIntakePolicy(
+        "product-docs",
+        "docs-impact",
+        "public-product-documentation",
+        "docs are public product contract surfaces and need docs_decision evidence when changed",
+        "public-neutral",
+        "mylittleharness --root <root> intake --dry-run --target docs/<name>.md --text-file <reviewed-note>",
+        "docs checks are evidence only and cannot publish or release",
+    ),
+    "product-source": RouteIntakePolicy(
+        "product-source",
+        "implementation-scope",
+        "public-package-source",
+        "reusable product source is package-facing; target-specific names need compatibility or rename review",
+        "public-neutral",
+        "mylittleharness --root <root> check --focus validation",
+        "green source/package smoke is not publication approval",
+    ),
+    "research": RouteIntakePolicy(
+        "research",
+        "first-class-intake",
+        "operating-root-evidence-surface",
+        "research is source-bound evidence before promotion",
+        "target-bound",
+        "mylittleharness --root <root> research-import --dry-run ...",
+        "research import cannot approve release or lifecycle movement",
+    ),
+    "roadmap": RouteIntakePolicy(
+        "roadmap",
+        "sequencing-only",
+        "operating-root-planning-surface",
+        "roadmap items carry reviewed public-surface gates but remain advisory until plan/writeback rails consume them",
+        "target-bound",
+        "mylittleharness --root <root> roadmap --dry-run --action update --item-id <item-id>",
+        "roadmap readiness cannot publish or release",
+    ),
+    "stable-specs": RouteIntakePolicy(
+        "stable-specs",
+        "stable-contract",
+        "product-or-workflow-contract-surface",
+        "stable specs are reusable contracts and must stay product-neutral unless a compatibility exception is explicit",
+        "public-neutral",
+        "mylittleharness --root <root> intake --dry-run --target project/specs/<name>.md --text-file <reviewed-note>",
+        "spec acceptance is not release approval",
+    ),
+    "symphony-queue": RouteIntakePolicy(
+        "symphony-queue",
+        "compatibility-exception",
+        "package-visible-legacy-compatibility-surface",
+        "Symphony queue identifiers are compatibility vocabulary; public package readiness needs an explicit keep/rename decision",
+        "compatibility-gated",
+        "mylittleharness --root <root> roadmap --dry-run --action update --item-id <public-surface-item>",
+        "Symphony queue vocabulary is a public-neutrality gate before public RC claims",
+    ),
+    "verification": RouteIntakePolicy(
+        "verification",
+        "evidence-intake",
+        "operating-root-evidence-surface",
+        "verification artifacts are evidence only and may reference package/public scans without deciding them",
+        "target-bound",
+        "mylittleharness --root <root> intake --dry-run --target project/verification/<name>.md --text-file <reviewed-note>",
+        "verification evidence cannot publish or release",
+    ),
+}
 LEGACY_ROUTE_ID_ALIASES = {
     "check": "verification",
     "claim": "work-claims",
@@ -484,6 +614,13 @@ INTAKE_TARGET_GUIDED_CUES = {
         "tests",
         "smoke",
         "validation",
+        "public rc",
+        "public surface",
+        "source neutrality",
+        "package scan",
+        "source scan",
+        "release readiness",
+        "rc readiness",
     ),
 }
 INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -511,7 +648,18 @@ INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "accepted decision",
         ),
     ),
-    ("verification", ("verification:", "verified:", "pytest", "tests passed", "smoke passed", "validation passed", "evidence:")),
+    (
+        "verification",
+        (
+            "verification:",
+            "verified:",
+            "pytest",
+            "tests passed",
+            "smoke passed",
+            "validation passed",
+            "evidence:",
+        ),
+    ),
     ("product-docs", ("docs impact:", "doc impact:", "documentation:", "readme", "docs update", "documentation update")),
     ("archive", ("archive reference:", "archived reference", "historical reference", "legacy reference", "for reference only")),
     ("research", ("research import:", "research:", "distillate:", "source notes", "imported research", "raw import")),
@@ -535,6 +683,8 @@ INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 FUTURE_FEATURE_INTAKE_CUES = ("feature idea", "future feature", "future product idea", "product idea")
 DEEP_RESEARCH_PROMPT_COMPOSITION_INTAKE_CUES = ("deep research prompt", "research prompt", "prompt composition")
+PUBLIC_RC_READINESS_INTAKE_CUES = ("public rc", "rc readiness", "release candidate readiness")
+PUBLIC_SOURCE_SCAN_INTAKE_CUES = ("source neutrality", "public neutrality", "package scan", "source scan")
 AMBIGUOUS_INTAKE = IntakeRouteAdvice(
     route_id="ambiguous",
     target="<manual-route-required>",
@@ -829,11 +979,38 @@ def route_protocol_for_id(route_id: str | None) -> dict[str, object]:
     }
 
 
+def route_intake_policy_for_id(route_id: str | None) -> dict[str, str]:
+    normalized = route_id if route_id in ROUTE_BY_ID else "unclassified"
+    policy = ROUTE_INTAKE_POLICIES.get(normalized)
+    if policy is None:
+        route = ROUTE_BY_ID.get(normalized)
+        public_surface = "support-or-operating-route" if route else DEFAULT_ROUTE_INTAKE_POLICY.public_surface
+        policy = RouteIntakePolicy(
+            route_id=normalized,
+            intake_mode="route-owned",
+            public_surface=public_surface,
+            compatibility_surface="route follows the generic MLH route contract; add a specific policy before treating it as a public package exception",
+            source_neutrality="target-bound",
+            owner_command="mylittleharness --root <root> check",
+            release_gate="route output remains advisory/evidence only and cannot approve release",
+        )
+    return {
+        "route_id": policy.route_id,
+        "intake_mode": policy.intake_mode,
+        "public_surface": policy.public_surface,
+        "compatibility_surface": policy.compatibility_surface,
+        "source_neutrality": policy.source_neutrality,
+        "owner_command": policy.owner_command,
+        "release_gate": policy.release_gate,
+    }
+
+
 def route_manifest() -> tuple[dict[str, object], ...]:
     rows: list[dict[str, object]] = []
     for route in ROUTE_REGISTRY:
         protocol = route_protocol_for_id(route.route_id)
         orchestration = route_orchestration_for_id(route.route_id)
+        intake_policy = route_intake_policy_for_id(route.route_id)
         rows.append(
             {
                 "route_id": route.route_id,
@@ -847,6 +1024,7 @@ def route_manifest() -> tuple[dict[str, object], ...]:
                 "human_gate_reason": protocol["human_gate_reason"],
                 "allowed_decisions": protocol["allowed_decisions"],
                 "advisory": protocol["advisory"],
+                "intake_policy": intake_policy,
                 **orchestration,
             }
         )
@@ -869,6 +1047,9 @@ def classify_intake_text(text: str) -> IntakeRouteAdvice:
             matches.append((len(matched), index, route_id, matched))
 
     if not matches:
+        public_scan_advice = _public_rc_source_scan_verification_advice(normalized)
+        if public_scan_advice:
+            return public_scan_advice
         return AMBIGUOUS_INTAKE
 
     matches.sort(key=lambda item: (item[0], -item[1]), reverse=True)
@@ -930,6 +1111,23 @@ def _future_manual_deep_research_request_incubation_advice(normalized: str) -> I
         confidence="high",
         reason=f"matched future feature/Deep Research prompt-composition incubation cue(s): {matched}",
         next_action=_intake_next_action("incubation"),
+        apply_allowed=True,
+    )
+
+
+def _public_rc_source_scan_verification_advice(normalized: str) -> IntakeRouteAdvice | None:
+    rc_matches = tuple(cue for cue in PUBLIC_RC_READINESS_INTAKE_CUES if cue in normalized)
+    scan_matches = tuple(cue for cue in PUBLIC_SOURCE_SCAN_INTAKE_CUES if cue in normalized)
+    if not rc_matches or not scan_matches:
+        return None
+    route = ROUTE_BY_ID["verification"]
+    matched = ", ".join((*rc_matches, *scan_matches))
+    return IntakeRouteAdvice(
+        route_id="verification",
+        target=route.target,
+        confidence="high",
+        reason=f"matched public RC/source-neutrality verification cue(s): {matched}",
+        next_action=_intake_next_action("verification"),
         apply_allowed=True,
     )
 
