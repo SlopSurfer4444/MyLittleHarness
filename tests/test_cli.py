@@ -35550,6 +35550,103 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
             self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", unsafe_codes)
 
+    def test_hooks_pre_tool_allows_standalone_route_imported_research_checkpoint(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            research_rel = "project/" + "research/imported-frontier.md"
+            malformed_rel = "project/" + "research/malformed-frontier.md"
+            research_path = root / research_rel
+            research_path.parent.mkdir(parents=True, exist_ok=True)
+            research_path.write_text(
+                "---\n"
+                'status: "imported"\n'
+                'topic: "imported-frontier"\n'
+                'title: "Imported frontier"\n'
+                'created: "2026-06-27"\n'
+                'last_reviewed: "2026-06-27"\n'
+                'derived_from: "research-import cli"\n'
+                "source_hashes:\n"
+                '  - "imported_text sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+                "---\n"
+                "# Imported frontier\n\n"
+                "Imported research is durable provenance only; it cannot approve lifecycle, staging, "
+                "commit, archive, roadmap status, release, provider routing, or target acceptance.\n",
+                encoding="utf-8",
+            )
+            (root / malformed_rel).write_text(
+                "---\n"
+                'status: "imported"\n'
+                'topic: "malformed-frontier"\n'
+                'title: "Malformed frontier"\n'
+                "---\n"
+                "# Malformed frontier\n\n"
+                "Research note without the research-import and non-authority checkpoint boundary.\n",
+                encoding="utf-8",
+            )
+            message_file = Path(tmp) / "reviewed-message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- " + research_rel,
+                }
+            )
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git commit -F {message_file}",
+                }
+            )
+            malformed_commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git commit -F {message_file}",
+                }
+            )
+
+            def staged_paths(target_inventory) -> tuple[str, ...]:
+                if target_inventory.root.resolve() == root.resolve():
+                    return (research_rel,)
+                return ()
+
+            def malformed_staged_paths(target_inventory) -> tuple[str, ...]:
+                if target_inventory.root.resolve() == root.resolve():
+                    return (malformed_rel,)
+                return ()
+
+            stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            with patch("mylittleharness.hooks._git_staged_paths", side_effect=staged_paths):
+                commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            with patch("mylittleharness.hooks._git_staged_paths", side_effect=malformed_staged_paths):
+                malformed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], malformed_commit_input)
+
+            stage_codes = {finding["code"] for finding in stage_payload["findings"]}
+            self.assertFalse(stage_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", stage_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", stage_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", stage_codes)
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", commit_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", commit_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
+
+            malformed_codes = {finding["code"] for finding in malformed_payload["findings"]}
+            self.assertTrue(malformed_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", malformed_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", malformed_codes)
     def test_hooks_pre_tool_allows_neighbor_live_root_reviewed_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

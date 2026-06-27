@@ -6304,6 +6304,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     verification_package_paths = _coherent_verification_decision_checkpoint_paths(inventory, normalized)
     if verification_package_paths:
         return verification_package_paths
+    route_imported_research_paths = _coherent_route_imported_research_checkpoint_paths(inventory, normalized)
+    if route_imported_research_paths:
+        return route_imported_research_paths
     deferred_package_paths = _coherent_deferred_route_package_checkpoint_paths(inventory, normalized)
     if deferred_package_paths:
         return deferred_package_paths
@@ -6619,6 +6622,25 @@ def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, path
             return set()
         archive_sources.add(source_research)
     if not archive_sources <= research_paths:
+        return set()
+    return paths
+
+
+def _coherent_route_imported_research_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    research_paths = {path for path in paths if _is_deferred_research_route_path(path)}
+    if not research_paths or paths != research_paths:
+        return set()
+    if not all(_is_reviewed_deferred_research_route_file(inventory, path) for path in research_paths):
         return set()
     return paths
 
