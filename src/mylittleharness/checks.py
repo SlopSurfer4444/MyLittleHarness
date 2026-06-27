@@ -750,14 +750,24 @@ def _accepted_handoff_legacy_route_alias(route_id: str, data: dict[str, object])
     target = legacy_route_alias_target(normalized)
     if target is None:
         return None
-    evidence_refs = _coordination_string_list(data.get("evidence_refs"))
     if normalized == "check":
-        if not any(ref == "project/verification" or ref.startswith("project/verification/") for ref in evidence_refs):
+        if not _accepted_handoff_has_route_owned_evidence(data):
             return None
     elif normalized in {"evidence", "intake"}:
-        if not any(ref == "project/verification" or ref.startswith("project/verification/") for ref in evidence_refs):
+        if not _accepted_handoff_has_route_owned_evidence(data):
             return None
     return target
+
+
+def _accepted_handoff_has_route_owned_evidence(data: dict[str, object]) -> bool:
+    refs: list[str] = []
+    for field in ("evidence_refs", "claim_refs", "approval_packet_refs"):
+        refs.extend(_coordination_string_list(data.get(field)))
+    return any(
+        (normalized := _coordination_normalize_ref(ref)) == "project/verification"
+        or normalized.startswith("project/verification/")
+        for ref in refs
+    )
 
 
 def _coordination_handoff_note_findings(root: Path, code_prefix: str) -> list[Finding]:

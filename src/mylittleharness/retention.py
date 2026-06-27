@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -12,7 +13,12 @@ from .atomic_files import AtomicFileDelete, AtomicFileWrite, FileTransactionErro
 from .models import Finding
 from .parsing import parse_frontmatter
 from .reporting import RouteWriteEvidence, route_write_findings
-from .root_boundary import absolute_path
+from .root_boundary import (
+    absolute_path,
+    product_source_ref_target,
+    root_relative_path_conflict,
+    source_path_boundary_violation,
+)
 
 
 RETENTION_RECEIPTS_DIR_REL = "project/verification/retention-receipts"
@@ -25,6 +31,15 @@ GENERATED_LOCAL_PREFIXES = (".mylittleharness/generated/", ".mylittleharness/run
 RETENTION_ACTIONS = ("scan", "retire", "tombstone", "purge")
 RETENTION_POLICIES = ("exact-paths", "agent-runs-obsolete")
 RETENTION_MUTATING_ACTIONS = ("retire", "tombstone", "purge")
+SOURCE_HASH_POSTURES = ("not-applicable", "missing-record", "malformed", "missing", "stale", "degraded", "current")
+SOURCE_HASH_DIAGNOSTIC_SEVERITIES = ("info", "warn")
+SOURCE_HASH_DIAGNOSTIC_CODES = (
+    "retention-source-hash-current",
+    "retention-source-hash-degraded",
+    "retention-source-hash-malformed",
+    "retention-source-hash-missing",
+    "retention-source-hash-stale",
+)
 ACTIVE_REFERENCE_PATHS = {
     "project/project-state.md",
     "project/implementation-plan.md",
@@ -43,10 +58,6 @@ SKIP_SCAN_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
 }
-SKIP_SCAN_PREFIXES = (
-    ".mylittleharness/generated/",
-    ".mylittleharness/runtime/",
-)
 TEXT_SUFFIXES = {
     ".cfg",
     ".css",
@@ -68,6 +79,14 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 RECORD_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+SOURCE_HASH_RE = re.compile(r"^(.+?)\s+(?:sha256=([a-fA-F0-9]{64})|(missing)|(unreadable)|(invalid-path))$")
+RETIREMENT_SUMMARY_PRESERVED_SCALARS = (
+    "related_plan",
+    "related_roadmap_item",
+    "archived_plan",
+    "implemented_by",
+    "intake_source",
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +108,21 @@ class ReferenceHit:
 
 
 @dataclass(frozen=True)
+class SourceHashDiagnostic:
+    severity: str
+    code: str
+    message: str
+    entry: str = ""
+
+
+@dataclass(frozen=True)
+class SourceHashPosture:
+    posture: str
+    entries: tuple[str, ...]
+    diagnostics: tuple[SourceHashDiagnostic, ...]
+
+
+@dataclass(frozen=True)
 class RetentionCandidate:
     rel_path: str
     exists: bool
@@ -100,6 +134,7 @@ class RetentionCandidate:
     inbound_refs: tuple[ReferenceHit, ...]
     warning_delta: str
     risks: tuple[str, ...]
+    source_hash_posture: SourceHashPosture
     error: str = ""
 
 
@@ -256,7 +291,10 @@ def _retention_plan(inventory: object, request: RetentionRequest) -> tuple[Reten
     if not request.reason:
         findings.append(Finding("error", "retention-refused", "retention mutating actions require --reason", None))
     if not candidates:
-        findings.append(Finding("error", "retention-refused", "retention route needs at least one exact --path target", None))
+        if request.policy == "agent-runs-obsolete":
+            findings.append(Finding("error", "retention-refused", "retention policy agent-runs-obsolete did not discover stale agent-run records", None))
+        else:
+            findings.append(Finding("error", "retention-refused", "retention route needs at least one exact --path target", None))
         return None, findings
 
     action_errors = _action_refusal_findings(request, candidates)
@@ -281,17 +319,33 @@ def _retention_candidates(inventory: object, request: RetentionRequest) -> tuple
     if request.action not in RETENTION_ACTIONS:
         findings.append(Finding("error", "retention-refused", f"unknown retention action: {request.action}", None))
         return (), findings
-    if not request.paths:
-        findings.append(Finding("error", "retention-refused", "retention requires at least one exact --path", None))
+    if not request.paths and request.policy != "agent-runs-obsolete":
+        findings.append(Finding("error", "retention-refused", "retention requires at least one exact --path unless a named discovery policy is used", None))
+        return (), findings
+    if not request.paths and request.policy == "agent-runs-obsolete" and request.action not in {"scan", "retire"}:
+        findings.append(Finding("error", "retention-refused", "retention policy agent-runs-obsolete can discover candidates only for scan or retire", None))
+        return (), findings
+    if not request.paths and request.policy == "agent-runs-obsolete" and request.apply and request.action == "retire":
+        findings.append(
+            Finding(
+                "error",
+                "retention-refused",
+                "retention policy agent-runs-obsolete apply requires exact --path values copied from a reviewed dry-run or scan report",
+                None,
+            )
+        )
         return (), findings
 
     rel_paths: list[str] = []
-    for raw_path in request.paths:
-        normalized, conflict = _normalize_request_path(raw_path)
-        if conflict:
-            findings.append(Finding("error", "retention-refused", f"retention path {conflict}: {raw_path}", raw_path))
-            continue
-        rel_paths.extend(_expand_retention_path(root, normalized))
+    if request.paths:
+        for raw_path in request.paths:
+            normalized, conflict = _normalize_request_path(raw_path)
+            if conflict:
+                findings.append(Finding("error", "retention-refused", f"retention path {conflict}: {raw_path}", raw_path))
+                continue
+            rel_paths.extend(_expand_retention_path(root, normalized))
+    elif request.policy == "agent-runs-obsolete":
+        rel_paths.extend(_agent_run_obsolete_policy_paths(root))
     rel_paths = sorted(dict.fromkeys(rel_paths))
     all_refs = _reference_hits_by_target(root, rel_paths)
     return tuple(_candidate_for(root, rel_path, request, tuple(all_refs.get(rel_path, ()))) for rel_path in rel_paths), findings
@@ -307,6 +361,7 @@ def _candidate_for(root: Path, rel_path: str, request: RetentionRequest, inbound
     recommended_action = _recommended_action(request.action, classification)
     warning_delta = _warning_delta(request.action, rel_path, classification, inbound_refs)
     risks = _candidate_risks(request.action, rel_path, classification, inbound_refs, exists, is_file, is_dir)
+    source_hash_posture = _source_hash_posture_for_candidate(root, rel_path, exists, is_file)
     error = ""
     if not exists and classification != "prune-generated-local":
         error = "target path does not exist"
@@ -323,6 +378,7 @@ def _candidate_for(root: Path, rel_path: str, request: RetentionRequest, inbound
         inbound_refs=inbound_refs,
         warning_delta=warning_delta,
         risks=risks,
+        source_hash_posture=source_hash_posture,
         error=error,
     )
 
@@ -342,7 +398,7 @@ def _classification(
         return "keep-current"
     if any(hit.current for hit in inbound_refs) and request.action == "purge":
         return "tombstone-preserve-reference"
-    if any(hit.current for hit in inbound_refs) and request.action == "retire" and not _is_agent_run_record(rel_path):
+    if any(hit.current for hit in inbound_refs) and (request.action == "retire" or request.policy == "agent-runs-obsolete"):
         return "refuse-active-current"
     if _is_agent_run_record(rel_path) and request.action in {"scan", "retire"}:
         return "retire-from-active-agent-run-checks"
@@ -401,7 +457,7 @@ def _candidate_risks(
     if inbound_refs:
         risks.append(f"{len(inbound_refs)} inbound reference(s) must remain coherent after cleanup")
     if any(hit.current for hit in inbound_refs):
-        risks.append("current/active references are present; destructive purge is refused")
+        risks.append("current/active references are present; mutating retention is refused until the active reference is resolved")
     if action == "purge" and classification != "purge-safe":
         risks.append("purge is not safe for this candidate; use tombstone or retire")
     if action == "retire" and not _is_agent_run_record(rel_path):
@@ -507,6 +563,17 @@ def _receipt_text(
                 ],
                 "expected_warning_delta": candidate.warning_delta,
                 "risks": list(candidate.risks),
+                "source_hash_posture": candidate.source_hash_posture.posture,
+                "source_hash_entries": list(candidate.source_hash_posture.entries),
+                "source_hash_diagnostics": [
+                    {
+                        "severity": diagnostic.severity,
+                        "code": diagnostic.code,
+                        "message": diagnostic.message,
+                        "entry": diagnostic.entry,
+                    }
+                    for diagnostic in candidate.source_hash_posture.diagnostics
+                ],
             }
             for candidate in candidates
         ],
@@ -521,8 +588,17 @@ def _retirement_summary_text(
     receipt_rel: str,
 ) -> str:
     existing = _read_existing_text(root / AGENT_RUN_RETIREMENT_SUMMARY_REL)
+    frontmatter = parse_frontmatter(existing or "")
+    frontmatter_data = frontmatter.data if frontmatter.has_frontmatter and not frontmatter.errors else {}
     existing_records = _existing_retired_records(existing)
     retired = sorted({*existing_records, *(candidate.rel_path for candidate in candidates if _is_agent_run_record(candidate.rel_path))})
+    source_members = sorted({*_frontmatter_string_list(frontmatter_data.get("source_members")), receipt_rel})
+    retention_receipts = sorted({*_frontmatter_string_list(frontmatter_data.get("retention_receipts")), receipt_rel})
+    preserved_scalar_lines = [
+        f"{field}: {_quote_yaml(value)}"
+        for field in RETIREMENT_SUMMARY_PRESERVED_SCALARS
+        if isinstance((value := frontmatter_data.get(field)), str) and value.strip()
+    ]
     return "\n".join(
         [
             "---",
@@ -530,10 +606,13 @@ def _retirement_summary_text(
             'status: "archived"',
             'route: "verification"',
             'schema: "mylittleharness.agent-run-retirement-summary.v1"',
+            *preserved_scalar_lines,
+            "source_members:",
+            *[f"  - {_quote_yaml(path)}" for path in source_members],
             "retired_agent_run_records:",
             *[f"  - {_quote_yaml(path)}" for path in retired],
             "retention_receipts:",
-            f"  - {_quote_yaml(receipt_rel)}",
+            *[f"  - {_quote_yaml(path)}" for path in retention_receipts],
             "---",
             "# Agent Run Retirement Summary",
             "",
@@ -591,6 +670,7 @@ def _retention_receipt_data_findings(rel_path: str, data: object, code_prefix: s
     non_authority = str(data.get("non_authority") or "").casefold()
     if "cannot approve" not in non_authority or "lifecycle" not in non_authority or "git" not in non_authority:
         findings.append(Finding("warn", f"{code}-malformed", "retention receipt non_authority must state it cannot approve lifecycle or Git", rel_path))
+    findings.extend(_retention_receipt_candidate_findings(rel_path, data, code, target_paths))
     if not findings:
         findings.append(
             Finding(
@@ -600,6 +680,83 @@ def _retention_receipt_data_findings(rel_path: str, data: object, code_prefix: s
                 rel_path,
             )
         )
+    return findings
+
+
+def _retention_receipt_candidate_findings(rel_path: str, data: dict[str, object], code: str, target_paths: object) -> list[Finding]:
+    findings: list[Finding] = []
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return [Finding("warn", f"{code}-malformed", "retention receipt candidates must list reviewed candidate graph records", rel_path)]
+    target_set = {str(path).strip() for path in target_paths if str(path).strip()} if isinstance(target_paths, list) else set()
+    required_scalar_fields = (
+        "path",
+        "classification",
+        "recommended_action",
+        "git_status",
+        "expected_warning_delta",
+        "source_hash_posture",
+    )
+    required_list_fields = ("inbound_refs", "risks", "source_hash_entries", "source_hash_diagnostics")
+    candidate_paths: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {index} must be an object", rel_path))
+            continue
+        candidate_path = str(candidate.get("path") or "").strip()
+        if candidate_path:
+            candidate_paths.add(candidate_path)
+        for field in required_scalar_fields:
+            if not isinstance(candidate.get(field), str) or not str(candidate.get(field) or "").strip():
+                findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} missing required field: {field}", rel_path))
+        for field in required_list_fields:
+            if not isinstance(candidate.get(field), list):
+                findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} field must be a list: {field}", rel_path))
+        posture_value = candidate.get("source_hash_posture")
+        if isinstance(posture_value, str) and posture_value.strip() and posture_value not in SOURCE_HASH_POSTURES:
+            findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} has unsupported source_hash_posture: {posture_value}", rel_path))
+        if target_set and candidate_path and candidate_path not in target_set:
+            findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate path is not listed in target_paths: {candidate_path}", rel_path))
+        inbound_refs = candidate.get("inbound_refs")
+        if isinstance(inbound_refs, list):
+            for ref_index, inbound_ref in enumerate(inbound_refs):
+                if not isinstance(inbound_ref, dict):
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} inbound_ref {ref_index} must be an object", rel_path))
+                    continue
+                if not isinstance(inbound_ref.get("source"), str) or not str(inbound_ref.get("source") or "").strip():
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} inbound_ref {ref_index} missing source", rel_path))
+                line_value = inbound_ref.get("line")
+                if not isinstance(line_value, int) or isinstance(line_value, bool) or line_value <= 0:
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} inbound_ref {ref_index} missing positive line", rel_path))
+                if not isinstance(inbound_ref.get("current"), bool):
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} inbound_ref {ref_index} missing current flag", rel_path))
+        source_hash_entries = candidate.get("source_hash_entries")
+        if isinstance(source_hash_entries, list):
+            for entry_index, entry in enumerate(source_hash_entries):
+                if not isinstance(entry, str) or not entry.strip():
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_entry {entry_index} must be a non-empty string", rel_path))
+                elif not SOURCE_HASH_RE.match(entry.strip()):
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_entry {entry_index} has unsupported format", rel_path))
+        source_hash_diagnostics = candidate.get("source_hash_diagnostics")
+        if isinstance(source_hash_diagnostics, list):
+            for diag_index, diagnostic in enumerate(source_hash_diagnostics):
+                if not isinstance(diagnostic, dict):
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_diagnostic {diag_index} must be an object", rel_path))
+                    continue
+                for field in ("severity", "code", "message"):
+                    if not isinstance(diagnostic.get(field), str) or not str(diagnostic.get(field) or "").strip():
+                        findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_diagnostic {diag_index} missing {field}", rel_path))
+                severity_value = diagnostic.get("severity")
+                if isinstance(severity_value, str) and severity_value.strip() and severity_value not in SOURCE_HASH_DIAGNOSTIC_SEVERITIES:
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_diagnostic {diag_index} has unsupported severity: {severity_value}", rel_path))
+                code_value = diagnostic.get("code")
+                if isinstance(code_value, str) and code_value.strip() and code_value not in SOURCE_HASH_DIAGNOSTIC_CODES:
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_diagnostic {diag_index} has unsupported code: {code_value}", rel_path))
+                entry_value = diagnostic.get("entry")
+                if entry_value not in (None, "") and not isinstance(entry_value, str):
+                    findings.append(Finding("warn", f"{code}-malformed", f"retention receipt candidate {candidate_path or index} source_hash_diagnostic {diag_index} entry must be a string when present", rel_path))
+    for target_path in sorted(target_set - candidate_paths):
+        findings.append(Finding("warn", f"{code}-malformed", f"retention receipt target_paths entry has no reviewed candidate graph record: {target_path}", rel_path))
     return findings
 
 
@@ -630,15 +787,39 @@ def _candidate_findings(candidates: tuple[RetentionCandidate, ...]) -> list[Find
                 (
                     f"classification={candidate.classification}; recommended_action={candidate.recommended_action}; "
                     f"exists={candidate.exists}; git_status={candidate.git_status}; inbound_refs={len(candidate.inbound_refs)}; "
-                    f"warning_delta={candidate.warning_delta}"
+                    f"source_hash_posture={candidate.source_hash_posture.posture}; warning_delta={candidate.warning_delta}"
                 ),
                 candidate.rel_path,
             )
         )
         if candidate.error:
             findings.append(Finding("error", "retention-candidate-error", candidate.error, candidate.rel_path))
+        findings.extend(_source_hash_posture_findings(candidate))
         for risk in candidate.risks:
             findings.append(Finding("info", "retention-risk", risk, candidate.rel_path))
+    return findings
+
+
+def _source_hash_posture_findings(candidate: RetentionCandidate) -> list[Finding]:
+    posture = candidate.source_hash_posture
+    severity = "warn" if posture.posture in {"stale", "malformed"} else "info"
+    findings = [
+        Finding(
+            severity,
+            "retention-source-hash-posture",
+            f"source_hash_posture={posture.posture}; entries={len(posture.entries)}; diagnostics={len(posture.diagnostics)}",
+            candidate.rel_path,
+        )
+    ]
+    for diagnostic in posture.diagnostics:
+        findings.append(
+            Finding(
+                diagnostic.severity,
+                diagnostic.code,
+                diagnostic.message,
+                candidate.rel_path,
+            )
+        )
     return findings
 
 
@@ -719,6 +900,135 @@ def _reference_hits_by_target(root: Path, targets: Iterable[str]) -> dict[str, t
     return {target: tuple(hits) for target, hits in refs.items()}
 
 
+def _agent_run_obsolete_policy_paths(root: Path) -> list[str]:
+    run_dir = root / AGENT_RUNS_DIR_REL
+    if not run_dir.exists() or not run_dir.is_dir():
+        return []
+    retired_records = set(_existing_retired_records(_read_existing_text(root / AGENT_RUN_RETIREMENT_SUMMARY_REL)))
+    rel_paths: list[str] = []
+    for path in sorted(run_dir.glob("*.md")):
+        rel_path = _to_rel_path(root, path)
+        if rel_path in retired_records:
+            continue
+        posture = _source_hash_posture_for_candidate(root, rel_path, True, True)
+        if posture.posture == "stale":
+            rel_paths.append(rel_path)
+    return rel_paths
+
+
+def _source_hash_posture_for_candidate(root: Path, rel_path: str, exists: bool, is_file: bool) -> SourceHashPosture:
+    if not _is_agent_run_record(rel_path):
+        return SourceHashPosture("not-applicable", (), ())
+    if not exists:
+        return SourceHashPosture(
+            "missing-record",
+            (),
+            (SourceHashDiagnostic("warn", "retention-source-hash-malformed", "agent-run record target is missing"),),
+        )
+    if not is_file:
+        return SourceHashPosture(
+            "malformed",
+            (),
+            (SourceHashDiagnostic("warn", "retention-source-hash-malformed", "agent-run record target is not a regular file"),),
+        )
+    try:
+        text = (root / rel_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return SourceHashPosture(
+            "malformed",
+            (),
+            (SourceHashDiagnostic("warn", "retention-source-hash-malformed", f"agent-run record could not be read: {exc}"),),
+        )
+    frontmatter = parse_frontmatter(text)
+    diagnostics: list[SourceHashDiagnostic] = []
+    if not frontmatter.has_frontmatter:
+        diagnostics.append(SourceHashDiagnostic("warn", "retention-source-hash-malformed", "agent-run record is missing frontmatter"))
+    for error in frontmatter.errors:
+        diagnostics.append(SourceHashDiagnostic("warn", "retention-source-hash-malformed", error))
+    entries = _frontmatter_string_list(frontmatter.data.get("source_hashes")) if frontmatter.has_frontmatter else ()
+    if not entries:
+        posture = "malformed" if diagnostics else "missing"
+        if posture == "missing":
+            diagnostics.append(SourceHashDiagnostic("info", "retention-source-hash-missing", "agent-run record has no source_hashes entries"))
+        return SourceHashPosture(posture, entries, tuple(diagnostics))
+    for entry in entries:
+        diagnostics.append(_source_hash_entry_diagnostic(root, entry))
+    if any(diagnostic.code == "retention-source-hash-stale" for diagnostic in diagnostics):
+        posture = "stale"
+    elif any(diagnostic.severity == "warn" for diagnostic in diagnostics):
+        posture = "malformed"
+    elif any(diagnostic.code == "retention-source-hash-degraded" for diagnostic in diagnostics):
+        posture = "degraded"
+    else:
+        posture = "current"
+    return SourceHashPosture(posture, entries, tuple(diagnostics))
+
+
+def _source_hash_entry_diagnostic(root: Path, entry: str) -> SourceHashDiagnostic:
+    normalized = entry.strip()
+    match = SOURCE_HASH_RE.match(normalized)
+    if not match:
+        return SourceHashDiagnostic("warn", "retention-source-hash-malformed", f"malformed source_hashes entry: {entry}", entry)
+    source_rel = match.group(1).strip()
+    expected_hash = match.group(2)
+    expected_missing = bool(match.group(3))
+    expected_unreadable = bool(match.group(4))
+    expected_invalid = bool(match.group(5))
+    product_ref = product_source_ref_target(root, source_rel)
+    if product_ref is not None:
+        if product_ref.conflict:
+            return SourceHashDiagnostic(
+                "warn",
+                "retention-source-hash-malformed",
+                f"source hash product-source path {product_ref.conflict}: {product_ref.ref_label}",
+                entry,
+            )
+        return _source_hash_target_diagnostic(product_ref.path, product_ref.ref_label, expected_hash, expected_missing, expected_unreadable, expected_invalid, entry)
+    conflict = root_relative_path_conflict(source_rel)
+    if conflict:
+        return SourceHashDiagnostic("warn", "retention-source-hash-malformed", f"source hash path {conflict}: {source_rel}", entry)
+    source_path = root / source_rel
+    boundary_violation = source_path_boundary_violation(root, source_path, label="agent run source hash target")
+    if boundary_violation is not None:
+        return SourceHashDiagnostic("warn", "retention-source-hash-stale", boundary_violation.message, entry)
+    return _source_hash_target_diagnostic(source_path, source_rel, expected_hash, expected_missing, expected_unreadable, expected_invalid, entry)
+
+
+def _source_hash_target_diagnostic(
+    source_path: Path,
+    label: str,
+    expected_hash: str | None,
+    expected_missing: bool,
+    expected_unreadable: bool,
+    expected_invalid: bool,
+    entry: str,
+) -> SourceHashDiagnostic:
+    if expected_missing:
+        if source_path.exists():
+            return SourceHashDiagnostic("warn", "retention-source-hash-stale", f"source hash recorded missing path now exists: {label}", entry)
+        return SourceHashDiagnostic("info", "retention-source-hash-degraded", f"source hash still records missing path: {label}", entry)
+    if expected_unreadable:
+        return SourceHashDiagnostic("info", "retention-source-hash-degraded", f"source hash entry records unreadable evidence: {label}", entry)
+    if expected_invalid:
+        return SourceHashDiagnostic("info", "retention-source-hash-degraded", f"source hash entry records invalid-path evidence: {label}", entry)
+    if not source_path.exists():
+        return SourceHashDiagnostic("warn", "retention-source-hash-stale", f"source hash target is now missing: {label}", entry)
+    if not source_path.is_file():
+        return SourceHashDiagnostic("warn", "retention-source-hash-stale", f"source hash target is no longer a regular file: {label}", entry)
+    try:
+        current_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        return SourceHashDiagnostic("warn", "retention-source-hash-stale", f"source hash target is now unreadable: {label}: {exc}", entry)
+    if expected_hash and current_hash.lower() != expected_hash.lower():
+        return SourceHashDiagnostic(
+            "warn",
+            "retention-source-hash-stale",
+            f"source hash mismatch for {label}: expected={expected_hash[:12]} current={current_hash[:12]}",
+            entry,
+        )
+    return SourceHashDiagnostic("info", "retention-source-hash-current", f"source hash current for {label}: {current_hash[:12]}", entry)
+
+
 def _text_paths(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
         try:
@@ -729,9 +1039,6 @@ def _text_paths(root: Path) -> Iterable[Path]:
             continue
         parts = set(rel.split("/"))
         if parts & SKIP_SCAN_DIRS:
-            continue
-        lowered = rel.casefold()
-        if any(lowered.startswith(prefix) for prefix in SKIP_SCAN_PREFIXES):
             continue
         if path.suffix.casefold() not in TEXT_SUFFIXES:
             continue

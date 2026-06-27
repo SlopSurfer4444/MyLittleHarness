@@ -217,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retention_actions = retention.add_subparsers(dest="retention_action", required=True, metavar="{scan,retire,tombstone,purge}")
     retention_scan = retention_actions.add_parser("scan", help="Classify evidence retention candidates without writing files.")
-    retention_scan.add_argument("--path", dest="paths", action="append", required=True, help="Root-relative evidence path or directory to classify. May be repeated.")
+    retention_scan.add_argument("--path", dest="paths", action="append", default=[], help="Root-relative evidence path or directory to classify. May be repeated.")
     retention_scan.add_argument("--policy", choices=("exact-paths", "agent-runs-obsolete"), default="exact-paths", help="Retention policy lens for classification.")
     retention_scan.add_argument("--json", action="store_true", help="Emit a structured retention scan report.")
     for retention_action in ("retire", "tombstone", "purge"):
@@ -225,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
         retention_mode = retention_command.add_mutually_exclusive_group(required=True)
         retention_mode.add_argument("--dry-run", action="store_true", help=f"Preview evidence {retention_action} without writing files.")
         retention_mode.add_argument("--apply", action="store_true", help=f"Apply reviewed evidence {retention_action} and write a receipt.")
-        retention_command.add_argument("--path", dest="paths", action="append", required=True, help="Exact root-relative evidence file path. May be repeated.")
+        retention_command.add_argument("--path", dest="paths", action="append", default=[], help="Exact root-relative evidence file path. May be repeated.")
         retention_command.add_argument("--policy", choices=("exact-paths", "agent-runs-obsolete"), default="exact-paths", help="Retention policy lens for classification.")
         retention_command.add_argument("--reason", required=True, help="Reason this evidence is obsolete, retired, or safe to clean.")
         retention_command.add_argument("--receipt-id", dest="receipt_id", help="Stable receipt id used as the JSON filename under project/verification/retention-receipts/.")

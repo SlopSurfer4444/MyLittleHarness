@@ -7532,6 +7532,8 @@ class CliTests(unittest.TestCase):
             scan_messages = "\n".join(finding["message"] for section in scan_payload["sections"] for finding in section["findings"])
             self.assertIn("retention-candidate", scan_codes)
             self.assertIn("classification=retire-from-active-agent-run-checks", scan_messages)
+            self.assertIn("source_hash_posture=stale", scan_messages)
+            self.assertIn("retention-source-hash-stale", scan_codes)
             self.assertIn("retention-reference-graph", scan_codes)
 
             before = snapshot_tree_bytes(root)
@@ -7590,6 +7592,8 @@ class CliTests(unittest.TestCase):
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual("mylittleharness.retention-receipt.v1", receipt["schema"])
             self.assertEqual([record_rel], receipt["target_paths"])
+            self.assertEqual("stale", receipt["candidates"][0]["source_hash_posture"])
+            self.assertIn("source_hash_diagnostics", receipt["candidates"][0])
 
             retired_check = io.StringIO()
             with redirect_stdout(retired_check):
@@ -7598,6 +7602,348 @@ class CliTests(unittest.TestCase):
             self.assertIn("check-agent-run-record-retirement-summary", retired_rendered)
             self.assertIn("check-retention-receipt-summary", retired_rendered)
             self.assertNotIn("check-agent-run-record-stale", retired_rendered)
+
+    def test_retention_agent_runs_obsolete_policy_discovers_stale_records_without_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            work_path = root / "src/work.py"
+            work_path.write_text("def work():\n    return 'before'\n", encoding="utf-8")
+            old_hash = hashlib.sha256(work_path.read_bytes()).hexdigest()
+            record_rel = "project/verification/agent-runs/stale-run.md"
+            record_path = root / record_rel
+            record_path.parent.mkdir(parents=True)
+            record_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "stale-run"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "verify obsolete retention policy"\n'
+                'assigned_scope: "evidence-retention-delete-retire-route"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "verification-passed"\n'
+                'attempt_budget: "1/1"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none"\n'
+                "input_refs:\n"
+                '  - "project/implementation-plan.md"\n'
+                "output_refs:\n"
+                '  - "src/work.py"\n'
+                "claimed_paths:\n"
+                '  - "src/work.py"\n'
+                "changed_files:\n"
+                '  - "src/work.py"\n'
+                "commands:\n"
+                '  - "pytest -q tests/test_cli.py"\n'
+                "verification_refs:\n"
+                '  - "project/verification/smoke.md"\n'
+                "source_hashes:\n"
+                f'  - "src/work.py sha256={old_hash}"\n'
+                "---\n"
+                "# Stale Run\n",
+                encoding="utf-8",
+            )
+            (root / "project/verification/agent-run-retirement-summary.md").write_text(
+                "---\n"
+                'title: "Agent Run Retirement Summary"\n'
+                'status: "archived"\n'
+                'route: "verification"\n'
+                'schema: "mylittleharness.agent-run-retirement-summary.v1"\n'
+                'related_plan: "project/archive/plans/legacy-retention.md"\n'
+                'archived_plan: "project/archive/plans/legacy-retention.md"\n'
+                "source_members:\n"
+                '  - "project/verification/retention-receipts/legacy.json"\n'
+                "retired_agent_run_records:\n"
+                '  - "project/verification/agent-runs/already-retired.md"\n'
+                "retention_receipts:\n"
+                '  - "project/verification/retention-receipts/legacy.json"\n'
+                "---\n"
+                "# Agent Run Retirement Summary\n",
+                encoding="utf-8",
+            )
+            work_path.write_text("def work():\n    return 'after'\n", encoding="utf-8")
+
+            scan_output = io.StringIO()
+            with redirect_stdout(scan_output):
+                self.assertEqual(main(["--root", str(root), "retention", "scan", "--policy", "agent-runs-obsolete", "--json"]), 0)
+            scan_payload = json.loads(scan_output.getvalue())
+            scan_messages = "\n".join(finding["message"] for section in scan_payload["sections"] for finding in section["findings"])
+            self.assertIn(record_rel, json.dumps(scan_payload))
+            self.assertIn("source_hash_posture=stale", scan_messages)
+
+            before = snapshot_tree_bytes(root)
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "retire",
+                            "--dry-run",
+                            "--policy",
+                            "agent-runs-obsolete",
+                            "--reason",
+                            "historical stale source-hash evidence",
+                            "--receipt-id",
+                            "stale-policy",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_rendered = dry_output.getvalue()
+            self.assertIn(record_rel, dry_rendered)
+            self.assertIn("would create route project/verification/retention-receipts/stale-policy.json", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "retire",
+                            "--apply",
+                            "--policy",
+                            "agent-runs-obsolete",
+                            "--reason",
+                            "historical stale source-hash evidence",
+                            "--receipt-id",
+                            "stale-policy",
+                        ]
+                    ),
+                    2,
+                )
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            apply_rendered = apply_output.getvalue()
+            self.assertIn("retention policy agent-runs-obsolete apply requires exact --path values", apply_rendered)
+
+            explicit_apply_output = io.StringIO()
+            with redirect_stdout(explicit_apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "retire",
+                            "--apply",
+                            "--policy",
+                            "agent-runs-obsolete",
+                            "--path",
+                            record_rel,
+                            "--reason",
+                            "historical stale source-hash evidence",
+                            "--receipt-id",
+                            "stale-policy",
+                        ]
+                    ),
+                    0,
+                )
+            apply_rendered = explicit_apply_output.getvalue()
+            self.assertIn("retention-applied", apply_rendered)
+            summary_text = (root / "project/verification/agent-run-retirement-summary.md").read_text(encoding="utf-8")
+            self.assertIn(record_rel, summary_text)
+            self.assertIn('related_plan: "project/archive/plans/legacy-retention.md"', summary_text)
+            self.assertIn('archived_plan: "project/archive/plans/legacy-retention.md"', summary_text)
+            self.assertIn('"project/verification/retention-receipts/legacy.json"', summary_text)
+            self.assertIn('"project/verification/retention-receipts/stale-policy.json"', summary_text)
+
+            repeat_scan_output = io.StringIO()
+            with redirect_stdout(repeat_scan_output):
+                self.assertEqual(main(["--root", str(root), "retention", "scan", "--policy", "agent-runs-obsolete", "--json"]), 0)
+            repeat_payload = json.loads(repeat_scan_output.getvalue())
+            repeat_candidate_findings = [
+                finding
+                for section in repeat_payload["sections"]
+                for finding in section["findings"]
+                if finding["code"] == "retention-candidate"
+            ]
+            self.assertEqual([], repeat_candidate_findings)
+
+    def test_retention_refuses_to_retire_agent_run_with_current_inbound_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "src").mkdir()
+            work_path = root / "src/work.py"
+            work_path.write_text("def work():\n    return 'before'\n", encoding="utf-8")
+            old_hash = hashlib.sha256(work_path.read_bytes()).hexdigest()
+            record_rel = "project/verification/agent-runs/currently-referenced-run.md"
+            record_path = root / record_rel
+            record_path.parent.mkdir(parents=True)
+            record_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "currently-referenced-run"\n'
+                'role: "coder"\n'
+                'actor: "codex"\n'
+                'task: "verify current ref retention refusal"\n'
+                'assigned_scope: "evidence-retention-delete-retire-route"\n'
+                'runtime: "local-shell"\n'
+                'worktree_id: "main"\n'
+                'status: "succeeded"\n'
+                'stop_reason: "verification-passed"\n'
+                'attempt_budget: "1/1"\n'
+                'docs_decision: "not-needed"\n'
+                'residual_risk: "none"\n'
+                "input_refs:\n"
+                '  - "project/implementation-plan.md"\n'
+                "output_refs:\n"
+                '  - "src/work.py"\n'
+                "claimed_paths:\n"
+                '  - "src/work.py"\n'
+                "changed_files:\n"
+                '  - "src/work.py"\n'
+                "source_hashes:\n"
+                f'  - "src/work.py sha256={old_hash}"\n'
+                "---\n"
+                "# Currently Referenced Run\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                f"# Active Plan\n\nCurrent handoff still references `{record_rel}`.\n",
+                encoding="utf-8",
+            )
+            work_path.write_text("def work():\n    return 'after'\n", encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            scan_output = io.StringIO()
+            with redirect_stdout(scan_output):
+                self.assertEqual(main(["--root", str(root), "retention", "scan", "--policy", "agent-runs-obsolete", "--json"]), 0)
+            scan_payload = json.loads(scan_output.getvalue())
+            scan_messages = "\n".join(finding["message"] for section in scan_payload["sections"] for finding in section["findings"])
+            self.assertIn("classification=refuse-active-current", scan_messages)
+            self.assertIn("inbound_refs=1", scan_messages)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "retention",
+                            "retire",
+                            "--apply",
+                            "--path",
+                            record_rel,
+                            "--reason",
+                            "historical stale source-hash evidence",
+                            "--receipt-id",
+                            "current-ref-refused",
+                        ]
+                    ),
+                    2,
+                )
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = apply_output.getvalue()
+            self.assertIn("retention-refused-active-current", rendered)
+            self.assertIn("retention refuses to mutate active/current referenced evidence", rendered)
+
+    def test_retention_reference_graph_scans_generated_and_runtime_fanin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            target_rel = "project/verification/obsolete.md"
+            target_path = root / target_rel
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("---\nstatus: \"archived\"\n---\n# Obsolete\n", encoding="utf-8")
+            generated_rel = ".mylittleharness/generated/projection/relationships.json"
+            runtime_rel = ".mylittleharness/runtime/session.json"
+            (root / generated_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / runtime_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / generated_rel).write_text(json.dumps({"ref": target_rel}), encoding="utf-8")
+            (root / runtime_rel).write_text(json.dumps({"ref": target_rel}), encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "retention", "scan", "--path", target_rel, "--json"]), 0)
+            payload = json.loads(output.getvalue())
+            refs = [
+                (finding["source"], finding["message"])
+                for section in payload["sections"]
+                for finding in section["findings"]
+                if finding["code"] == "retention-reference-graph"
+            ]
+            self.assertIn((generated_rel, f"inbound historical reference to {target_rel}"), refs)
+            self.assertIn((runtime_rel, f"inbound current reference to {target_rel}"), refs)
+
+    def test_retention_receipt_validation_requires_candidate_graph_and_source_hash_posture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            receipt_rel = "project/verification/retention-receipts/bad.json"
+            receipt_path = root / receipt_rel
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            target_rel = "project/verification/agent-runs/stale-run.md"
+            uncovered_rel = "project/verification/agent-runs/uncovered-run.md"
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.retention-receipt.v1",
+                        "record_type": "retention-receipt",
+                        "receipt_id": "bad",
+                        "action": "retire",
+                        "policy": "agent-runs-obsolete",
+                        "reason": "legacy incomplete receipt",
+                        "target_paths": [target_rel, uncovered_rel],
+                        "non_authority": "repo-visible retention evidence only; cannot approve lifecycle, Git, archive, release, or target-repo acceptance",
+                        "candidates": [
+                            {
+                                "path": target_rel,
+                                "classification": "retire-from-active-agent-run-checks",
+                                "recommended_action": "retire",
+                                "git_status": "untracked",
+                                "inbound_refs": [],
+                                "expected_warning_delta": "retire stale agent-run record",
+                                "risks": [],
+                            },
+                            {
+                                "path": target_rel,
+                                "classification": "retire-from-active-agent-run-checks",
+                                "recommended_action": "retire",
+                                "git_status": "untracked",
+                                "inbound_refs": [],
+                                "expected_warning_delta": "retire stale agent-run record",
+                                "risks": [],
+                                "source_hash_posture": "invented",
+                                "source_hash_entries": [123, "not-a-source-hash-entry"],
+                                "source_hash_diagnostics": [
+                                    {
+                                        "severity": "debug",
+                                        "code": "retention-source-hash-weird",
+                                        "message": "bad diagnostic",
+                                        "entry": 123,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "check", "--focus", "retention"]), 0)
+            rendered = output.getvalue()
+            self.assertIn("check-retention-receipt-malformed", rendered)
+            self.assertIn("source_hash_posture", rendered)
+            self.assertIn("source_hash_diagnostics", rendered)
+            self.assertIn("unsupported source_hash_posture", rendered)
+            self.assertIn("source_hash_entry 0 must be a non-empty string", rendered)
+            self.assertIn("source_hash_entry 1 has unsupported format", rendered)
+            self.assertIn("source_hash_diagnostic 0 has unsupported severity", rendered)
+            self.assertIn("source_hash_diagnostic 0 has unsupported code", rendered)
+            self.assertIn("source_hash_diagnostic 0 entry must be a string", rendered)
+            self.assertIn("target_paths entry has no reviewed candidate graph record", rendered)
 
     def test_retention_purge_refuses_referenced_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13371,8 +13717,11 @@ class CliTests(unittest.TestCase):
     def test_coordination_handoff_accepted_legacy_route_aliases_are_read_only_infos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
+            claim_dir = root / "project/verification/work-claims"
             handoff_dir = root / "project/verification/handoffs"
+            claim_dir.mkdir(parents=True, exist_ok=True)
             handoff_dir.mkdir(parents=True, exist_ok=True)
+            (root / "project/implementation-plan.md").write_text("# Active plan\n", encoding="utf-8")
             smoke_rel = "project/verification/top-level-smoke.md"
             (root / smoke_rel).write_text(
                 "---\n"
@@ -13381,6 +13730,27 @@ class CliTests(unittest.TestCase):
                 'docs_decision: "not-needed"\n'
                 "---\n"
                 "# Smoke\n\nordinary verification evidence\n",
+                encoding="utf-8",
+            )
+            claim_ref = "project/verification/work-claims/claim-backed-alias.json"
+            (root / claim_ref).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-backed-alias",
+                        "claim_kind": "implementation",
+                        "owner_role": "coder",
+                        "owner_actor": "codex",
+                        "execution_slice": "slice-claim-backed",
+                        "status": "released",
+                        "claimed_routes": ["agent-runs"],
+                        "claimed_paths": ["project/implementation-plan.md"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             (handoff_dir / "accepted-legacy-alias.json").write_text(
@@ -13403,6 +13773,33 @@ class CliTests(unittest.TestCase):
                         "evidence_refs": [smoke_rel],
                         "approval_packet_refs": [],
                         "claim_refs": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (handoff_dir / "accepted-claim-backed-legacy-alias.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.handoff-packet.v1",
+                        "record_type": "handoff-packet",
+                        "handoff_id": "accepted-claim-backed-legacy-alias",
+                        "status": "accepted",
+                        "accepted_by": "operator",
+                        "accepted_at_utc": "2026-06-17T00:00:00Z",
+                        "worker_id": "worker-claim-backed",
+                        "role_id": "reviewer",
+                        "execution_slice": "slice-claim-backed",
+                        "allowed_routes": ["evidence"],
+                        "write_scope": ["project/implementation-plan.md"],
+                        "stop_conditions": ["verification fails"],
+                        "context_budget": "compact packet",
+                        "required_outputs": ["review"],
+                        "evidence_refs": ["project/implementation-plan.md"],
+                        "approval_packet_refs": [],
+                        "claim_refs": [".\\project\\verification\\work-claims\\claim-backed-alias.json"],
                     },
                     indent=2,
                     sort_keys=True,
