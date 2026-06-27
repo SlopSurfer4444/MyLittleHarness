@@ -25,6 +25,11 @@ nothing, apply copies `.codex/project-workflow.toml` to
 `.mylittleharness/project-workflow.toml`, preserves the legacy file, and
 refuses missing legacy files, divergent neutral manifests, symlinked targets,
 and root escapes. Use `--dry-run` before every mutating default command.
+The top-level help also points operators at
+`mylittleharness approval-decision --help` for the owner-decision route when a
+human-gate decision must be prepared or recorded. That route remains advanced
+and evidence-bound: it does not waive human authority or approve lifecycle,
+accepted-work, provider, credential, archive, Git, or release actions.
 
 ## Recovery and Lifecycle Commands
 

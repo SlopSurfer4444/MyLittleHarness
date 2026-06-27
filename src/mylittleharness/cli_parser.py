@@ -58,7 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mylittleharness",
         description="MyLittleHarness repo safety utility. Primary commands: init, check, repair, detach.",
-        epilog="Compatibility and advanced diagnostics remain available for recovery and transition.",
+        epilog=(
+            "Compatibility and advanced diagnostics remain available for recovery and transition. "
+            "Owner-decision route: run `mylittleharness approval-decision --help` to prepare or record "
+            "an owner decision bound to reviewed human-gate refs; it does not waive human authority or "
+            "approve lifecycle, accepted-work, provider, credential, archive, Git, or release actions."
+        ),
     )
     parser.add_argument("--root", default=None, help="Target workflow root. Defaults to the current directory.")
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="{init,check,repair,detach,...}")
