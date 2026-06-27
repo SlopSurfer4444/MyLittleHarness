@@ -5439,7 +5439,11 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
         return True
     if any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
         return bool(
-            _coherent_reviewed_local_vcs_checkpoint_paths(inventory, staged_paths)
+            _coherent_reviewed_local_vcs_checkpoint_paths(
+                inventory,
+                staged_paths,
+                prefer_staged_content=True,
+            )
             or _coherent_post_closeout_mixed_vcs_finalization_paths(
                 inventory,
                 staged_paths,
@@ -5600,7 +5604,7 @@ def _reviewed_local_vcs_checkpoint(inventory: Inventory, data: dict[str, object]
             blocked_reason="commit command is not a narrow local commit with a reviewed message option",
         )
     staged = _git_staged_paths_for_root(target_inventory.root)
-    paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, staged)
+    paths = _coherent_reviewed_local_vcs_checkpoint_paths(target_inventory, staged, prefer_staged_content=True)
     if not paths:
         paths = _coherent_delegated_neighbor_exact_file_checkpoint_paths(target_inventory, staged)
     if not paths:
@@ -6246,12 +6250,23 @@ def _is_reviewed_lifecycle_finalization_evidence_file(inventory: Inventory, path
     return False
 
 
-def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
+def _coherent_reviewed_local_vcs_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
+) -> set[str]:
     if _active_plan_ready_for_route_produced_lifecycle_git(inventory) and _coherent_route_produced_lifecycle_paths(inventory, paths):
         return _normalized_route_produced_lifecycle_paths(inventory, paths)
-    roadmap_promotion_paths = _coherent_roadmap_promotion_checkpoint_paths(inventory, paths)
+    roadmap_promotion_paths = _coherent_roadmap_promotion_checkpoint_paths(
+        inventory,
+        paths,
+        prefer_staged_content=prefer_staged_content,
+    )
     if roadmap_promotion_paths:
         return roadmap_promotion_paths
+    if _looks_like_roadmap_promotion_checkpoint_paths(inventory, paths):
+        return set()
     post_closeout_route_paths = _coherent_post_closeout_lifecycle_route_checkpoint_paths(inventory, paths)
     if not post_closeout_route_paths:
         post_closeout_route_paths = _coherent_minimal_post_closeout_lifecycle_route_checkpoint_paths_without_roadmap(
@@ -6697,10 +6712,15 @@ def _coherent_route_imported_research_checkpoint_paths(inventory: Inventory, pat
 
 
 def _coherent_roadmap_promotion_checkpoint_paths(
-    inventory: Inventory, paths: list[str] | tuple[str, ...]
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
 ) -> set[str]:
     state = inventory.state
     if not state or not state.exists:
+        return set()
+    if not _roadmap_promotion_checkpoint_posture_allows(inventory):
         return set()
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
@@ -6709,9 +6729,40 @@ def _coherent_roadmap_promotion_checkpoint_paths(
     incubation_paths = {path for path in normalized if _is_meta_feedback_incubation_route_path(path)}
     if roadmap_rel not in normalized or not incubation_paths or normalized != incubation_paths | {roadmap_rel}:
         return set()
-    if not all(_is_reviewed_roadmap_promoted_incubation_file(inventory, path) for path in incubation_paths):
+    if not all(
+        _is_reviewed_roadmap_promoted_incubation_file(
+            inventory,
+            path,
+            prefer_staged_content=prefer_staged_content,
+        )
+        for path in incubation_paths
+    ):
         return set()
     return normalized
+
+
+def _looks_like_roadmap_promotion_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+) -> bool:
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return False
+    roadmap_rel = "project/" + "roadmap.md"
+    incubation_paths = {path for path in normalized if _is_meta_feedback_incubation_route_path(path)}
+    return roadmap_rel in normalized and bool(incubation_paths) and normalized == incubation_paths | {roadmap_rel}
+
+
+def _roadmap_promotion_checkpoint_posture_allows(inventory: Inventory) -> bool:
+    state = inventory.state
+    if not state or not state.exists:
+        return False
+    plan_status = str(state.frontmatter.data.get("plan_status") or "").strip().casefold()
+    if plan_status == "none":
+        return True
+    if plan_status == "active":
+        return _active_plan_ready_for_route_produced_lifecycle_git(inventory)
+    return False
 
 
 def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
@@ -7535,32 +7586,123 @@ def _lifecycle_posture_allows_meta_feedback_checkpoint_stage(inventory: Inventor
     return False
 
 
-def _is_reviewed_roadmap_promoted_incubation_file(inventory: Inventory, path: str) -> bool:
+def _is_reviewed_roadmap_promoted_incubation_file(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> bool:
+    data = _reviewed_mlh_incubation_file_frontmatter(
+        inventory,
+        path,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if data is None:
+        return False
+    if _incubation_frontmatter_confirms_roadmap_promotion(data):
+        return True
+    return _roadmap_item_references_promoted_incubation(
+        inventory,
+        path,
+        prefer_staged_content=prefer_staged_content,
+    )
+
+
+def _reviewed_mlh_incubation_file_frontmatter(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> dict[str, object] | None:
     if not _is_source_incubation_route_path(path):
-        return False
-    route_path = _hook_route_file_path(inventory, path)
-    if route_path is None:
-        return False
+        return None
+    text = _route_file_text_for_checkpoint(
+        inventory,
+        path,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if text is None:
+        return None
     try:
-        if not route_path.is_file() or route_path.is_symlink():
-            return False
-        text = route_path.read_text(encoding="utf-8")
         frontmatter = parse_frontmatter(text)
-    except (OSError, UnicodeDecodeError):
-        return False
+    except ValueError:
+        return None
     if not frontmatter.has_frontmatter or frontmatter.errors:
-        return False
+        return None
     data = frontmatter.data
     source = str(data.get("source") or "").strip().casefold()
+    if source != "mylittleharness incubation route":
+        return None
+    return data
+
+
+def _incubation_frontmatter_confirms_roadmap_promotion(data: dict[str, object]) -> bool:
     related_roadmap = _normalize_hook_path(str(data.get("related_roadmap") or "")).casefold()
     related_item = str(data.get("related_roadmap_item") or "").strip()
     promoted_to = _normalize_hook_path(str(data.get("promoted_to") or "")).casefold()
     return (
-        source == "mylittleharness incubation route"
-        and related_roadmap == "project/roadmap.md"
+        related_roadmap == "project/roadmap.md"
         and bool(related_item)
         and promoted_to == "project/roadmap.md"
     )
+
+
+def _roadmap_item_references_promoted_incubation(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> bool:
+    text = _route_file_text_for_checkpoint(
+        inventory,
+        "project/roadmap.md",
+        prefer_staged_content=prefer_staged_content,
+    )
+    if text is None:
+        return False
+    try:
+        from .roadmap import _field_list, _field_scalar, _parse_roadmap_items_for_sync
+    except ImportError:
+        return False
+    parse_result = _parse_roadmap_items_for_sync(text)
+    (_start, _end, items), errors = parse_result
+    if errors:
+        return False
+    target = _normalize_hook_path(path).casefold()
+    for item in items.values():
+        fields = item.fields
+        status = _field_scalar(fields, "status").strip().casefold()
+        if status not in {"accepted", "active", "done"}:
+            continue
+        refs = {
+            _normalize_hook_path(_field_scalar(fields, "source_incubation")).casefold(),
+            _normalize_hook_path(_field_scalar(fields, "related_incubation")).casefold(),
+        }
+        refs.update(_normalize_hook_path(value).casefold() for value in _field_list(fields, "source_members"))
+        refs.discard("")
+        if target in refs:
+            return True
+    return False
+
+
+def _route_file_text_for_checkpoint(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> str | None:
+    clean = _normalize_hook_path(path)
+    if prefer_staged_content:
+        return _git_staged_file_text_for_root(inventory.root, clean)
+    route_path = _hook_route_file_path(inventory, clean)
+    if route_path is None:
+        return None
+    try:
+        if not route_path.is_file() or route_path.is_symlink():
+            return None
+        return route_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _is_reviewed_post_closeout_source_incubation_file(inventory: Inventory, path: str, archive_rel: str) -> bool:

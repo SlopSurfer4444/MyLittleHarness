@@ -38912,6 +38912,192 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
 
+    def test_hooks_pre_tool_allows_roadmap_promotion_checkpoint_from_roadmap_source_members(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            roadmap_rel = "project/" + "roadmap.md"
+            anchor_rel = "project/" + "plan-incubation/archive-plan-checkpoint-commit-root-guidance-mismatch.md"
+            sibling_rel = "project/" + "plan-incubation/neighbor-post-closeout-lifecycle-checkpoint-adapter-overblock.md"
+            unpromoted_rel = "project/" + "plan-incubation/unpromoted.md"
+            (root / anchor_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / roadmap_rel).write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Route Authority Classifier Deepening\n\n"
+                "- `id`: `route-authority-classifier-deepening`\n"
+                "- `status`: `accepted`\n"
+                f"- `source_incubation`: `{anchor_rel}`\n"
+                f"- `source_members`: `[\"{anchor_rel}\", \"{sibling_rel}\"]`\n",
+                encoding="utf-8",
+            )
+
+            def write_incubation_note(rel: str) -> None:
+                (root / rel).write_text(
+                    "---\n"
+                    f'topic: "{Path(rel).stem}"\n'
+                    'status: "incubating"\n'
+                    'source: "MyLittleHarness incubation route"\n'
+                    "---\n"
+                    f"# {Path(rel).stem}\n",
+                    encoding="utf-8",
+                )
+
+            write_incubation_note(anchor_rel)
+            write_incubation_note(sibling_rel)
+            write_incubation_note(unpromoted_rel)
+
+            allowed_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", roadmap_rel, anchor_rel, sibling_rel]),
+                }
+            )
+            blocked_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", roadmap_rel, anchor_rel, unpromoted_rel]),
+                }
+            )
+
+            allowed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], allowed_input)
+            blocked_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], blocked_input)
+
+            allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            blocked_codes = {finding["code"] for finding in blocked_payload["findings"]}
+            self.assertFalse(allowed_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", allowed_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", allowed_codes)
+            self.assertTrue(blocked_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", blocked_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", blocked_codes)
+
+    def test_hooks_pre_tool_blocks_roadmap_promotion_checkpoint_while_active_phase_pending(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            roadmap_rel = "project/" + "roadmap.md"
+            note_rel = "project/" + "plan-incubation/roadmap-pending-note.md"
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / roadmap_rel).write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Pending Note\n\n"
+                "- `id`: `pending-note`\n"
+                "- `status`: `accepted`\n"
+                f"- `source_members`: `[\"{note_rel}\"]`\n",
+                encoding="utf-8",
+            )
+            (root / note_rel).write_text(
+                "---\n"
+                'topic: "roadmap-pending-note"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# Roadmap Pending Note\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", roadmap_rel, note_rel]),
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+
+    def test_hooks_pre_tool_validates_roadmap_promotion_commit_against_staged_blobs(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            roadmap_rel = "project/" + "roadmap.md"
+            note_rel = "project/" + "plan-incubation/staged-roadmap-note.md"
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            (root / note_rel).parent.mkdir(parents=True, exist_ok=True)
+            roadmap_text = (
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Staged Note\n\n"
+                "- `id`: `staged-note`\n"
+                "- `status`: `accepted`\n"
+                f"- `source_members`: `[\"{note_rel}\"]`\n"
+            )
+            valid_note_text = (
+                "---\n"
+                'topic: "staged-roadmap-note"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# Staged Roadmap Note\n"
+            )
+            invalid_note_text = (
+                "---\n"
+                'topic: "staged-roadmap-note"\n'
+                'status: "incubating"\n'
+                'source: "manual note"\n'
+                "---\n"
+                "# Staged Roadmap Note\n"
+            )
+            (root / roadmap_rel).write_text(roadmap_text, encoding="utf-8")
+            (root / note_rel).write_text(valid_note_text, encoding="utf-8")
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "commit", "-F", str(message_file)]),
+                }
+            )
+
+            def staged_paths(git_root: Path) -> tuple[str, ...]:
+                if git_root.resolve() == root.resolve():
+                    return (roadmap_rel, note_rel)
+                return ()
+
+            def invalid_staged_text(git_root: Path, rel_path: str) -> str | None:
+                if git_root.resolve() != root.resolve():
+                    return None
+                if rel_path == roadmap_rel:
+                    return roadmap_text
+                if rel_path == note_rel:
+                    return invalid_note_text
+                return None
+
+            def valid_staged_text(git_root: Path, rel_path: str) -> str | None:
+                if git_root.resolve() != root.resolve():
+                    return None
+                if rel_path == roadmap_rel:
+                    return roadmap_text
+                if rel_path == note_rel:
+                    return valid_note_text
+                return None
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=invalid_staged_text),
+            ):
+                invalid_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=valid_staged_text),
+            ):
+                valid_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            invalid_codes = {finding["code"] for finding in invalid_payload["findings"]}
+            valid_codes = {finding["code"] for finding in valid_payload["findings"]}
+            self.assertTrue(invalid_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", invalid_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", invalid_codes)
+            self.assertFalse(valid_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", valid_codes)
+
     def test_hooks_pre_tool_allows_exact_route_created_meta_feedback_note_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
