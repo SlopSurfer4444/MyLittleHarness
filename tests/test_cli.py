@@ -34994,6 +34994,49 @@ class CliTests(unittest.TestCase):
         )
         return state_rel, roadmap_rel, archive_rel
 
+    def _write_reviewed_standalone_archive_plan_checkpoint_fixture(self, root: Path) -> tuple[str, str]:
+        archive_rel = "project/" + "archive/plans/2026-06-27-route-created-research-checkpoint-savepoint-gap.md"
+        malformed_rel = "project/" + "archive/plans/2026-06-27-route-created-research-checkpoint-savepoint-gap-fake.md"
+        (root / archive_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / archive_rel).write_text(
+            "---\n"
+            'plan_id: "2026-06-27-route-created-research-checkpoint-savepoint-gap"\n'
+            'title: "Route-created Research Checkpoint Savepoint Gap"\n'
+            'status: "complete"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'phase_status: "complete"\n'
+            'docs_decision: "not-needed"\n'
+            "---\n"
+            "# Route-created Research Checkpoint Savepoint Gap\n\n"
+            "Route-applied archived plan checkpoint. This file is repo-visible evidence only; "
+            "it cannot approve lifecycle, archive, roadmap, broad Git staging, push, release, "
+            "provider routing, or target acceptance.\n\n"
+            "## MLH Closeout Writeback\n\n"
+            "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+            "- plan_id: 2026-06-27-route-created-research-checkpoint-savepoint-gap\n"
+            f"- archived_plan: {archive_rel}\n"
+            "- docs_decision: not-needed\n"
+            "- commit_decision: exact local checkpoint for this reviewed archived plan only\n"
+            "- residual_risk: broad lifecycle mixes, fake closeouts, unsafe archive/apply, push, tag, and release remain blocked\n"
+            "- work_result: route-applied closeout package is valid and check-clean\n"
+            "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+            encoding="utf-8",
+        )
+        (root / malformed_rel).write_text(
+            "---\n"
+            'plan_id: "2026-06-27-route-created-research-checkpoint-savepoint-gap-fake"\n'
+            'title: "Malformed Archive Plan"\n'
+            'status: "complete"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'phase_status: "complete"\n'
+            'docs_decision: "not-needed"\n'
+            "---\n"
+            "# Malformed Archive Plan\n\n"
+            "This has archive-plan frontmatter but no reviewed closeout writeback boundary.\n",
+            encoding="utf-8",
+        )
+        return archive_rel, malformed_rel
+
     def _write_reviewed_source_incubation_relationship_fixture(
         self, root: Path, archive_rel: str, *, archived_plan: str | None = None, retarget_only: bool = False
     ) -> str:
@@ -35796,6 +35839,177 @@ class CliTests(unittest.TestCase):
             self.assertTrue(malformed_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", malformed_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", malformed_codes)
+
+    def test_hooks_pre_tool_allows_standalone_archived_plan_checkpoint_commit_and_unstage(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            product_root = Path(tmp) / "product-source"
+            product_root.mkdir()
+            state_path = current_root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            target_root = make_live_root(Path(tmp) / "mlh-dev")
+            target_state = target_root / "project/project-state.md"
+            target_state.write_text(
+                target_state.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            archive_rel, malformed_rel = self._write_reviewed_standalone_archive_plan_checkpoint_fixture(target_root)
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("archive checkpoint\n", encoding="utf-8")
+            actual_stage_input = {
+                "toolName": "functions.shell_command",
+                "workdir": str(target_root),
+                "command": "git add -f -- " + archive_rel,
+            }
+            actual_commit_input = {
+                "toolName": "functions.shell_command",
+                "workdir": str(target_root),
+                "command": f"git commit -F {message_file}",
+            }
+            actual_restore_input = {
+                "toolName": "functions.shell_command",
+                "workdir": str(target_root),
+                "command": "git restore --staged -- " + archive_rel,
+            }
+            delegated_stage_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {"command": f"git -C {target_root} add -f -- {archive_rel}", "workdir": str(current_root)}
+                ),
+            }
+            delegated_commit_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {"command": f"git -C {target_root} commit -F {message_file}", "workdir": str(current_root)}
+                ),
+            }
+            delegated_restore_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {
+                        "command": f"git -C {target_root} restore --staged -- {archive_rel}",
+                        "workdir": str(current_root),
+                    }
+                ),
+            }
+            malformed_commit_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {"command": f"git -C {target_root} commit -F {message_file}", "workdir": str(current_root)}
+                ),
+            }
+            mixed_commit_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {"command": f"git -C {target_root} commit -F {message_file}", "workdir": str(current_root)}
+                ),
+            }
+
+            def staged_paths_for_inventory(target_inventory) -> tuple[str, ...]:
+                if target_inventory.root.resolve() == target_root.resolve():
+                    return (archive_rel,)
+                return ()
+
+            def staged_paths_for_root(root: Path) -> tuple[str, ...]:
+                if root.resolve() == target_root.resolve():
+                    return (archive_rel,)
+                return ()
+
+            def malformed_staged_paths_for_root(root: Path) -> tuple[str, ...]:
+                if root.resolve() == target_root.resolve():
+                    return (malformed_rel,)
+                return ()
+
+            def mixed_staged_paths_for_root(root: Path) -> tuple[str, ...]:
+                if root.resolve() == target_root.resolve():
+                    return (archive_rel, "project/project-state.md")
+                return ()
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths", side_effect=staged_paths_for_inventory),
+                patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths_for_root),
+            ):
+                actual_stage_payload = hook_event_payload(
+                    load_inventory(target_root), HOOK_PRE_TOOL_USE, [], json.dumps(actual_stage_input)
+                )
+                actual_commit_payload = hook_event_payload(
+                    load_inventory(target_root), HOOK_PRE_TOOL_USE, [], json.dumps(actual_commit_input)
+                )
+                actual_restore_payload = hook_event_payload(
+                    load_inventory(target_root), HOOK_PRE_TOOL_USE, [], json.dumps(actual_restore_input)
+                )
+                delegated_stage_payload = hook_event_payload(
+                    load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(delegated_stage_input)
+                )
+                delegated_commit_payload = hook_event_payload(
+                    load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(delegated_commit_input)
+                )
+                delegated_restore_payload = hook_event_payload(
+                    load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(delegated_restore_input)
+                )
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=malformed_staged_paths_for_root):
+                malformed_payload = hook_event_payload(
+                    load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(malformed_commit_input)
+                )
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=mixed_staged_paths_for_root):
+                mixed_payload = hook_event_payload(
+                    load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(mixed_commit_input)
+                )
+
+            actual_stage_codes = {finding["code"] for finding in actual_stage_payload["findings"]}
+            actual_commit_codes = {finding["code"] for finding in actual_commit_payload["findings"]}
+            actual_restore_codes = {finding["code"] for finding in actual_restore_payload["findings"]}
+            delegated_stage_codes = {finding["code"] for finding in delegated_stage_payload["findings"]}
+            delegated_commit_codes = {finding["code"] for finding in delegated_commit_payload["findings"]}
+            delegated_restore_codes = {finding["code"] for finding in delegated_restore_payload["findings"]}
+            malformed_codes = {finding["code"] for finding in malformed_payload["findings"]}
+            mixed_codes = {finding["code"] for finding in mixed_payload["findings"]}
+            delegated_messages = "\n".join(
+                str(finding["message"])
+                for payload in (delegated_stage_payload, delegated_commit_payload, delegated_restore_payload)
+                for finding in payload["findings"]
+            )
+            negative_messages = "\n".join(
+                str(finding["message"])
+                for payload in (malformed_payload, mixed_payload)
+                for finding in payload["findings"]
+            )
+
+            self.assertFalse(actual_stage_payload["block"])
+            self.assertFalse(actual_commit_payload["block"])
+            self.assertFalse(actual_restore_payload["block"])
+            self.assertFalse(delegated_stage_payload["block"])
+            self.assertFalse(delegated_commit_payload["block"])
+            self.assertFalse(delegated_restore_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", actual_stage_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", actual_commit_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-index-split", actual_restore_codes)
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", delegated_stage_codes)
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", delegated_commit_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-index-split", delegated_restore_codes)
+            self.assertIn(str(target_root.resolve()), delegated_messages)
+            self.assertNotIn(str(product_root.resolve()), delegated_messages)
+
+            self.assertTrue(malformed_payload["block"])
+            self.assertTrue(mixed_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", malformed_codes)
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", mixed_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", malformed_codes)
+            self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", mixed_codes)
+            self.assertNotIn(str(product_root.resolve()), negative_messages)
+
     def test_hooks_pre_tool_allows_neighbor_live_root_reviewed_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

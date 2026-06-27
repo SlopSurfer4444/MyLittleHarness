@@ -6315,6 +6315,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     deferred_package_paths = _coherent_deferred_route_package_checkpoint_paths(inventory, normalized)
     if deferred_package_paths:
         return deferred_package_paths
+    archive_plan_paths = _coherent_standalone_archive_plan_checkpoint_paths(inventory, normalized)
+    if archive_plan_paths:
+        return archive_plan_paths
     meta_feedback_paths = _coherent_meta_feedback_checkpoint_paths(inventory, normalized)
     if meta_feedback_paths:
         return meta_feedback_paths
@@ -6380,6 +6383,10 @@ def _coherent_delegated_neighbor_project_evidence_checkpoint_paths(inventory: In
         _is_reviewed_pending_approval_packet_file(inventory, path) for path in approval_packet_paths
     ):
         return set()
+    archive_plan_paths = {path for path in project_paths if _is_deferred_archive_plan_route_path(path)}
+    if archive_plan_paths and archive_plan_paths == project_paths:
+        if not all(_is_reviewed_standalone_archive_plan_checkpoint_file(inventory, path) for path in archive_plan_paths):
+            return set()
     incubation_paths = {
         path
         for path in project_paths
@@ -6647,6 +6654,25 @@ def _coherent_deferred_route_package_checkpoint_paths(inventory: Inventory, path
             return set()
         archive_sources.add(source_research)
     if not archive_sources <= research_paths:
+        return set()
+    return paths
+
+
+def _coherent_standalone_archive_plan_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+    archive_paths = {path for path in paths if _is_deferred_archive_plan_route_path(path)}
+    if not archive_paths or paths != archive_paths:
+        return set()
+    if not all(_is_reviewed_standalone_archive_plan_checkpoint_file(inventory, path) for path in archive_paths):
         return set()
     return paths
 
@@ -7338,6 +7364,30 @@ def _is_reviewed_post_closeout_archive_plan_file(inventory: Inventory, path: str
         and "commit_decision" in content
         and "residual_risk" in content
     )
+
+
+def _is_reviewed_standalone_archive_plan_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    if not _is_reviewed_post_closeout_archive_plan_file(inventory, path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    plan_id = str(frontmatter.data.get("plan_id") or "").strip()
+    if not plan_id or plan_id != Path(path).stem:
+        return False
+    archive_rel = _normalize_hook_path(path).casefold()
+    content = text.casefold()
+    archive_ref_markers = (
+        f"archived_plan: {archive_rel}",
+        f"archived_plan: `{archive_rel}`",
+        f'archived_plan: "{archive_rel}"',
+    )
+    return "work_result" in content and any(marker in content for marker in archive_ref_markers)
 
 
 def _roadmap_references_archived_plan(inventory: Inventory, archive_rel: str) -> bool:
