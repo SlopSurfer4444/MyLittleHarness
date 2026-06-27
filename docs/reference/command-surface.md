@@ -39,6 +39,7 @@ and root escapes. Use `--dry-run` before every mutating default command.
 | `research-import` | research provenance | yes | yes | writes one non-authority research artifact |
 | `research-distill` | research distillate | yes | yes | writes reviewed synthesis with quality and planning gates |
 | `research-compare` | research comparison | yes | yes | writes reviewed comparison and optional source cleanup |
+| `approval-decision` | owner-decision evidence | yes | yes | writes one append-only owner-decision JSON bound to approval-packet refs by hash; does not itself approve lifecycle, accepted-work, provider routing, credentials, archive, staging, commit, rollback, or release |
 | `evidence --receipt-refresh` | evidence maintenance | yes | yes plus proposal token | refreshes `source_hashes` only for an existing worker-run receipt JSON |
 | `evidence --retarget-ref` | evidence maintenance | yes | yes plus proposal token | retargets scoped provenance refs in existing route-owned evidence |
 | `incubate` | future idea/fix-candidate capture | yes | yes | writes non-authority incubation notes |

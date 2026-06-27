@@ -1473,7 +1473,7 @@ def _normalized_command_text(raw: str) -> str:
 
 def _looks_like_report_command_action(command: str) -> bool:
     return re.search(
-        r"\b(mylittleharness|memory-hygiene|meta-feedback|roadmap|writeback|repair|plan|check|projection|hooks|adapter|mlhd|intake|attachment-import|research-import|research-distill|evidence|claim|handoff|approval-packet|discover|reconcile|git|rg)\b",
+        r"\b(mylittleharness|memory-hygiene|meta-feedback|roadmap|writeback|repair|plan|check|projection|hooks|adapter|mlhd|intake|attachment-import|research-import|research-distill|evidence|claim|handoff|approval-packet|approval-decision|discover|reconcile|git|rg)\b",
         command or "",
     ) is not None
 
@@ -1652,7 +1652,7 @@ def _work_kind_for_command(command: str) -> str:
         "validate",
     }:
         return "verification"
-    if command in {"approval-packet", "handoff"}:
+    if command in {"approval-packet", "approval-decision", "handoff"}:
         return "coordination"
     if command == "attachment-import":
         return "evidence"

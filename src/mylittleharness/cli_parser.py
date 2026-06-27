@@ -294,6 +294,24 @@ def build_parser() -> argparse.ArgumentParser:
     approval_packet.add_argument("--input-ref", dest="input_refs", action="append", default=[], help="Root-relative input reference. May be repeated.")
     approval_packet.add_argument("--human-gate-condition", dest="human_gate_conditions", action="append", default=[], help="Human gate condition. May be repeated.")
     approval_packet.add_argument("--notes", help="Optional approval packet note.")
+    approval_decision = subparsers.add_parser(
+        "approval-decision",
+        help=argparse.SUPPRESS,
+        description="Advanced coordination helper: record explicit MLH-owned owner decisions bound to approval-packet evidence.",
+    )
+    approval_decision_mode = approval_decision.add_mutually_exclusive_group(required=True)
+    approval_decision_mode.add_argument("--dry-run", action="store_true", help="Preview an owner-decision record without writing files.")
+    approval_decision_mode.add_argument("--apply", action="store_true", help="Write one repo-visible owner-decision record in an eligible live operating root.")
+    approval_decision.add_argument("--decision-id", dest="decision_id", help="Stable decision id used as the JSON filename under project/decisions/owner-decisions/.")
+    approval_decision.add_argument("--owner-id", dest="owner_id", help="Human owner identity responsible for the decision.")
+    approval_decision.add_argument("--decision-intent", dest="decision_intent", help="Plain-language decision intent. Must not rely on SDK/session/provider success as approval.")
+    approval_decision.add_argument("--outcome", choices=("approved-for-lifecycle-route", "rejected", "needs-review", "blocked"), help="Explicit owner-decision outcome.")
+    approval_decision.add_argument("--approval-packet-ref", dest="approval_packet_refs", action="append", default=[], help="Root-relative approval packet ref under project/verification/approval-packets/. May be repeated.")
+    approval_decision.add_argument("--allowed-scope", dest="allowed_scopes", action="append", default=[], help="Narrow scope later routes may consume. May be repeated.")
+    approval_decision.add_argument("--forbidden-decision", dest="forbidden_decisions", action="append", default=[], help="Decision that remains explicitly not granted. May be repeated.")
+    approval_decision.add_argument("--follow-up-route", dest="follow_up_routes", action="append", default=[], help="Route expected to consume this decision later, such as transition or writeback. May be repeated.")
+    approval_decision.add_argument("--owner-attestation", dest="owner_attestation", help="Owner attestation text for the reviewed decision.")
+    approval_decision.add_argument("--notes", help="Optional owner-decision note.")
     review_token = subparsers.add_parser(
         "review-token",
         help=argparse.SUPPRESS,

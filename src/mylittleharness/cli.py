@@ -25,6 +25,12 @@ from .approval_packets import (
     approval_packet_dry_run_findings,
     make_approval_packet_request,
 )
+from .approval_decisions import (
+    approval_decision_apply_findings,
+    approval_decision_dry_run_findings,
+    approval_decision_status_findings,
+    make_approval_decision_request,
+)
 from .attachments import (
     attachment_import_apply_findings,
     attachment_import_dry_run_findings,
@@ -270,6 +276,7 @@ COMMANDS = (
     "claim",
     "handoff",
     "approval-packet",
+    "approval-decision",
     "review-token",
     "reconcile",
     "closeout",
@@ -302,6 +309,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "claim",
     "handoff",
     "approval-packet",
+    "approval-decision",
     "incubate",
     "incubation-reconcile",
     "intake",
@@ -1049,6 +1057,14 @@ def main(argv: list[str] | None = None) -> int:
         request = make_approval_packet_request(args)
         report_name = "approval-packet --apply" if args.apply else "approval-packet --dry-run"
         findings = approval_packet_apply_findings(inventory, request) if args.apply else approval_packet_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "approval-decision":
+        request = make_approval_decision_request(args)
+        report_name = "approval-decision --apply" if args.apply else "approval-decision --dry-run"
+        findings = approval_decision_apply_findings(inventory, request) if args.apply else approval_decision_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -2692,6 +2708,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
                 "Agents",
                 lambda: [
                     *reconcile_findings(inventory, "check-agents"),
+                    *approval_decision_status_findings(inventory, "check-agents-approval-decision"),
                     *coordination_evidence_identity_findings(inventory, "check-agents-coordination-evidence"),
                 ],
             ),
@@ -2733,6 +2750,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         ("Retention", retention_receipt_findings(inventory, "check-retention")),
         ("Work Claims", work_claim_status_findings(inventory, "check-work-claim")),
         ("Handoff Packets", handoff_packet_status_findings(inventory, "check-handoff-packet")),
+        ("Approval Decisions", approval_decision_status_findings(inventory, "check-approval-decision")),
         ("Coordination Evidence", coordination_evidence_identity_findings(inventory, "check-coordination-evidence")),
         ("Projection Cache", projection_cache_findings),
         ("Drift", check_drift_findings(inventory)),
@@ -3148,7 +3166,7 @@ def _section_named(sections: list[tuple[str, list[Finding]]], name: str) -> tupl
 def _suggestions(command: str, findings) -> list[str]:
     errors = [finding for finding in findings if finding.severity == "error"]
     warnings = [finding for finding in findings if finding.severity == "warn"]
-    dry_run_refusal = "" if command in {"approval-packet", "claim", "handoff", "task-session"} else _dry_run_refusal_suggestion(command, findings)
+    dry_run_refusal = "" if command in {"approval-packet", "approval-decision", "claim", "handoff", "task-session"} else _dry_run_refusal_suggestion(command, findings)
     if dry_run_refusal:
         return [dry_run_refusal]
     if command == "check":
@@ -3339,6 +3357,15 @@ def _suggestions(command: str, findings) -> list[str]:
         if is_approved_status:
             return ["approval-packet apply wrote one repo-visible human-gate evidence packet with status=approved; packet status cannot grant approval, transition existing packets, or approve lifecycle, archive, staging, commit, or release."]
         return ["approval-packet apply wrote only one repo-visible human-gate evidence packet; packet status cannot approve lifecycle, archive, staging, commit, or release."]
+    if command == "approval-decision":
+        is_dry_run = any(finding.code == "approval-decision-dry-run" for finding in findings)
+        if any(finding.severity == "error" for finding in findings):
+            if is_dry_run:
+                return ["approval-decision dry-run was refused before any owner-decision evidence was written."]
+            return ["approval-decision apply was refused before any owner-decision evidence was written."]
+        if is_dry_run:
+            return ["approval-decision dry-run reported the decision target, packet bindings, owner identity, and authority boundary without writing files."]
+        return ["approval-decision apply wrote one MLH-owned owner-decision record; later lifecycle, accepted-work, provider, credential, archive, staging, commit, and release routes still require explicit consumption and their own dry-run/apply guardrails."]
     if command == "review-token":
         if any(finding.severity == "error" for finding in findings):
             return ["review-token refused before token trust; refresh inputs and recompute before fan-in or apply review."]
@@ -3667,6 +3694,7 @@ def _dry_run_refusal_suggestion(command: str, findings) -> str:
         return ""
     subjects = {
         "approval-packet": "approval evidence",
+        "approval-decision": "owner-decision evidence",
         "claim": "work-claim evidence",
         "handoff": "handoff packet",
         "incubate": "incubation note",

@@ -40925,6 +40925,207 @@ class CliTests(unittest.TestCase):
             self.assertIn("does not send messages", rendered)
             self.assertIn("cannot authorize lifecycle transitions", rendered)
 
+    def test_approval_decision_records_owner_decision_without_approving_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            approval_ref = "project/verification/approval-packets/h10-owner.json"
+            approval_path = root / approval_ref
+            approval_path.parent.mkdir(parents=True)
+            packet_text = (
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.approval-packet.v1",
+                        "record_type": "approval-packet",
+                        "approval_id": "h10-owner",
+                        "requester": "codex",
+                        "subject": "H10 protected lifecycle owner decision",
+                        "requested_decision": "owner decision required before protected lifecycle movement",
+                        "gate_class": "lifecycle",
+                        "status": "approved",
+                        "input_refs": ["project/decisions/h10-prep.md"],
+                        "human_gate_conditions": ["owner reviews H10 packet separately"],
+                        "created_at_utc": "2099-01-01T00:00:00Z",
+                        "authority_boundary": "packet status is evidence only",
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            approval_path.write_text(packet_text, encoding="utf-8")
+            args = [
+                "--root",
+                str(root),
+                "approval-decision",
+                "--decision-id",
+                "h10-owner-decision",
+                "--owner-id",
+                "owner-operator",
+                "--decision-intent",
+                "Record explicit H10 owner decision for later MLH lifecycle-route dry-runs",
+                "--outcome",
+                "approved-for-lifecycle-route",
+                "--approval-packet-ref",
+                approval_ref,
+                "--allowed-scope",
+                "later transition dry-run may consume this owner-decision ref",
+                "--forbidden-decision",
+                "provider or credential approval",
+                "--forbidden-decision",
+                "actual Symphony H10 packet approval",
+                "--follow-up-route",
+                "transition",
+                "--owner-attestation",
+                "owner reviewed outside agent session",
+                "--notes",
+                "does not mark H10 accepted or done",
+            ]
+
+            before = snapshot_tree(root)
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main([*args, "--dry-run"])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("approval-decision-target", dry_rendered)
+            self.assertIn("approval-decision-packet-evidence-only", dry_rendered)
+            self.assertIn("approval-decision dry-run reported the decision target", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main([*args, "--apply"])
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertIn("approval-decision-written", apply_rendered)
+            decision_path = root / "project/decisions/owner-decisions/h10-owner-decision.json"
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            self.assertEqual("mylittleharness.approval-decision.v1", decision["schema"])
+            self.assertEqual("approval-decision", decision["record_type"])
+            self.assertEqual("approved-for-lifecycle-route", decision["outcome"])
+            self.assertEqual(approval_ref, decision["approval_packet_bindings"][0]["ref"])
+            self.assertEqual(hashlib.sha256(packet_text.encode("utf-8")).hexdigest(), decision["approval_packet_bindings"][0]["sha256"])
+            self.assertIn("approval packets, relay transport, session-active work, SDK/provider success", decision["authority_boundary"])
+            self.assertIn("provider, and credential routes must require an explicit owner-decision ref", decision["downstream_consumption"])
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check", "--focus", "agents"])
+            check_rendered = check_output.getvalue()
+            self.assertEqual(check_code, 0)
+            self.assertIn("check-agents-approval-decision-record", check_rendered)
+            self.assertIn("later lifecycle routes must consume this record explicitly", check_rendered)
+
+    def test_approval_decision_refuses_false_authority_inputs_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            packet_dir = root / "project/verification/approval-packets"
+            packet_dir.mkdir(parents=True)
+            (packet_dir / "stale.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.approval-packet.v1",
+                        "record_type": "approval-packet",
+                        "approval_id": "stale",
+                        "requester": "codex",
+                        "subject": "stale owner packet",
+                        "requested_decision": "owner review",
+                        "gate_class": "lifecycle",
+                        "status": "pending",
+                        "created_at_utc": "2000-01-01T00:00:00Z",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (packet_dir / "fresh.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.approval-packet.v1",
+                        "record_type": "approval-packet",
+                        "approval_id": "fresh",
+                        "requester": "codex",
+                        "subject": "fresh owner packet",
+                        "requested_decision": "owner review",
+                        "gate_class": "lifecycle",
+                        "status": "pending",
+                        "created_at_utc": "2099-01-01T00:00:00Z",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            base_args = [
+                "--root",
+                str(root),
+                "approval-decision",
+                "--dry-run",
+                "--decision-id",
+                "bad-decision",
+                "--owner-id",
+                "owner-operator",
+                "--decision-intent",
+                "Record explicit owner decision for later lifecycle dry-runs",
+                "--outcome",
+                "approved-for-lifecycle-route",
+                "--approval-packet-ref",
+                "project/verification/approval-packets/fresh.json",
+                "--allowed-scope",
+                "later transition dry-run may consume this owner-decision ref",
+                "--forbidden-decision",
+                "provider or credential approval remains forbidden",
+                "--owner-attestation",
+                "owner reviewed outside agent session",
+            ]
+            def with_option(args: list[str], option: str, value: str) -> list[str]:
+                updated = list(args)
+                updated[updated.index(option) + 1] = value
+                return updated
+
+            cases = [
+                (
+                    [item for item in base_args if item not in {"--owner-id", "owner-operator"}],
+                    "--owner-id is required",
+                ),
+                (
+                    with_option(base_args, "--approval-packet-ref", "project/verification/approval-packets/stale.json"),
+                    "pending approval packet ref is stale",
+                ),
+                (
+                    with_option(base_args, "--approval-packet-ref", "project/verification/approval-packets/missing.json"),
+                    "approval packet ref is missing",
+                ),
+                (
+                    with_option(base_args, "--approval-packet-ref", "project/verification/session-active-work/session.json"),
+                    "--approval-packet-ref must point to project/verification/approval-packets/*.json",
+                ),
+                (
+                    [item if item != "owner-operator" else "sdk-runtime" for item in base_args],
+                    "--owner-id must identify a human or owner authority",
+                ),
+                (
+                    [item if item != "later transition dry-run may consume this owner-decision ref" else "provider credential approval for SDK runtime" for item in base_args],
+                    "--allowed-scope cannot grant provider, credential",
+                ),
+                (
+                    [item if item != "Record explicit owner decision for later lifecycle dry-runs" else "Use session-active SDK success as owner approval" for item in base_args],
+                    "--decision-intent cannot use session-active, SDK, runtime, provider, or verifier success as owner approval",
+                ),
+            ]
+            for args, expected in cases:
+                with self.subTest(expected=expected):
+                    before = snapshot_tree(root)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(args)
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("approval-decision-validation-posture", rendered)
+                    self.assertIn(expected, rendered)
+                    self.assertFalse((root / "project/decisions/owner-decisions/bad-decision.json").exists())
+
     def test_adapter_client_config_reports_default_active_mcp_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
