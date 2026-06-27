@@ -5545,6 +5545,7 @@ class CliTests(unittest.TestCase):
         cases = (
             ("--related-plan", "../outside.md"),
             ("--source-member", "C:/outside.md"),
+            ("--source-member", "project/decisions/downstream-decision.md"),
         )
         for flag, value in cases:
             with self.subTest(flag=flag):
@@ -5571,6 +5572,8 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(code, 2)
                     self.assertEqual(before, snapshot_tree(root))
                     self.assertIn("intake-refused", output.getvalue())
+                    if value.startswith("project/decisions/"):
+                        self.assertIn("source_members must point to an attachment, draft, incubation, research, or verification route", output.getvalue())
 
     def test_intake_apply_accepts_research_prompt_feature_idea_into_live_incubation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -18627,6 +18630,36 @@ class CliTests(unittest.TestCase):
             self.assertIn('derived_from: "manual export"', text)
             self.assertIn("imported_text sha256=", text)
             self.assertIn("Promotion into specs, plans, or project state requires", text)
+
+    def test_research_import_apply_refuses_invalid_source_member_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "research-import",
+                        "--apply",
+                        "--title",
+                        "Invalid Source Member",
+                        "--text",
+                        "Verdict: evidence only.",
+                        "--target",
+                        "project/research/invalid-source-member.md",
+                        "--source-member",
+                        "project/decisions/downstream-decision.md",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-refused", rendered)
+            self.assertIn("source_members must point to an attachment, draft, incubation, research, or verification route", rendered)
 
     def test_research_import_adopt_existing_apply_writes_route_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

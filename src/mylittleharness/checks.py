@@ -131,8 +131,7 @@ from .routes import (
     legacy_route_alias_target,
     lifecycle_route_rows,
     normalize_route_path,
-    route_destination_matches,
-    route_destination_policy_for_field,
+    route_destination_problem,
     route_id_is_known,
 )
 from .writeback import (
@@ -13294,27 +13293,13 @@ def _route_metadata_destination_finding(surface: Surface, key: str, rel_path: st
             )
         return None
 
-    policy = route_destination_policy_for_field(key, owner_route_id=surface.memory_route)
-    if policy is None:
+    problem = route_destination_problem(key, rel_path, owner_route_id=surface.memory_route)
+    if problem is None:
         return None
-    if route_destination_matches(policy, rel_path):
-        return None
-    if key == "source_members" and rel_path.casefold().startswith("output/"):
-        return Finding(
-            "warn",
-            "route-metadata-destination",
-            (
-                f"{surface.rel_path} source_members must point to route-owned source evidence, not raw generated "
-                f"output; use output_refs on agent-run/verification evidence, or import the artifact under "
-                f"project/verification or project/attachments before referencing it: {rel_path}"
-            ),
-            surface.rel_path,
-            line,
-        )
     return Finding(
         "warn",
         "route-metadata-destination",
-        f"{surface.rel_path} {key} must point to {policy.label}: {rel_path}",
+        f"{surface.rel_path} {problem}",
         surface.rel_path,
         line,
     )
@@ -13965,6 +13950,10 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
         conflict = root_relative_path_conflict(source_member)
         if conflict:
             errors.append(Finding("error", "intake-refused", f"--source-member must be a root-relative route path: {conflict}", source_member))
+            continue
+        destination_problem = route_destination_problem("source_members", source_member, owner_route_id="verification")
+        if destination_problem:
+            errors.append(Finding("error", "intake-refused", f"--source-member {destination_problem}", source_member))
     if not apply and request.target and not advice.apply_allowed:
         errors.append(Finding("error", "intake-refused", _intake_ambiguous_target_message(request, advice), request.target))
     if apply:
@@ -13983,6 +13972,9 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
         errors.extend(_intake_target_errors(inventory, request, advice, apply))
         if request.update_existing_metadata:
             errors.extend(_intake_existing_metadata_errors(inventory, request, advice))
+        elif advice.route_id == "verification" and not request.source_members:
+            _, source_members = _intake_verification_metadata_values(inventory, request, advice)
+            errors.extend(_intake_source_members_destination_errors(source_members))
     if apply and errors:
         errors.extend(_intake_incubation_fallback_findings(request, advice))
     return errors
@@ -14079,6 +14071,23 @@ def _intake_existing_metadata_errors(inventory: Inventory, request: IntakeReques
         conflict = root_relative_path_conflict(source_member)
         if conflict:
             errors.append(Finding("error", "intake-refused", f"computed source_members entry must be a root-relative route path: {conflict}", source_member))
+            continue
+        destination_problem = route_destination_problem("source_members", source_member, owner_route_id="verification")
+        if destination_problem:
+            errors.append(Finding("error", "intake-refused", f"computed source_members entry {destination_problem}", source_member))
+    return errors
+
+
+def _intake_source_members_destination_errors(source_members: tuple[str, ...]) -> list[Finding]:
+    errors: list[Finding] = []
+    for source_member in source_members:
+        conflict = root_relative_path_conflict(source_member)
+        if conflict:
+            errors.append(Finding("error", "intake-refused", f"computed source_members entry must be a root-relative route path: {conflict}", source_member))
+            continue
+        destination_problem = route_destination_problem("source_members", source_member, owner_route_id="verification")
+        if destination_problem:
+            errors.append(Finding("error", "intake-refused", f"computed source_members entry {destination_problem}", source_member))
     return errors
 
 

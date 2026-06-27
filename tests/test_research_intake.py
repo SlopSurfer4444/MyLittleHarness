@@ -103,6 +103,82 @@ class ResearchIntakeTests(unittest.TestCase):
             self.assertIn(f"- source_members: `{source_rel}`", text)
             self.assertIn(f"{source_rel} sha256=", text)
 
+    def test_research_import_refuses_invalid_source_members_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            invalid_rel = "project/decisions/downstream-decision.md"
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    "Invalid Source Member",
+                    "Imported synthesis.",
+                    target="project/research/invalid-source-member.md",
+                    source_members=(invalid_rel,),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-refused", rendered)
+            self.assertIn("--source-member source_members must point to an attachment, draft, incubation, research, or verification route", rendered)
+            self.assertFalse((root / "project/research/invalid-source-member.md").exists())
+
+    def test_research_import_dry_run_uses_route_metadata_source_member_guidance_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            findings = research_import_dry_run_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    "Generated Output Source Member",
+                    "Imported synthesis.",
+                    target="project/research/generated-output-source-member.md",
+                    source_members=("output/run-result.json",),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-dry-run", rendered)
+            self.assertIn("source_members must point to route-owned source evidence, not raw generated output", rendered)
+            self.assertIn("use output_refs on agent-run/verification evidence", rendered)
+            self.assertFalse((root / "project/research/generated-output-source-member.md").exists())
+
+    def test_adopt_existing_refuses_invalid_source_members_without_repairing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = root / "project/research/imported.md"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                "---\n"
+                'status: "imported"\n'
+                'title: "Imported"\n'
+                "source_members:\n"
+                '  - "project/verification/agent-runs/downstream.md"\n'
+                "---\n"
+                "# Imported\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    None,
+                    None,
+                    target="project/research/imported.md",
+                    adopt_existing=True,
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("research-import-refused", rendered)
+            self.assertIn("--source-member source_members must point to an attachment, draft, incubation, research, or verification route", rendered)
+
     def test_apply_from_attachment_writes_research_handoff_with_attachment_source_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))

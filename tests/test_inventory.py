@@ -179,6 +179,7 @@ class InventoryTests(unittest.TestCase):
                 'archived_to: "project/research/archive.md"\n'
                 'related_research: "../outside.md"\n'
                 'source_incubation: ["project/plan-incubation/missing.md"]\n'
+                'source_members: ["project/decisions/current.md"]\n'
                 "---\n"
                 "# Bad\n",
                 encoding="utf-8",
@@ -216,6 +217,14 @@ class InventoryTests(unittest.TestCase):
                     finding.source == "project/adrs/bad.md"
                     and finding.code == "route-metadata-destination"
                     and "related_adr must point to an ADR route" in finding.message
+                    for finding in warnings
+                )
+            )
+            self.assertTrue(
+                any(
+                    finding.source == "project/research/bad.md"
+                    and finding.code == "route-metadata-destination"
+                    and "source_members must point to an attachment, draft, incubation, research, or verification route" in finding.message
                     for finding in warnings
                 )
             )

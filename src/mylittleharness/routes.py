@@ -396,6 +396,21 @@ def route_destination_matches(policy: RouteDestinationPolicy, rel_path: str) -> 
     return route_id in policy.route_ids or any(normalized.startswith(prefix) for prefix in policy.path_prefixes)
 
 
+def route_destination_problem(field: str, rel_path: str, *, owner_route_id: str = "") -> str | None:
+    key = str(field or "").strip()
+    policy = route_destination_policy_for_field(key, owner_route_id=owner_route_id)
+    if policy is None or route_destination_matches(policy, rel_path):
+        return None
+    normalized = normalize_route_path(rel_path)
+    if key == "source_members" and normalized.casefold().startswith("output/"):
+        return (
+            "source_members must point to route-owned source evidence, not raw generated output; "
+            "use output_refs on agent-run/verification evidence, or import the artifact under "
+            f"project/verification or project/attachments before referencing it: {normalized}"
+        )
+    return f"{key} must point to {policy.label}: {normalized}"
+
+
 def _known_doc_target_alternates(rel: str) -> tuple[str, ...]:
     normalized = normalize_route_path(rel)
     alternates: list[str] = []

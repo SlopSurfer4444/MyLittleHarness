@@ -15,6 +15,7 @@ from .models import Finding
 from .parsing import parse_frontmatter
 from .reporting import RouteWriteEvidence, route_write_findings
 from .root_boundary import source_path_boundary_violation
+from .routes import route_destination_problem
 from .research_distill import (
     DISCOVERY_PACKET_SCHEMA,
     DISCOVERY_PACKET_SOURCE_TYPE,
@@ -504,9 +505,7 @@ def _research_import_preflight_errors(
         errors.append(Finding("error", "research-import-refused", f"target {_root_relative_path_conflict(request.target)}", request.target))
     if request.related_prompt and _root_relative_path_conflict(request.related_prompt):
         errors.append(Finding("error", "research-import-refused", f"related prompt {_root_relative_path_conflict(request.related_prompt)}", request.related_prompt))
-    for source_member in request.source_members:
-        if _root_relative_path_conflict(source_member):
-            errors.append(Finding("error", "research-import-refused", f"source member {_root_relative_path_conflict(source_member)}", source_member))
+    errors.extend(_research_import_source_member_errors(request.source_members))
     if request.source_attachment:
         errors.extend(_source_attachment_preflight_errors(inventory, request.source_attachment))
 
@@ -572,6 +571,18 @@ def _research_import_preflight_errors(
     return errors
 
 
+def _research_import_source_member_errors(source_members: tuple[str, ...]) -> list[Finding]:
+    errors: list[Finding] = []
+    for source_member in source_members:
+        if _root_relative_path_conflict(source_member):
+            errors.append(Finding("error", "research-import-refused", f"source member {_root_relative_path_conflict(source_member)}", source_member))
+            continue
+        destination_problem = route_destination_problem("source_members", source_member, owner_route_id="research")
+        if destination_problem:
+            errors.append(Finding("error", "research-import-refused", f"--source-member {destination_problem}", source_member))
+    return errors
+
+
 def _research_adoption_preflight_errors(target: ResearchImportTarget) -> list[Finding]:
     try:
         text = target.path.read_text(encoding="utf-8")
@@ -600,6 +611,10 @@ def _research_adoption_preflight_errors(target: ResearchImportTarget) -> list[Fi
                     target.rel_path,
                 )
             ]
+        existing_members = tuple(_frontmatter_string_values(frontmatter.data.get("source_members")))
+        errors = _research_import_source_member_errors(tuple(_dedupe((*existing_members, *target.source_members))))
+        if errors:
+            return errors
     return []
 
 
