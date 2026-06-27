@@ -255,6 +255,30 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         "phase handoff keeps the active plan open; archive-active-plan owns lifecycle close pointers, so do not pass explicit --active-phase or --last-archived-plan to the archive command",
     ),
     CommandIntent(
+        "terminal-active-plan-closeout",
+        "Close an honestly blocked, deferred, abandoned, or skipped active plan without converting it to complete.",
+        (
+            "blocked active plan closeout",
+            "blocked active plan",
+            "blocked plan closeout",
+            "archive blocked plan",
+            "close blocked plan",
+            "deferred active plan closeout",
+            "abandoned active plan closeout",
+            "terminal active plan closeout",
+            "unsuccessful active plan archive",
+            "plan blocked archive",
+            "honest blocked closeout",
+        ),
+        'mylittleharness --root <root> writeback --dry-run --archive-active-plan --phase-status <blocked|deferred|abandoned|skipped> --from-active-plan --roadmap-item <id> --roadmap-status <blocked|deferred|rejected|superseded> --docs-decision <updated|not-needed|uncertain> --state-writeback "<blocker evidence>" --verification "<review evidence>" --commit-decision "<text>" --next-state explicit-decision-required --carry-forward "<next owner/action>"',
+        (
+            'mylittleharness --root <root> writeback --apply --archive-active-plan --phase-status <blocked|deferred|abandoned|skipped> --from-active-plan --roadmap-item <id> --roadmap-status <blocked|deferred|rejected|superseded> --docs-decision <updated|not-needed|uncertain> --state-writeback "<blocker evidence>" --verification "<review evidence>" --commit-decision "<text>" --next-state explicit-decision-required --carry-forward "<next owner/action>"',
+            "mylittleharness --root <root> check",
+        ),
+        "live operating root with an active plan whose terminal status should remain blocked, deferred, abandoned, or skipped rather than complete",
+        "terminal closeout is a reviewed archive-active-plan writeback route; it preserves blocker/carry-forward evidence and cannot approve fake completion, source mutation, staging, commit, push, repair, or next-plan opening",
+    ),
+    CommandIntent(
         "archive-active-plan",
         "Archive a completed active plan through the bounded lifecycle write rail.",
         ("archive", "archive plan", "archive active plan", "completed plan", "mark roadmap done", "roadmap done"),
@@ -938,8 +962,11 @@ def command_suggestions_for_intent(intent: str, limit: int = 3) -> tuple[Command
     research_route_recovery_context = _research_route_recovery_context(normalized)
     coordination_packet_context = _coordination_packet_context(normalized)
     product_fixture_cleanup_context = _product_source_fixture_cleanup_context(normalized)
+    terminal_active_plan_closeout_context = _terminal_active_plan_closeout_context(normalized)
     for index, command_intent in enumerate(COMMAND_INTENTS):
         if product_fixture_cleanup_context and _product_fixture_cleanup_context_excludes_intent(command_intent.intent_id):
+            continue
+        if terminal_active_plan_closeout_context and _terminal_active_plan_closeout_context_excludes_intent(command_intent.intent_id):
             continue
         if docs_route_recovery_context and _docs_route_context_excludes_intent(normalized, command_intent.intent_id):
             continue
@@ -1145,6 +1172,22 @@ def _product_source_fixture_cleanup_context(normalized: str) -> bool:
 
 def _product_fixture_cleanup_context_excludes_intent(intent_id: str) -> bool:
     return intent_id in {"attachment-import-route"}
+
+
+def _terminal_active_plan_closeout_context(normalized: str) -> bool:
+    tokens = set(normalized.split())
+    terminal_terms = {"blocked", "deferred", "abandoned", "skipped", "unsuccessful"}
+    route_terms = {"active", "plan", "archive", "closeout", "close"}
+    return bool(tokens & terminal_terms) and bool(tokens & route_terms)
+
+
+def _terminal_active_plan_closeout_context_excludes_intent(intent_id: str) -> bool:
+    return intent_id in {
+        "archive-active-plan",
+        "cancel-accidental-plan-activation",
+        "phase-closeout-handoff",
+        "reviewed-transition",
+    }
 
 
 def _docs_route_context_excludes_intent(normalized: str, intent_id: str) -> bool:

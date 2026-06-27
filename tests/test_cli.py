@@ -1132,6 +1132,46 @@ class CliTests(unittest.TestCase):
             self.assertIn("--archive-active-plan --roadmap-item <id> --roadmap-status done", rendered)
             self.assertIn("do not pass explicit --active-phase", rendered)
 
+    def test_suggest_intent_routes_terminal_active_plan_closeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "blocked active plan closeout"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("terminal-active-plan-closeout", rendered)
+            self.assertIn("writeback --dry-run --archive-active-plan", rendered)
+            self.assertIn("--phase-status <blocked|deferred|abandoned|skipped>", rendered)
+            self.assertIn("--roadmap-status <blocked|deferred|rejected|superseded>", rendered)
+            self.assertIn("--next-state explicit-decision-required", rendered)
+            self.assertIn("cannot approve fake completion", rendered)
+            self.assertNotIn("plan-cancel", rendered)
+
+    def test_suggest_intent_routes_terminal_active_plan_closeout_aliases_without_complete_archive(self) -> None:
+        for query in ("archive blocked plan", "plan blocked archive", "unsuccessful active plan archive"):
+            with self.subTest(query=query):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = make_operating_root(Path(tmp))
+                    before = snapshot_tree(root)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "suggest", "--intent", query])
+
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("terminal-active-plan-closeout", rendered)
+                    self.assertIn("--phase-status <blocked|deferred|abandoned|skipped>", rendered)
+                    self.assertIn("--roadmap-status <blocked|deferred|rejected|superseded>", rendered)
+                    self.assertNotIn("command-suggest-match: archive-active-plan:", rendered)
+                    self.assertNotIn("--phase-status complete", rendered)
+                    self.assertNotIn("--roadmap-status done", rendered)
+                    self.assertNotIn("plan-cancel", rendered)
+
     def test_suggest_intent_routes_product_test_command_without_pytest_guesswork(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

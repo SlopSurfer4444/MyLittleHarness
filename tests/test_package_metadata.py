@@ -1009,6 +1009,7 @@ class PackageMetadataTests(unittest.TestCase):
             "open-active-plan",
             "cancel-accidental-plan-activation",
             "phase-closeout-handoff",
+            "terminal-active-plan-closeout",
             "archive-active-plan",
             "research-human-review-gate",
             "docs-route-recovery",
@@ -1030,6 +1031,34 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("writeback --dry-run --archive-active-plan", archive.first_safe_command)
         self.assertIn("--phase-status complete", archive.first_safe_command)
         self.assertIn("does not stage, commit, push", archive.boundary)
+
+        terminal = command_suggestions_for_intent("blocked active plan closeout", limit=1)[0]
+        self.assertEqual("terminal-active-plan-closeout", terminal.intent_id)
+        self.assertIn("writeback --dry-run --archive-active-plan", terminal.first_safe_command)
+        self.assertIn("--phase-status <blocked|deferred|abandoned|skipped>", terminal.first_safe_command)
+        self.assertIn("--next-state explicit-decision-required", terminal.first_safe_command)
+        self.assertIn("cannot approve fake completion", terminal.boundary)
+
+        for query in ("archive blocked plan", "plan blocked archive", "unsuccessful active plan archive"):
+            with self.subTest(query=query):
+                suggestions = command_suggestions_for_intent(query)
+                suggestion_ids = [suggestion.intent_id for suggestion in suggestions]
+                rendered = "\n".join(
+                    "\n".join(
+                        (
+                            suggestion.intent_id,
+                            suggestion.first_safe_command,
+                            " ".join(suggestion.follow_up_commands),
+                            suggestion.boundary,
+                        )
+                    )
+                    for suggestion in suggestions
+                )
+                self.assertEqual("terminal-active-plan-closeout", suggestion_ids[0])
+                self.assertNotIn("archive-active-plan", suggestion_ids)
+                self.assertNotIn("cancel-accidental-plan-activation", suggestion_ids)
+                self.assertNotIn("--phase-status complete", rendered)
+                self.assertNotIn("--roadmap-status done", rendered)
 
         audit = command_suggestions_for_intent("autonomous audit free swim", limit=1)[0]
         self.assertEqual("operator-audit-loop", audit.intent_id)
