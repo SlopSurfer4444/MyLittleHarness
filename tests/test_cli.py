@@ -31910,6 +31910,51 @@ class CliTests(unittest.TestCase):
             self.assertTrue(direct_stage_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", direct_stage_codes)
 
+    def test_hooks_pre_tool_allows_incubation_reconcile_dry_run_source_payload_shapes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/" + "plan-incubation/approval-packet-input-ref-hook-overblock.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "approval-packet-input-ref-hook-overblock"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                "---\n"
+                "# approval-packet-input-ref-hook-overblock\n\n"
+                "[MLH-Fix-Candidate] Route review source for incubation-reconcile dry-run.\n",
+                encoding="utf-8",
+            )
+            command = f"mylittleharness --root . incubation-reconcile --dry-run --source {source_rel}"
+            inputs = (
+                {"toolName": "functions.shell_command", "workdir": str(root), "command": command},
+                {
+                    "toolName": "functions.shell_command",
+                    "arguments": json.dumps({"workdir": str(root), "command": command}),
+                },
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"workdir": str(root), "command": command},
+                        }
+                    ],
+                },
+            )
+
+            for hook_input in inputs:
+                with self.subTest(hook_input=hook_input):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                    self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                    self.assertNotIn("hooks-policy-block-mlh-mutation-without-mode", finding_codes)
+
     def test_hooks_pre_tool_treats_replay_script_route_literals_as_fixture_context(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -33851,6 +33896,17 @@ class CliTests(unittest.TestCase):
                     ),
                 }
             )
+            python_filter_input = json.dumps(
+                {
+                    "toolName": "functions.shell_command",
+                    "workdir": str(root),
+                    "command": (
+                        command
+                        + " | python -c \"import json, sys; data=json.load(sys.stdin); "
+                        "print(data.get('summary', {}).get('status'))\""
+                    ),
+                }
+            )
 
             direct_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_input)
             arguments_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], arguments_input)
@@ -33862,6 +33918,9 @@ class CliTests(unittest.TestCase):
             powershell_summary_payload = hook_event_payload(
                 load_inventory(root), HOOK_PRE_TOOL_USE, [], powershell_summary_input
             )
+            python_filter_payload = hook_event_payload(
+                load_inventory(root), HOOK_PRE_TOOL_USE, [], python_filter_input
+            )
 
             for checked_payload in (
                 direct_payload,
@@ -33870,6 +33929,7 @@ class CliTests(unittest.TestCase):
                 pipeline_payload,
                 assignment_pipeline_payload,
                 powershell_summary_payload,
+                python_filter_payload,
             ):
                 finding_codes = {finding["code"] for finding in checked_payload["findings"]}
                 self.assertFalse(checked_payload["block"])
@@ -38471,6 +38531,8 @@ class CliTests(unittest.TestCase):
                 "decision is blocked by the Codex pre-tool hook when required Markdown input refs are supplied. "
                 "Suggested next action: allow approval-packet dry-run/apply commands to carry root-relative "
                 "input refs after route validation, while preserving blocks on direct lifecycle Markdown edits. "
+                "The note quotes hook output, product roots like C:\\AIDev\\MyLittleHarness, operator prompt "
+                "wording, and commands such as git add -- project/plan-incubation/file.md as report text only. "
                 "Blocked progress: yes.\n",
                 encoding="utf-8",
             )
@@ -38511,6 +38573,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", exact_codes)
             self.assertTrue(broad_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
+            self.assertNotIn("move-non-incubation-prompt", str(exact_payload["system_message"] or ""))
             self.assertTrue(bad_note_payload["block"])
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", bad_note_codes)
 
@@ -38663,7 +38726,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", tracked_codes)
             self.assertTrue(untracked_payload["block"])
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", untracked_codes)
-            self.assertIn("move-non-incubation-prompt", untracked_messages)
+            self.assertNotIn("move-non-incubation-prompt", untracked_messages)
 
     def test_hooks_pre_tool_blocks_partial_or_unpromoted_roadmap_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -38774,6 +38837,118 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", partial_codes)
             self.assertIn("next_safe_command=", partial_messages)
             self.assertIn(archive_rel, partial_messages)
+
+    def test_hooks_pre_tool_allows_pending_approval_packet_checkpoint_commit_and_unstage_in_actual_root(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            product_root = Path(tmp) / "product-source"
+            product_root.mkdir()
+            state_path = current_root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            target_root = make_live_root(Path(tmp) / "symphony")
+            target_state = target_root / "project/project-state.md"
+            target_state.write_text(
+                target_state.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            packet_rel = "project/" + "verification/approval-packets/h10-owner-decision.json"
+            approved_packet_rel = "project/" + "verification/approval-packets/h10-owner-decision-approved.json"
+            packet = {
+                "approval_id": "h10-owner-decision",
+                "authority_boundary": (
+                    "approval packets record reviewed intent only; this pending packet cannot approve "
+                    "lifecycle, Git, staging, commit, archive, release, or owner decisions"
+                ),
+                "gate_class": "lifecycle",
+                "human_gate_conditions": ["Owner decision is required before lifecycle acceptance."],
+                "input_refs": ["project/project-state.md"],
+                "record_type": "approval-packet",
+                "requested_decision": "Choose owner path; this packet does not approve the decision.",
+                "schema": "mylittleharness.approval-packet.v1",
+                "status": "pending",
+                "subject": "H10 owner decision",
+            }
+            packet_path = target_root / packet_rel
+            packet_path.parent.mkdir(parents=True, exist_ok=True)
+            packet_path.write_text(json.dumps(packet, sort_keys=True), encoding="utf-8")
+            approved_packet = dict(packet)
+            approved_packet["status"] = "approved"
+            (target_root / approved_packet_rel).write_text(json.dumps(approved_packet, sort_keys=True), encoding="utf-8")
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            commit_input = {
+                "toolName": "functions.shell_command",
+                "arguments": json.dumps(
+                    {"command": f"git -C {target_root} commit -F {message_file}", "workdir": str(current_root)}
+                ),
+            }
+            restore_input = {
+                "toolName": "multi_tool_use.parallel",
+                "tool_uses": [
+                    {
+                        "recipient_name": "functions.shell_command",
+                        "parameters": {
+                            "command": f"git -C {target_root} restore --staged -- {packet_rel}",
+                            "workdir": str(current_root),
+                        },
+                    }
+                ],
+            }
+            approved_commit_input = {
+                "toolName": "functions.shell_command",
+                "workdir": str(current_root),
+                "command": f"git -C {target_root} commit -F {message_file}",
+            }
+
+            def staged_paths(root: Path) -> tuple[str, ...]:
+                if root.resolve() == target_root.resolve():
+                    return (packet_rel,)
+                return ()
+
+            def approved_staged_paths(root: Path) -> tuple[str, ...]:
+                if root.resolve() == target_root.resolve():
+                    return (approved_packet_rel,)
+                return ()
+
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths):
+                commit_payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(commit_input))
+                restore_payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], json.dumps(restore_input))
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=approved_staged_paths):
+                approved_payload = hook_event_payload(
+                    load_inventory(current_root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(approved_commit_input),
+                )
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            restore_codes = {finding["code"] for finding in restore_payload["findings"]}
+            approved_codes = {finding["code"] for finding in approved_payload["findings"]}
+            commit_messages = "\n".join(str(finding["message"]) for finding in commit_payload["findings"])
+            restore_messages = "\n".join(str(finding["message"]) for finding in restore_payload["findings"])
+            approved_messages = "\n".join(str(finding["message"]) for finding in approved_payload["findings"])
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", commit_codes)
+            self.assertIn(str(target_root.resolve()), commit_messages)
+            self.assertFalse(restore_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-index-split", restore_codes)
+            self.assertIn(str(target_root.resolve()), restore_messages)
+            self.assertTrue(approved_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", approved_codes)
+            self.assertIn(str(target_root.resolve()), approved_messages)
+            self.assertNotIn(str(product_root.resolve()), approved_messages)
 
     def test_hooks_pre_tool_keeps_active_lifecycle_route_staging_blocked(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

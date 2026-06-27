@@ -143,6 +143,9 @@ READ_ONLY_MLH_REPORT_PIPELINE_FLAG_OPTIONS = {
 }
 READ_ONLY_MLH_REPORT_PIPELINE_COMMANDS = {
     "convertfrom-json",
+    "py",
+    "python",
+    "python.exe",
     "select-object",
 }
 READ_ONLY_PRODUCT_SOURCE_INSPECTION_FORBIDDEN_TOKENS = {
@@ -414,6 +417,7 @@ MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
     "handoff",
     "intake",
     "incubate",
+    "incubation-reconcile",
     "memory-hygiene",
     "meta-feedback",
     "plan",
@@ -2512,18 +2516,23 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     ):
         next_safe = _git_mutation_next_safe_command(inventory, command_data, command)
         if reviewed_local_vcs_checkpoint.blocked_reason:
+            checkpoint_root = reviewed_local_vcs_checkpoint.root
+            checkpoint_root_text = str(checkpoint_root.resolve()) if checkpoint_root else "<actual-root>"
+            checkpoint_git_prefix = "git -C " + shell_arg(checkpoint_root_text) if checkpoint_root else "git -C <actual-root>"
             git_message = (
                 "blocked reviewed local VCS checkpoint because "
                 f"{reviewed_local_vcs_checkpoint.blocked_reason}; only exact existing MLH route/evidence files "
                 "or exact eligible target files "
                 "in the actual command workdir/root are allowed, and hook output cannot approve push, release, "
                 "reset, clean, broad add, or authority decisions; "
+                f"actual_command_root={checkpoint_root_text}; "
                 "safe_pattern=stage ordinary source/test files first by exact path, then stage route-produced "
                 "lifecycle/evidence/archive artifacts separately by exact path; if Git ignore rules hide a "
-                "route-created artifact, use git -C <actual-root> add -f -- <exact-route-artifact> for that artifact only "
-                "(template: git -C <actual-root> add -f -- <exact-route-artifact-if-ignored>); "
-                "next_safe_command=git -C <actual-root> add -- <exact-route-files>; "
-                "git -C <actual-root> diff --cached --check; git -C <actual-root> commit -F <message-file>"
+                f"route-created artifact, use {checkpoint_git_prefix} add -f -- <exact-route-artifact> for that artifact only "
+                "(generic_template: git -C <actual-root> add -f -- <exact-route-artifact>); "
+                f"(template: {checkpoint_git_prefix} add -f -- <exact-route-artifact-if-ignored>); "
+                f"next_safe_command={checkpoint_git_prefix} add -- <exact-route-files>; "
+                f"{checkpoint_git_prefix} diff --cached --check; {checkpoint_git_prefix} commit -F <message-file>"
             )
         else:
             split_step_hint = (
@@ -4551,6 +4560,8 @@ def _is_read_only_mlh_report_pipeline_segment(tokens: list[str]) -> bool:
         return False
     if command_name == "convertfrom-json":
         return len(tokens) == 1
+    if command_name in {"py", "python", "python.exe"}:
+        return _is_read_only_python_filter_pipeline_segment(tokens)
     value_options = READ_ONLY_MLH_REPORT_PIPELINE_VALUE_OPTIONS.get(command_name, set())
     flag_options = READ_ONLY_MLH_REPORT_PIPELINE_FLAG_OPTIONS.get(command_name, set())
     index = 1
@@ -4574,6 +4585,36 @@ def _is_read_only_mlh_report_pipeline_segment(tokens: list[str]) -> bool:
             return False
         index += 1
     return True
+
+
+def _is_read_only_python_filter_pipeline_segment(tokens: list[str]) -> bool:
+    if len(tokens) != 3 or _clean_token(tokens[1]) != "-c":
+        return False
+    lowered = str(tokens[2] or "").casefold()
+    forbidden = (
+        "add-content",
+        "apply_patch",
+        "check_call",
+        "check_output",
+        "eval(",
+        "exec(",
+        "git ",
+        "mylittleharness",
+        "open(",
+        "os.",
+        "pathlib",
+        "popen",
+        "remove-item",
+        "set-content",
+        "shutil",
+        "subprocess",
+        "sys.path",
+        "tee-object",
+        "unlink(",
+        "write(",
+        "write_text",
+    )
+    return not any(marker in lowered for marker in forbidden)
 
 
 def _mlh_subcommand_argument_tokens(command: str, subcommand: str) -> list[str]:
@@ -5728,6 +5769,8 @@ def _coherent_post_closeout_index_split_paths(
         return set()
     if not any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
         return set()
+    if selected == set(staged) and _coherent_checkpoint_path_set(inventory, selected):
+        return selected
     if _coherent_checkpoint_path_set(inventory, staged):
         return set()
     remaining = tuple(path for path in staged if path not in selected)
@@ -6227,6 +6270,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(inventory: Inventory, paths: l
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
     if not normalized:
         return set()
+    approval_packet_paths = {path for path in normalized if _verification_checkpoint_path_class(path) == "approval-packets"}
+    if approval_packet_paths and normalized == approval_packet_paths:
+        return normalized if all(_is_reviewed_pending_approval_packet_file(inventory, path) for path in approval_packet_paths) else set()
     agent_run_paths = {path for path in normalized if _is_agent_run_evidence_route_path(path)}
     if agent_run_paths and normalized == agent_run_paths:
         return normalized if all(_is_reviewed_agent_run_evidence_file(inventory, path) for path in agent_run_paths) else set()
@@ -6269,7 +6315,7 @@ def _coherent_delegated_neighbor_exact_file_checkpoint_paths(
     bootstrap_paths = _coherent_delegated_neighbor_bootstrap_checkpoint_paths(inventory, normalized)
     if bootstrap_paths:
         return bootstrap_paths
-    project_paths = _coherent_delegated_neighbor_project_evidence_checkpoint_paths(normalized)
+    project_paths = _coherent_delegated_neighbor_project_evidence_checkpoint_paths(inventory, normalized)
     if project_paths:
         return project_paths
     if any(_is_lifecycle_route_path(path) or path.startswith("project/") for path in normalized):
@@ -6277,7 +6323,7 @@ def _coherent_delegated_neighbor_exact_file_checkpoint_paths(
     return normalized
 
 
-def _coherent_delegated_neighbor_project_evidence_checkpoint_paths(paths: set[str]) -> set[str]:
+def _coherent_delegated_neighbor_project_evidence_checkpoint_paths(inventory: Inventory, paths: set[str]) -> set[str]:
     project_paths = {path for path in paths if path.startswith("project/")}
     if not project_paths:
         return set()
@@ -6286,6 +6332,13 @@ def _coherent_delegated_neighbor_project_evidence_checkpoint_paths(paths: set[st
     if project_paths & NEIGHBOR_PROJECT_EVIDENCE_EXACT_CORE_PATHS:
         return set()
     if not all(_delegated_neighbor_project_evidence_path_allowed(path) for path in project_paths):
+        return set()
+    approval_packet_paths = {
+        path for path in project_paths if _verification_checkpoint_path_class(path) == "approval-packets"
+    }
+    if approval_packet_paths and not all(
+        _is_reviewed_pending_approval_packet_file(inventory, path) for path in approval_packet_paths
+    ):
         return set()
     incubation_paths = {
         path
@@ -6996,6 +7049,7 @@ def _verification_checkpoint_path_class(path: str) -> str:
         return "agent-runs"
     prefixes = {
         "project/verification/handoffs/": "handoffs",
+        "project/verification/approval-packets/": "approval-packets",
         "project/verification/work-claims/": "work-claims",
         "project/verification/task-sessions/": "task-sessions",
         "project/verification/queue-runner-fixtures/": "queue-runner-fixtures",
@@ -7048,6 +7102,8 @@ def _is_reviewed_verification_checkpoint_file(inventory: Inventory, path: str) -
         return False
     if route_class == "agent-runs":
         return _is_reviewed_agent_run_evidence_file(inventory, path)
+    if route_class == "approval-packets":
+        return _is_reviewed_pending_approval_packet_file(inventory, path)
     if route_class == "queue-runner-fixtures":
         return _is_reviewed_queue_runner_fixture_file(inventory, path)
     route_path = _hook_route_file_path(inventory, path)
@@ -7072,6 +7128,32 @@ def _is_reviewed_verification_checkpoint_file(inventory: Inventory, path: str) -
     if str(data.get("schema") or "").strip() != schema:
         return False
     if str(data.get("record_type") or "").strip() != record_type:
+        return False
+    if _route_evidence_grants_authority(data):
+        return False
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True).casefold()
+    return _route_evidence_text_has_non_authority_boundary(encoded)
+
+
+def _is_reviewed_pending_approval_packet_file(inventory: Inventory, path: str) -> bool:
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".json":
+            return False
+        data = json.loads(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("schema") or "").strip() != "mylittleharness.approval-packet.v1":
+        return False
+    if str(data.get("record_type") or "").strip() != "approval-packet":
+        return False
+    if str(data.get("status") or "").strip().casefold() != "pending":
+        return False
+    if not isinstance(data.get("human_gate_conditions"), list) or not data.get("human_gate_conditions"):
         return False
     if _route_evidence_grants_authority(data):
         return False
@@ -7265,11 +7347,16 @@ def _is_reviewed_meta_feedback_incubation_file(inventory: Inventory, path: str) 
             "direct lifecycle",
         )
     )
+    has_route_created_rough_edge_evidence = (
+        ("route-created" in content or "mlh-created" in content or "mylittleharness incubation route" in content)
+        and ("rough-edge" in content or "fix-candidate" in content)
+        and ("blocked" in content or "overblock" in content)
+    )
     return (
         has_route_provenance
         and has_fix_candidate
         and has_hook_blocker_scope
-        and ((has_meta_feedback_cluster and has_boundary) or has_minimal_route_guardrail)
+        and ((has_meta_feedback_cluster and has_boundary) or has_minimal_route_guardrail or has_route_created_rough_edge_evidence)
     )
 
 
@@ -8245,10 +8332,6 @@ def _operator_prompt_text_signal(text: str) -> bool:
     return any(
         marker in normalized
         for marker in (
-            "prompt",
-            "handoff",
-            "launch",
-            "operator",
             "codex_delegation",
             "continuation packet",
             "start in the saved",
@@ -8344,11 +8427,11 @@ def _git_mutation_next_safe_command(inventory: Inventory, data: dict[str, object
     split_next_safe = _post_closeout_checkpoint_split_next_safe_command(inventory, data, command)
     if split_next_safe:
         return split_next_safe
-    if _has_active_plan(inventory):
-        return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
     actual_root_next_safe = _actual_root_vcs_next_safe_command(inventory, data, command)
     if actual_root_next_safe:
         return actual_root_next_safe
+    if _has_active_plan(inventory):
+        return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
     product_source_next_safe = _product_source_vcs_next_safe_command(inventory, data, command)
     if product_source_next_safe:
         return product_source_next_safe
