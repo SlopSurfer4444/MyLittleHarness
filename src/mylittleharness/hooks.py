@@ -6270,8 +6270,81 @@ def _coherent_post_closeout_roadmap_promotion_finalization_paths(
         inventory,
         tuple(sorted(lifecycle_subset)),
     ):
-        return set()
+        if not _coherent_unlocked_prior_roadmap_package_paths(
+            inventory,
+            normalized,
+            promoted_incubation_paths,
+            last_archive_rel,
+        ):
+            return set()
     return normalized
+
+
+def _coherent_unlocked_prior_roadmap_package_paths(
+    inventory: Inventory,
+    normalized: set[str],
+    promoted_incubation_paths: set[str],
+    last_archive_rel: str,
+) -> set[str]:
+    state_rel = "project/" + "project-state.md"
+    roadmap_rel = "project/" + "roadmap.md"
+    current_closeout_subset = {state_rel, last_archive_rel}
+    if ACTIVE_PLAN_ROUTE_PATH in normalized:
+        current_closeout_subset.add(ACTIVE_PLAN_ROUTE_PATH)
+    if not current_closeout_subset <= normalized:
+        return set()
+    if not _coherent_post_closeout_lifecycle_route_checkpoint_paths(
+        inventory,
+        tuple(sorted(current_closeout_subset)),
+        allow_without_roadmap=True,
+    ):
+        return set()
+
+    prior_subset = normalized - current_closeout_subset - promoted_incubation_paths
+    if roadmap_rel not in prior_subset:
+        return set()
+    prior_extra = prior_subset - {roadmap_rel}
+    prior_archive_paths = {
+        path for path in prior_extra if path != last_archive_rel and _is_deferred_archive_plan_route_path(path)
+    }
+    if not prior_archive_paths:
+        return set()
+    if not all(
+        _is_reviewed_post_closeout_archive_plan_file(inventory, path)
+        and _roadmap_references_archived_plan(inventory, path)
+        for path in prior_archive_paths
+    ):
+        return set()
+
+    source_archive_paths = {
+        path
+        for path in prior_extra
+        if _is_memory_hygiene_archive_reference_path(path)
+        and any(_is_reviewed_post_closeout_source_incubation_file(inventory, path, archive) for archive in prior_archive_paths)
+    }
+    allowed = {roadmap_rel, *prior_archive_paths, *source_archive_paths}
+    for path in sorted(prior_extra - allowed):
+        if _is_post_closeout_source_incubation_tombstone_path(inventory, path, source_archive_paths):
+            allowed.add(path)
+            continue
+        if _is_reviewed_lifecycle_finalization_evidence_for_archive(inventory, path, prior_archive_paths):
+            allowed.add(path)
+            continue
+        return set()
+    return normalized if prior_subset <= allowed else set()
+
+
+def _is_reviewed_lifecycle_finalization_evidence_for_archive(
+    inventory: Inventory,
+    path: str,
+    archive_paths: set[str],
+) -> bool:
+    if not _is_reviewed_lifecycle_finalization_evidence_file(inventory, path):
+        return False
+    text = _route_file_text_for_checkpoint(inventory, path)
+    if text is None:
+        return False
+    return any(archive in text for archive in archive_paths)
 
 
 def _post_closeout_archived_plan_target_artifacts(inventory: Inventory, paths: set[str]) -> set[str]:

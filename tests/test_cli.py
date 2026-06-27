@@ -37146,9 +37146,17 @@ class CliTests(unittest.TestCase):
                     "command": "git " + "add -f -- " + " ".join(stage_paths),
                 }
             )
-            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            def reports_deleted_path(_root: Path, path: str) -> bool:
+                return Path(path).as_posix().casefold() == source_rel.casefold()
+
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
             finding_codes = {finding["code"] for finding in payload["findings"]}
-            self.assertFalse(payload["block"])
+            self.assertFalse(payload["block"], payload["findings"])
             self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
 
@@ -37211,6 +37219,156 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", commit_codes)
             self.assertTrue(invalid_commit_payload["block"])
             self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", invalid_commit_codes)
+
+    def test_hooks_pre_tool_allows_post_closeout_unlocked_prior_roadmap_package(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, prior_archive_rel, _blocked_rel, evidence_rel = self._write_post_closeout_lifecycle_finalization_fixture(
+                root
+            )
+            current_archive_rel = "project/" + "archive/plans/current-hook-hotfix.md"
+            (root / current_archive_rel).write_text(
+                "---\n"
+                'plan_id: "current-hook-hotfix"\n'
+                'title: "Current Hook Hotfix"\n'
+                'status: "complete"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "complete"\n'
+                'docs_decision: "not-needed"\n'
+                "---\n"
+                "# Current Hook Hotfix\n\n"
+                "## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- docs_decision: not-needed\n"
+                "- commit_decision: commit exact hotfix route package only\n"
+                "- residual_risk: broader roadmap package remains separately staged\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            state_path = root / state_rel
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    f'last_archived_plan: "{prior_archive_rel}"',
+                    f'last_archived_plan: "{current_archive_rel}"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            evidence_path = root / evidence_rel
+            evidence_path.write_text(
+                evidence_path.read_text(encoding="utf-8")
+                + f"\nReviewed evidence references prior roadmap archive `{prior_archive_rel}`.\n",
+                encoding="utf-8",
+            )
+
+            roadmap_rel = "project/" + "roadmap.md"
+            note_a_rel = "project/" + "plan-incubation/promoted-a.md"
+            note_b_rel = "project/" + "plan-incubation/promoted-b.md"
+            source_rel = "project/" + "plan-incubation/source-note.md"
+            source_archive_rel = "project/" + "archive/reference/incubation/2026-06-27-source-note.md"
+            roadmap_text = (
+                "# Roadmap\n\n"
+                f"- Compacted done roadmap item `prior-roadmap-layer`: archived plan `{prior_archive_rel}`.\n\n"
+                "## Items\n\n"
+                "### Promotion Bundle\n\n"
+                "- `id`: `promotion-bundle`\n"
+                "- `status`: `accepted`\n"
+                f"- `source_members`: `[\"{note_a_rel}\", \"{note_b_rel}\"]`\n"
+            )
+            (root / roadmap_rel).write_text(roadmap_text, encoding="utf-8")
+            for rel, text in (
+                (
+                    note_a_rel,
+                    "---\n"
+                    'topic: "promoted-a"\n'
+                    'status: "incubating"\n'
+                    'source: "MyLittleHarness incubation route"\n'
+                    "---\n"
+                    "# Promoted A\n",
+                ),
+                (
+                    note_b_rel,
+                    "---\n"
+                    'topic: "promoted-b"\n'
+                    'status: "incubating"\n'
+                    'source: "MyLittleHarness incubation route"\n'
+                    'related_roadmap: "project/roadmap.md"\n'
+                    'related_roadmap_item: "promotion-bundle"\n'
+                    'promoted_to: "project/roadmap.md"\n'
+                    "---\n"
+                    "# Promoted B\n",
+                ),
+                (
+                    source_archive_rel,
+                    "---\n"
+                    'topic: "source-note"\n'
+                    'status: "archived"\n'
+                    'source: "MyLittleHarness incubation route"\n'
+                    'docs_decision: "not-needed"\n'
+                    'verification_summary: "Covered by prior roadmap layer verification."\n'
+                    f'related_plan: "{prior_archive_rel}"\n'
+                    f'archived_plan: "{prior_archive_rel}"\n'
+                    f'implemented_by: "{prior_archive_rel}"\n'
+                    'related_roadmap: "project/roadmap.md"\n'
+                    'related_roadmap_item: "prior-roadmap-layer"\n'
+                    'promoted_to: "project/roadmap.md"\n'
+                    "---\n"
+                    "# Source Note\n\n"
+                    "mylittleharness-meta-feedback-cluster v1\n\n"
+                    "[MLH-Fix-Candidate] safe_boundary: evidence only; cannot approve lifecycle or Git.\n",
+                ),
+            ):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+
+            stage_paths = (
+                state_rel,
+                roadmap_rel,
+                current_archive_rel,
+                prior_archive_rel,
+                evidence_rel,
+                source_archive_rel,
+                source_rel,
+                note_a_rel,
+                note_b_rel,
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -f -- " + " ".join(stage_paths),
+                }
+            )
+            def reports_deleted_path(_root: Path, path: str) -> bool:
+                return Path(path).as_posix().casefold() == source_rel.casefold()
+
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+
+            unrelated_archive_rel = "project/" + "archive/plans/unrelated-reviewed.md"
+            (root / unrelated_archive_rel).write_text((root / prior_archive_rel).read_text(encoding="utf-8"))
+            bad_stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git " + "add -f -- " + " ".join(stage_paths + (unrelated_archive_rel,)),
+                }
+            )
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                bad_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bad_stage_input)
+            bad_codes = {finding["code"] for finding in bad_payload["findings"]}
+            self.assertTrue(bad_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", bad_codes)
 
     def test_hooks_pre_tool_keeps_unsafe_post_closeout_lifecycle_vcs_finalization_blocked(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
