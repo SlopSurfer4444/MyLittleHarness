@@ -4823,10 +4823,12 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         return False
     if not paths:
         return False
-    if any(_is_top_level_verification_checkpoint_path(_hook_route_rel_path(inventory, path) or path) for path in paths):
-        return False
     pathspecs = [] if _has_shell_command_separator(command) else _git_stage_pathspecs(command)
     normalized = _normalized_route_produced_lifecycle_paths(inventory, pathspecs or paths)
+    has_top_level_verification = any(
+        _is_top_level_verification_checkpoint_path(_hook_route_rel_path(inventory, path) or path)
+        for path in (pathspecs or paths)
+    )
     if not _has_shell_command_separator(command) and _coherent_post_closeout_roadmap_promotion_finalization_paths(
         inventory, pathspecs
     ):
@@ -4835,6 +4837,8 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
         inventory, pathspecs, allow_without_roadmap=True
     ):
         return True
+    if has_top_level_verification:
+        return False
     if all(_is_tracked_existing_lifecycle_route_file(inventory, path) for path in paths):
         return True
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
@@ -6686,6 +6690,7 @@ def _is_reviewed_post_closeout_lifecycle_package_extra(
         _is_reviewed_post_closeout_source_incubation_file(inventory, path, last_archive_rel)
         or _is_post_closeout_source_incubation_tombstone_path(inventory, path, reviewed_source_archives)
         or _is_reviewed_post_closeout_meta_feedback_extra_file(inventory, path)
+        or _is_reviewed_post_closeout_top_level_verification_extra_file(inventory, path, reviewed_source_archives)
         or _is_reviewed_lifecycle_finalization_evidence_file(inventory, path)
     )
 
@@ -6704,6 +6709,51 @@ def _is_reviewed_post_closeout_meta_feedback_extra_file(inventory: Inventory, pa
         return False
     data = frontmatter.data
     return not any(str(data.get(field) or "").strip() for field in ("archived_plan", "implemented_by"))
+
+
+def _is_reviewed_post_closeout_top_level_verification_extra_file(
+    inventory: Inventory,
+    path: str,
+    reviewed_source_archives: set[str],
+) -> bool:
+    if not reviewed_source_archives or not _is_top_level_verification_checkpoint_path(path):
+        return False
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    data = frontmatter.data
+    if _route_frontmatter_grants_checkpoint_authority(data):
+        return False
+    if str(data.get("route") or "").strip().casefold() != "verification":
+        return False
+    source_members = data.get("source_members")
+    if not isinstance(source_members, list):
+        return False
+    normalized_members = {
+        _hook_route_rel_path(inventory, str(member or "")).casefold()
+        for member in source_members
+        if str(member or "").strip()
+    }
+    if not normalized_members.intersection(reviewed_source_archives):
+        return False
+    content = text.casefold()
+    has_release_boundary = (
+        "no push" in content
+        or "approval before" in content
+        or "owner gate" in content
+    ) and any(
+        term in content for term in ("push", "tag", "publish", "artifact upload", "release claim")
+    )
+    return _route_evidence_text_has_non_authority_boundary(text) or has_release_boundary
 
 
 def _coherent_route_produced_lifecycle_stage_paths(
