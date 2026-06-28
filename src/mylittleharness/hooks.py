@@ -5588,22 +5588,40 @@ def _post_closeout_lifecycle_state_authority(
 def _coherent_archived_source_incubation_tombstone_stage_paths(
     inventory: Inventory, paths: list[str] | tuple[str, ...]
 ) -> set[str]:
-    normalized: set[str] = set()
+    tombstones: set[str] = set()
+    explicit_archive_references: set[str] = set()
     for path in paths:
         rel = _hook_route_rel_path(inventory, path)
         clean = _normalize_hook_path(rel).casefold() if rel else ""
-        if not clean or not _is_post_closeout_source_incubation_tombstone_path(inventory, clean):
+        if not clean:
             return set()
-        normalized.add(clean)
-    archive_references = _source_incubation_archive_references_for_tombstones(inventory, normalized)
+        if _is_post_closeout_source_incubation_tombstone_path(inventory, clean):
+            tombstones.add(clean)
+            continue
+        if _is_reviewed_memory_hygiene_archive_reference_file(inventory, clean):
+            explicit_archive_references.add(clean)
+            continue
+        return set()
+    if not tombstones:
+        return set()
+    archive_references = _source_incubation_archive_references_for_tombstones(inventory, tombstones)
+    archive_references.update(explicit_archive_references)
     if not archive_references:
         return set()
     if not all(
         _has_archive_reference_for_incubation_source(inventory, source_path, archive_references)
-        for source_path in normalized
+        for source_path in tombstones
     ):
         return set()
-    return normalized
+    if any(
+        not any(
+            _has_archive_reference_for_incubation_source(inventory, source_path, {archive_reference})
+            for source_path in tombstones
+        )
+        for archive_reference in explicit_archive_references
+    ):
+        return set()
+    return tombstones | explicit_archive_references
 
 
 def _source_incubation_archive_references_for_tombstones(inventory: Inventory, source_paths: set[str]) -> set[str]:
@@ -6610,7 +6628,18 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(
     archived_source_tombstone_paths = _coherent_archived_source_incubation_tombstone_stage_paths(inventory, paths)
     if archived_source_tombstone_paths:
         return archived_source_tombstone_paths
-    memory_hygiene_paths = _coherent_memory_hygiene_checkpoint_paths(inventory, paths)
+    archive_reference_checkpoint_paths = _coherent_memory_hygiene_archive_reference_checkpoint_paths(
+        inventory,
+        paths,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if archive_reference_checkpoint_paths:
+        return archive_reference_checkpoint_paths
+    memory_hygiene_paths = _coherent_memory_hygiene_checkpoint_paths(
+        inventory,
+        paths,
+        prefer_staged_content=prefer_staged_content,
+    )
     if memory_hygiene_paths:
         return memory_hygiene_paths
     normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
@@ -7141,18 +7170,13 @@ def _roadmap_promotion_checkpoint_posture_allows(inventory: Inventory) -> bool:
     return False
 
 
-def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
-    if _has_active_plan(inventory):
-        return set()
-    state = inventory.state
-    if not state or not state.exists:
-        return set()
-    state_data = state.frontmatter.data
-    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
-        return set()
-    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
-        return set()
-    if not any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS):
+def _coherent_memory_hygiene_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
+) -> set[str]:
+    if not _memory_hygiene_checkpoint_posture_allows(inventory):
         return set()
     normalized = _normalized_memory_hygiene_checkpoint_paths(inventory, paths)
     if not normalized:
@@ -7216,7 +7240,11 @@ def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[
     ):
         return set()
     if not all(
-        _is_reviewed_memory_hygiene_archive_reference_file(inventory, path)
+        _is_reviewed_memory_hygiene_archive_reference_file(
+            inventory,
+            path,
+            prefer_staged_content=prefer_staged_content,
+        )
         for path in archive_reference_paths
     ):
         return set()
@@ -7239,6 +7267,45 @@ def _coherent_memory_hygiene_checkpoint_paths(inventory: Inventory, paths: list[
     ):
         return set()
     return normalized
+
+
+def _coherent_memory_hygiene_archive_reference_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
+) -> set[str]:
+    if not _memory_hygiene_checkpoint_posture_allows(inventory):
+        return set()
+    normalized = _normalized_memory_hygiene_checkpoint_paths(inventory, paths)
+    if not normalized:
+        return set()
+    if not all(_is_memory_hygiene_archive_reference_path(path) for path in normalized):
+        return set()
+    if not all(
+        _is_reviewed_memory_hygiene_archive_reference_file(
+            inventory,
+            path,
+            prefer_staged_content=prefer_staged_content,
+        )
+        for path in normalized
+    ):
+        return set()
+    return normalized
+
+
+def _memory_hygiene_checkpoint_posture_allows(inventory: Inventory) -> bool:
+    if _has_active_plan(inventory):
+        return False
+    state = inventory.state
+    if not state or not state.exists:
+        return False
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return False
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return False
+    return any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS)
 
 
 def _normalized_memory_hygiene_checkpoint_paths(
@@ -7394,18 +7461,20 @@ def _is_reviewed_memory_hygiene_operator_prompt_file(inventory: Inventory, path:
     )
 
 
-def _is_reviewed_memory_hygiene_archive_reference_file(inventory: Inventory, path: str) -> bool:
+def _is_reviewed_memory_hygiene_archive_reference_file(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> bool:
     if not _is_memory_hygiene_archive_reference_path(path):
         return False
-    route_path = _hook_route_file_path(inventory, path)
-    if route_path is None:
+    text = _route_file_text_for_checkpoint(inventory, path, prefer_staged_content=prefer_staged_content)
+    if text is None:
         return False
     try:
-        if not route_path.is_file() or route_path.is_symlink():
-            return False
-        text = route_path.read_text(encoding="utf-8")
         frontmatter = parse_frontmatter(text)
-    except (OSError, UnicodeDecodeError):
+    except (TypeError, ValueError):
         return False
     if not frontmatter.has_frontmatter or frontmatter.errors:
         return False

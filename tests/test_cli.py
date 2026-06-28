@@ -35948,6 +35948,233 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+            stage_pair_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {note_rel} {archive_note_rel}",
+                }
+            )
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                pair_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_pair_input)
+
+            pair_codes = {finding["code"] for finding in pair_payload["findings"]}
+            self.assertFalse(pair_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", pair_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", pair_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", pair_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", pair_codes)
+
+            reverse_pair_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {archive_note_rel} {note_rel}",
+                }
+            )
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                reverse_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], reverse_pair_input)
+
+            reverse_codes = {finding["code"] for finding in reverse_payload["findings"]}
+            self.assertFalse(reverse_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", reverse_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", reverse_codes)
+
+            wrong_archive_rel = "project/archive/reference/incubation/2026-06-22-unrelated-overblock.md"
+            wrong_archive_path = root / wrong_archive_rel
+            wrong_archive_path.write_text(
+                "---\n"
+                'topic: "unrelated-overblock"\n'
+                'status: "implemented"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                f'archived_to: "{wrong_archive_rel}"\n'
+                f'source_incubation: "project/plan-incubation/unrelated-overblock.md"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "---\n"
+                "# unrelated-overblock\n\n"
+                "non-authority archive reference only; cannot approve lifecycle, staging, or commit.\n",
+                encoding="utf-8",
+            )
+            wrong_pair_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {note_rel} {wrong_archive_rel}",
+                }
+            )
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                wrong_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], wrong_pair_input)
+
+            wrong_codes = {finding["code"] for finding in wrong_payload["findings"]}
+            self.assertTrue(wrong_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", wrong_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", wrong_codes)
+
+    def test_hooks_pre_tool_allows_reviewed_memory_hygiene_archive_reference_commit_name_only(
+        self,
+    ) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            _state_rel, _roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            note_path = root / note_rel
+            archive_note_rel = (
+                "project/"
+                + "archive/reference/incubation/2026-06-22-delegation-read-navigation-prompt-overblock.md"
+            )
+            archive_note_path = root / archive_note_rel
+            archive_note_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_text = note_path.read_text(encoding="utf-8")
+            archive_text = archive_text.replace('status: "incubating"\n', 'status: "implemented"\n', 1)
+            archive_text = archive_text.replace(
+                'promoted_to: "project/roadmap.md"\n',
+                (
+                    'promoted_to: "project/roadmap.md"\n'
+                    f'source_incubation: "{note_rel}"\n'
+                    f'archived_to: "{archive_note_rel}"\n'
+                ),
+                1,
+            )
+            archive_text += "\nnon-authority archive reference only; cannot approve lifecycle or local VCS decisions.\n"
+            archive_note_path.write_text(archive_text, encoding="utf-8")
+            note_path.unlink()
+            second_archive_rel = (
+                "project/"
+                + "archive/reference/incubation/2026-06-22-delegation-read-navigation-prompt-overblock-copy.md"
+            )
+            second_archive_text = archive_text.replace(
+                f'archived_to: "{archive_note_rel}"',
+                f'archived_to: "{second_archive_rel}"',
+                1,
+            )
+            second_archive_path = root / second_archive_rel
+            second_archive_path.write_text(second_archive_text, encoding="utf-8")
+            entry_coverage_rel = (
+                "project/"
+                + "archive/reference/incubation/2026-06-22-entry-coverage-only-overblock.md"
+            )
+            entry_coverage_text = (
+                "---\n"
+                'topic: "entry-coverage-only-overblock"\n'
+                'status: "implemented"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                f'archived_to: "{entry_coverage_rel}"\n'
+                "---\n"
+                "# entry-coverage-only-overblock\n\n"
+                "non-authority archive reference only; cannot approve lifecycle, staging, or commit.\n\n"
+                "## Entry Coverage\n\n"
+                "- `2026-06-27#1`: `implemented` project/archive/plans/reviewed-closeout.md\n"
+            )
+            entry_coverage_path = root / entry_coverage_rel
+            entry_coverage_path.write_text(entry_coverage_text, encoding="utf-8")
+
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git commit -F reviewed-message.txt",
+                }
+            )
+
+            staged_texts = {
+                archive_note_rel.casefold(): archive_text,
+                second_archive_rel.casefold(): second_archive_text,
+                entry_coverage_rel.casefold(): entry_coverage_text,
+            }
+
+            def staged_text(_root: Path, rel_path: str) -> str | None:
+                return staged_texts.get(Path(rel_path).as_posix().casefold())
+
+            with patch(
+                "mylittleharness.hooks._git_staged_paths_for_root",
+                return_value=(archive_note_rel,),
+            ), patch(
+                "mylittleharness.hooks._git_staged_file_text_for_root",
+                side_effect=staged_text,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+            with patch(
+                "mylittleharness.hooks._git_staged_paths_for_root",
+                return_value=(archive_note_rel, second_archive_rel, entry_coverage_rel),
+            ), patch(
+                "mylittleharness.hooks._git_staged_file_text_for_root",
+                side_effect=staged_text,
+            ):
+                batch_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            batch_codes = {finding["code"] for finding in batch_payload["findings"]}
+            self.assertFalse(batch_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", batch_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", batch_codes)
+
+            malformed_staged_text = (
+                "---\n"
+                'topic: "malformed-staged"\n'
+                'status: "implemented"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                f'archived_to: "{archive_note_rel}"\n'
+                "---\n"
+                "# malformed staged\n\n"
+                "non-authority archive reference only; cannot approve lifecycle, staging, or commit.\n"
+            )
+            with patch(
+                "mylittleharness.hooks._git_staged_paths_for_root",
+                return_value=(archive_note_rel,),
+            ), patch(
+                "mylittleharness.hooks._git_staged_file_text_for_root",
+                return_value=malformed_staged_text,
+            ):
+                staged_malformed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            staged_malformed_codes = {finding["code"] for finding in staged_malformed_payload["findings"]}
+            self.assertTrue(staged_malformed_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", staged_malformed_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", staged_malformed_codes)
+
+            malformed_rel = "project/archive/reference/incubation/2026-06-22-malformed.md"
+            malformed_path = root / malformed_rel
+            malformed_text = (
+                "---\n"
+                'topic: "malformed"\n'
+                'status: "implemented"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                f'archived_to: "{malformed_rel}"\n'
+                "---\n"
+                "# malformed\n\n"
+                "non-authority archive reference only; cannot approve lifecycle, staging, or commit.\n"
+            )
+            malformed_path.write_text(malformed_text, encoding="utf-8")
+
+            with patch(
+                "mylittleharness.hooks._git_staged_paths_for_root",
+                return_value=(archive_note_rel, malformed_rel),
+            ), patch(
+                "mylittleharness.hooks._git_staged_file_text_for_root",
+                side_effect=lambda _root, rel_path: {
+                    archive_note_rel.casefold(): archive_text,
+                    malformed_rel.casefold(): malformed_text,
+                }.get(Path(rel_path).as_posix().casefold()),
+            ):
+                malformed_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            malformed_codes = {finding["code"] for finding in malformed_payload["findings"]}
+            self.assertTrue(malformed_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", malformed_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", malformed_codes)
+
     def test_hooks_pre_tool_blocks_exact_source_incubation_tombstone_without_archive_reference(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
