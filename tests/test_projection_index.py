@@ -51,7 +51,7 @@ class ProjectionIndexTests(unittest.TestCase):
                 ).fetchone()
 
             self.assertEqual(str(INDEX_SCHEMA_VERSION), metadata["schema_version"])
-            self.assertEqual("1.0.1", metadata["product_version"])
+            self.assertEqual("1.0.2", metadata["product_version"])
             self.assertEqual(".mylittleharness/generated/projection", metadata["storage_boundary"])
             self.assertEqual("true", metadata["fts5_available"])
             self.assertEqual("true", metadata["bm25_available"])

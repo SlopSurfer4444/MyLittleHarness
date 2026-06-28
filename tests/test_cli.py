@@ -45847,7 +45847,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(str(default_root.resolve()), structured["runtime"]["startupRoot"])
             self.assertEqual(str(selected_root.resolve()), structured["runtime"]["selectedRoot"])
             self.assertEqual(str(selected_root.resolve()), structured["runtime"]["requestedRoot"])
-            self.assertEqual("1.0.1", structured["runtime"]["packageVersion"])
+            self.assertEqual("1.0.2", structured["runtime"]["packageVersion"])
             self.assertIn("adapter.py", structured["runtime"]["modulePath"])
             self.assertTrue(
                 any(

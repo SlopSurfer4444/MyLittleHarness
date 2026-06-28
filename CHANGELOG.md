@@ -2,6 +2,35 @@
 
 All notable changes for MyLittleHarness are recorded here once they are ready for a public release checkpoint.
 
+## 1.0.2 - Lifecycle Checkpoint Hardening - 2026-06-28
+
+This release publishes the accumulated post-1.0.1 lifecycle and hook guardrail fixes that were proven locally before publication. It remains a GitHub source release; package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, and workstation adoption are still outside this release.
+
+### Added
+
+- Command discovery support for route-facing operator intent.
+- Explicit terminal active-plan closeout routing for plan completion handoff.
+- Checkpoint provenance support for roadmap promotion and mixed post-closeout promotion savepoints.
+
+### Changed
+
+- Active-plan checkpoint guidance now respects phase write scope and product-source target scope.
+- Roadmap and plan synthesis validation now handles multi-value phase write scopes, batch sibling refs, and update-active target materialization more consistently.
+- Route public-neutrality gates and `mlhd run-once` timeout handoff diagnostics are surfaced more directly.
+
+### Fixed
+
+- Hook checkpoint classification for standalone verification retarget staging/commits, reviewed verification staging, retained verification retarget sources, staged diff review bundles, archive reference checkpoints, active writeback checkpoints, and state/roadmap checkpoint commits.
+- Product-source staging guidance for active plans, product checkpoints, no-automatic retained lifecycle source boundaries, and operating-root commit scope.
+- Retention fan-in safety and source member destination validation before route writes.
+
+### Verification Expectations
+
+- `pyproject.toml` and `mylittleharness.__version__` both report `1.0.2`.
+- Product tests run with bytecode disabled from the source checkout.
+- GitHub Actions `Tests` passes on the pushed `main` release commit before the GitHub release is treated as green.
+- The GitHub release includes the standard source archive plus an attached `mylittleharness-1.0.2-source.zip` asset.
+
 ## 1.0.1 - Source Release Refresh - 2026-06-27
 
 This release publishes the post-1.0.0 operator-lane hardening that was already verified locally, including checkpoint hook classifier fixes and owner-decision route discoverability polish. It remains a GitHub source release; package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, and workstation adoption are still outside this release.

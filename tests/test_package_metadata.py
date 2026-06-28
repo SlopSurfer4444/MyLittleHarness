@@ -91,7 +91,7 @@ class PackageMetadataTests(unittest.TestCase):
 
         self.assertEqual("mylittleharness", project["name"])
         self.assertEqual(__version__, project["version"])
-        self.assertEqual("1.0.1", __version__)
+        self.assertEqual("1.0.2", __version__)
         self.assertEqual([], project["dependencies"])
         self.assertEqual({"text": "Apache-2.0"}, project["license"])
         self.assertIn("License :: OSI Approved :: Apache Software License", project["classifiers"])
@@ -267,11 +267,11 @@ class PackageMetadataTests(unittest.TestCase):
     def test_sdist_includes_source_docs_tests_and_build_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             sdist_name = mylittleharness_build.build_sdist(tmp)
-            self.assertEqual("mylittleharness-1.0.1.tar.gz", sdist_name)
+            self.assertEqual("mylittleharness-1.0.2.tar.gz", sdist_name)
             with tarfile.open(Path(tmp) / sdist_name, "r:gz") as sdist:
                 names = set(sdist.getnames())
 
-        prefix = "mylittleharness-1.0.1/"
+        prefix = "mylittleharness-1.0.2/"
         self.assertIn(prefix + "pyproject.toml", names)
         self.assertIn(prefix + "README.md", names)
         self.assertIn(prefix + "CHANGELOG.md", names)
@@ -352,18 +352,18 @@ class PackageMetadataTests(unittest.TestCase):
     def test_wheel_metadata_keeps_local_install_entrypoint_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             wheel_name = mylittleharness_build.build_wheel(tmp)
-            self.assertEqual("mylittleharness-1.0.1-py3-none-any.whl", wheel_name)
+            self.assertEqual("mylittleharness-1.0.2-py3-none-any.whl", wheel_name)
             with zipfile.ZipFile(Path(tmp) / wheel_name) as wheel:
                 names = set(wheel.namelist())
-                metadata = wheel.read("mylittleharness-1.0.1.dist-info/METADATA").decode("utf-8")
-                entry_points = wheel.read("mylittleharness-1.0.1.dist-info/entry_points.txt").decode("utf-8")
-                license_text = wheel.read("mylittleharness-1.0.1.dist-info/LICENSE").decode("utf-8")
+                metadata = wheel.read("mylittleharness-1.0.2.dist-info/METADATA").decode("utf-8")
+                entry_points = wheel.read("mylittleharness-1.0.2.dist-info/entry_points.txt").decode("utf-8")
+                license_text = wheel.read("mylittleharness-1.0.2.dist-info/LICENSE").decode("utf-8")
 
         self.assertIn("Name: mylittleharness\n", metadata)
-        self.assertIn("Version: 1.0.1\n", metadata)
+        self.assertIn("Version: 1.0.2\n", metadata)
         self.assertIn("License: Apache-2.0\n", metadata)
         self.assertIn("Classifier: License :: OSI Approved :: Apache Software License\n", metadata)
-        self.assertIn("mylittleharness-1.0.1.dist-info/LICENSE", names)
+        self.assertIn("mylittleharness-1.0.2.dist-info/LICENSE", names)
         self.assertIn("Apache License", license_text)
         self.assertIn("Version 2.0, January 2004", license_text)
         self.assertIn("[console_scripts]\n", entry_points)
@@ -454,7 +454,7 @@ class PackageMetadataTests(unittest.TestCase):
 
         self.assertIn("The local release checklist is:", readme)
         for expected in (
-            "package metadata and runtime version agree on `1.0.1`",
+            "package metadata and runtime version agree on `1.0.2`",
             "`bootstrap --package-smoke` passes from temporary source/build/install locations outside the product source checkout",
             "Wheel, build, and install artifacts are verification outputs only",
             "rejects standalone `bootstrap --apply`",

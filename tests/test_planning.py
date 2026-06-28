@@ -141,7 +141,7 @@ class PlanningTests(unittest.TestCase):
         self.assertIn("### phase-2-verification-and-docs", rendered)
         self.assertIn("### phase-3-integration-and-state-transfer", rendered)
         self.assertIn(
-            "- write_scope: `src/mylittleharness/planning.py`, `src/mylittleharness/grain.py`, `tests/test_planning.py`, `tests/test_cli.py`",
+            "- write_scope: `src/mylittleharness/planning.py`, `src/mylittleharness/grain.py`, `project/specs/workflow/workflow-plan-synthesis-spec.md`, `src/mylittleharness/templates/workflow/workflow-plan-synthesis-spec.md`, `tests/test_planning.py`, `tests/test_cli.py`",
             rendered,
         )
         self.assertIn("python -m unittest tests.test_planning tests.test_cli", rendered)
