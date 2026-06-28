@@ -36208,7 +36208,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
-            staged_blob.assert_called_with(root, verification_rel)
+            staged_root, staged_rel = staged_blob.call_args.args
+            self.assertEqual(root.resolve(), staged_root.resolve())
+            self.assertEqual(verification_rel, staged_rel)
 
     def test_hooks_pre_tool_blocks_standalone_verification_retarget_commit_with_unsafe_staged_content(
         self,
@@ -36330,7 +36332,9 @@ class CliTests(unittest.TestCase):
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
                     if should_read_staged_blob:
-                        staged_blob.assert_called_with(root, verification_rel)
+                        staged_root, staged_rel = staged_blob.call_args.args
+                        self.assertEqual(root.resolve(), staged_root.resolve())
+                        self.assertEqual(verification_rel, staged_rel)
                     else:
                         staged_blob.assert_not_called()
 
