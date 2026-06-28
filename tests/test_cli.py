@@ -39387,6 +39387,11 @@ class CliTests(unittest.TestCase):
             )
             stage_command = "git " + "add -- src/mylittleharness/hooks.py tests/test_cli.py"
             test_stage_command = "git " + "add -- tests/test_cli.py"
+            commit_input = {
+                "toolName": "shell_command",
+                "workdir": str(product_root),
+                "command": "git " + "commit -F reviewed-message.txt",
+            }
             allowed_inputs = {
                 "workdir_exact": {
                     "toolName": "shell_command",
@@ -39451,6 +39456,41 @@ class CliTests(unittest.TestCase):
                     self.assertTrue(payload["block"])
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
+
+            def staged_paths(git_root: Path) -> tuple[str, ...]:
+                if git_root.resolve() == product_root.resolve():
+                    return ("src/mylittleharness/hooks.py", "tests/test_cli.py")
+                return ()
+
+            def out_of_scope_staged_paths(git_root: Path) -> tuple[str, ...]:
+                if git_root.resolve() == product_root.resolve():
+                    return ("src/mylittleharness/hooks.py", "project/project-state.md")
+                return ()
+
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=staged_paths):
+                commit_payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(commit_input),
+                )
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", side_effect=out_of_scope_staged_paths):
+                out_of_scope_commit_payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(commit_input),
+                )
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            commit_messages = "\n".join(str(finding["message"]) for finding in commit_payload["findings"])
+            out_of_scope_commit_codes = {finding["code"] for finding in out_of_scope_commit_payload["findings"]}
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-product-source-vcs-commit", commit_codes)
+            self.assertIn("within active-plan target_artifacts", commit_messages)
+            self.assertTrue(out_of_scope_commit_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", out_of_scope_commit_codes)
+            self.assertNotIn("hooks-policy-allow-product-source-vcs-commit", out_of_scope_commit_codes)
 
     def test_hooks_pre_tool_allows_active_plan_product_source_exact_patch_target(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -41495,6 +41535,151 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+
+    def test_hooks_pre_tool_allows_active_plan_open_checkpoint_package(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_rel = "project/" + "project-state.md"
+            plan_rel = "project/" + "implementation-plan.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            first_note_rel = "project/" + "plan-incubation/route-created-research-checkpoint-savepoint-gap.md"
+            second_note_rel = "project/" + "plan-incubation/neighbor-post-closeout-lifecycle-checkpoint-adapter-overblock.md"
+            (root / state_rel).write_text(
+                (root / state_rel)
+                .read_text(encoding="utf-8")
+                .replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-1-implementation"',
+                ),
+                encoding="utf-8",
+            )
+            (root / plan_rel).write_text(
+                "---\n"
+                'plan_id: "2026-06-28-allow-route-created-research-checkpoint-savepoints"\n'
+                'title: "Allow Route-created Research Checkpoint Savepoints"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-1-implementation"\n'
+                'phase_status: "pending"\n'
+                'primary_roadmap_item: "route-created-research-checkpoint-savepoint-gap"\n'
+                "covered_roadmap_items:\n"
+                '  - "route-created-research-checkpoint-savepoint-gap"\n'
+                '  - "neighbor-post-closeout-lifecycle-checkpoint-adapter-overblock"\n'
+                f'source_incubation: "{first_note_rel}"\n'
+                "---\n"
+                "# Allow Route-created Research Checkpoint Savepoints\n",
+                encoding="utf-8",
+            )
+            (root / roadmap_rel).write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Route-created Research Checkpoint Savepoint Gap\n\n"
+                "- `id`: `route-created-research-checkpoint-savepoint-gap`\n"
+                f"- `source_incubation`: `{first_note_rel}`\n"
+                f"- `related_plan`: `{plan_rel}`\n\n"
+                "### Neighbor Post Closeout Lifecycle Checkpoint Adapter Overblock\n\n"
+                "- `id`: `neighbor-post-closeout-lifecycle-checkpoint-adapter-overblock`\n"
+                f"- `source_incubation`: `{second_note_rel}`\n"
+                f"- `related_plan`: `{plan_rel}`\n",
+                encoding="utf-8",
+            )
+
+            for rel, item in (
+                (first_note_rel, "route-created-research-checkpoint-savepoint-gap"),
+                (second_note_rel, "neighbor-post-closeout-lifecycle-checkpoint-adapter-overblock"),
+            ):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(
+                    "---\n"
+                    f'topic: "{Path(rel).stem}"\n'
+                    'status: "incubating"\n'
+                    'source: "MyLittleHarness incubation route"\n'
+                    f'related_plan: "{plan_rel}"\n'
+                    f'related_roadmap_item: "{item}"\n'
+                    "---\n"
+                    f"# {Path(rel).stem}\n\n"
+                    "[MLH-Fix-Candidate] reviewed route-created plan-open checkpoint source note.\n",
+                    encoding="utf-8",
+                )
+
+            stage_paths = (state_rel, plan_rel, roadmap_rel, first_note_rel, second_note_rel)
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths]),
+                }
+            )
+            bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths])
+                    + "; git status --short; git diff --cached --check",
+                }
+            )
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "commit", "-F", str(message_file)]),
+                }
+            )
+            unrelated_note_rel = "project/" + "plan-incubation/unrelated-route-note.md"
+            (root / unrelated_note_rel).write_text(
+                "---\n"
+                'topic: "unrelated-route-note"\n'
+                'status: "incubating"\n'
+                'source: "MyLittleHarness incubation route"\n'
+                f'related_plan: "{plan_rel}"\n'
+                'related_roadmap_item: "not-covered-by-active-plan"\n'
+                "---\n"
+                "# unrelated-route-note\n",
+                encoding="utf-8",
+            )
+            unrelated_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths, unrelated_note_rel]),
+                }
+            )
+            archive_rel = "project/" + "archive/plans/active-closeout.md"
+            (root / archive_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / archive_rel).write_text("# Active Closeout\n", encoding="utf-8")
+            archive_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths, archive_rel]),
+                }
+            )
+
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=stage_paths):
+                stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+                bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bundle_input)
+                commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+                unrelated_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], unrelated_input)
+                archive_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], archive_input)
+
+            stage_codes = {finding["code"] for finding in stage_payload["findings"]}
+            bundle_codes = {finding["code"] for finding in bundle_payload["findings"]}
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            unrelated_codes = {finding["code"] for finding in unrelated_payload["findings"]}
+            archive_codes = {finding["code"] for finding in archive_payload["findings"]}
+            self.assertFalse(stage_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", stage_codes)
+            self.assertFalse(bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", bundle_codes)
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-commit", commit_codes)
+            self.assertTrue(unrelated_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unrelated_codes)
+            self.assertTrue(archive_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", archive_codes)
 
     def test_hooks_pre_tool_allows_blocked_active_plan_lifecycle_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

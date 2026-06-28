@@ -2052,8 +2052,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "info",
                 "hooks-policy-allow-route-produced-lifecycle-route-staging",
                 (
-                    "allowed exact Git staging of existing MLH lifecycle route files while the active phase is complete "
-                    "and project-state contains route writeback evidence; broad add, generated/runtime caches, "
+                    "allowed exact Git staging of existing MLH lifecycle route files for a reviewed active plan-open "
+                    "package or active-phase route writeback evidence; broad add, generated/runtime caches, "
                     "partial lifecycle staging, commit, push, roadmap movement, and future lifecycle decisions remain unapproved; "
                     "review bundles may append only git status --short and git diff --cached --check in the same operating root; "
                     "if Git ignore rules hide a route-created artifact, use git add -f -- <exact-route-artifact> for that artifact only"
@@ -2135,13 +2135,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             )
         )
     if allow_product_source_vcs_commit:
+        commit_context = (
+            "within active-plan target_artifacts"
+            if _has_active_plan(inventory)
+            else "after plan_status=none"
+        )
         findings.append(
             Finding(
                 "info",
                 "hooks-policy-allow-product-source-vcs-commit",
                 (
-                    "allowed narrow product-source VCS commit from the configured product_source_root workdir after "
-                    "plan_status=none; this assumes prior exact staging and staged-diff review, while "
+                    "allowed narrow product-source VCS commit from the configured product_source_root workdir "
+                    f"{commit_context}; this assumes prior exact staging and staged-diff review, while "
                     "amend, commit-all, push, reset, clean, release, and future lifecycle decisions remain unapproved"
                 ),
             )
@@ -2206,7 +2211,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-allow-route-produced-lifecycle-commit",
                 (
                     "allowed narrow local VCS commit command for a coherent staged lifecycle route set backed by "
-                    "active-phase-complete writeback evidence; " + "gi" + "t commit -F" + " is treated as a message-file option, "
+                    "a reviewed active plan-open package or active-phase-complete writeback evidence; " + "gi" + "t commit -F" + " is treated as a message-file option, "
                     "while lowercase -f, amend, push, reset, clean, and generated/runtime cache commits remain blocked"
                 ),
             )
@@ -4877,6 +4882,8 @@ def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, comma
     pathspecs = _git_stage_pathspecs(command)
     if _coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs):
         return True
+    if _coherent_active_plan_open_checkpoint_paths(inventory, pathspecs):
+        return True
     if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
         return False
     return bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
@@ -4903,6 +4910,8 @@ def _is_route_produced_lifecycle_route_stage_review_bundle(inventory: Inventory,
     if not pathspecs:
         return False
     coherent = bool(_coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs))
+    if not coherent:
+        coherent = bool(_coherent_active_plan_open_checkpoint_paths(inventory, pathspecs))
     if not coherent and _active_plan_ready_for_route_produced_lifecycle_git(inventory):
         coherent = bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
     if not coherent:
@@ -4996,12 +5005,33 @@ def _is_exact_active_plan_product_source_stage_file(
 
 
 def _is_product_source_vcs_commit_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
-    if _has_active_plan(inventory):
-        return False
     base_root, product_root = _product_source_vcs_roots(inventory, data, command)
     if base_root is None or product_root is None:
         return False
-    return _is_narrow_local_vcs_commit_command(command)
+    if not _is_narrow_local_vcs_commit_command(command):
+        return False
+    if _has_active_plan(inventory):
+        return _active_plan_product_source_staged_paths_are_target_artifacts(inventory, product_root)
+    return True
+
+
+def _active_plan_product_source_staged_paths_are_target_artifacts(
+    inventory: Inventory,
+    product_root: Path,
+) -> bool:
+    staged_paths = _git_staged_paths_for_root(product_root)
+    if not staged_paths:
+        return False
+    for staged_path in staged_paths:
+        if any(char in staged_path for char in "*?[]") or staged_path.startswith(":"):
+            return False
+        try:
+            candidate = (product_root / staged_path).resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if not _is_active_plan_target_artifact(inventory, str(candidate)):
+            return False
+    return True
 
 
 def _is_product_source_vcs_push_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
@@ -6052,11 +6082,14 @@ def _resolve_path_token_from_base(token: str, base: Path) -> Path | None:
 
 
 def _is_route_produced_lifecycle_commit_command(inventory: Inventory, command: str) -> bool:
-    if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
-        return False
     if not _is_narrow_local_vcs_commit_command(command):
         return False
-    return _coherent_route_produced_lifecycle_paths(inventory, _git_staged_paths(inventory))
+    staged_paths = _git_staged_paths(inventory)
+    if _coherent_active_plan_open_checkpoint_paths(inventory, staged_paths):
+        return True
+    if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
+        return False
+    return _coherent_route_produced_lifecycle_paths(inventory, staged_paths)
 
 
 def _is_narrow_local_vcs_commit_command(command: str) -> bool:
@@ -6158,6 +6191,135 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
     if last_archive_rel and (roadmap_rel in normalized or archive_paths) and last_archive_rel not in normalized:
         return False
     return True
+
+
+def _coherent_active_plan_open_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+) -> set[str]:
+    if not _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "active":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "pending":
+        return set()
+    active_plan_rel = _active_plan_rel_path(inventory)
+    if not active_plan_rel:
+        return set()
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return set()
+    state_rel = "project/" + "project-state.md"
+    roadmap_rel = "project/" + "roadmap.md"
+    required = {state_rel, roadmap_rel, active_plan_rel}
+    if not required <= normalized:
+        return set()
+    plan_data = _active_plan_open_checkpoint_frontmatter(inventory, active_plan_rel)
+    if plan_data is None:
+        return set()
+    if not _active_plan_open_checkpoint_matches_state(state_data, plan_data, active_plan_rel):
+        return set()
+    source_note_paths = normalized - required
+    allowed_source_notes = {
+        path
+        for path in source_note_paths
+        if _is_active_plan_open_checkpoint_source_note(inventory, path, active_plan_rel, plan_data)
+    }
+    if source_note_paths != allowed_source_notes:
+        return set()
+    if not _roadmap_mentions_active_plan_open_checkpoint(inventory, active_plan_rel, allowed_source_notes):
+        return set()
+    return normalized
+
+
+def _active_plan_open_checkpoint_frontmatter(
+    inventory: Inventory,
+    active_plan_rel: str,
+) -> dict[str, object] | None:
+    text = _route_file_text_for_checkpoint(inventory, active_plan_rel)
+    if text is None:
+        return None
+    try:
+        frontmatter = parse_frontmatter(text)
+    except ValueError:
+        return None
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return None
+    return frontmatter.data
+
+
+def _active_plan_open_checkpoint_matches_state(
+    state_data: dict[str, object],
+    plan_data: dict[str, object],
+    active_plan_rel: str,
+) -> bool:
+    plan_status = str(plan_data.get("status") or "").strip().casefold()
+    phase_status = str(plan_data.get("phase_status") or "").strip().casefold()
+    active_phase = str(plan_data.get("active_phase") or "").strip()
+    plan_id = str(plan_data.get("plan_id") or "").strip()
+    state_plan = _normalize_hook_path(str(state_data.get("active_plan") or "")).casefold()
+    if state_plan and state_plan != _normalize_hook_path(active_plan_rel).casefold():
+        return False
+    return bool(
+        plan_id
+        and active_phase
+        and plan_status == "pending"
+        and phase_status == "pending"
+        and phase_status == str(state_data.get("phase_status") or "").strip().casefold()
+    )
+
+
+def _active_plan_open_checkpoint_roadmap_items(plan_data: dict[str, object]) -> set[str]:
+    items = {
+        str(plan_data.get("primary_roadmap_item") or "").strip(),
+        str(plan_data.get("related_roadmap_item") or "").strip(),
+    }
+    covered = plan_data.get("covered_roadmap_items")
+    if isinstance(covered, list):
+        items.update(str(item or "").strip() for item in covered)
+    elif covered:
+        items.add(str(covered).strip())
+    return {item for item in items if item}
+
+
+def _is_active_plan_open_checkpoint_source_note(
+    inventory: Inventory,
+    path: str,
+    active_plan_rel: str,
+    plan_data: dict[str, object],
+) -> bool:
+    if not _is_meta_feedback_incubation_route_path(path):
+        return False
+    data = _reviewed_mlh_incubation_file_frontmatter(inventory, path)
+    if data is None:
+        return False
+    related_plan = _normalize_hook_path(str(data.get("related_plan") or "")).casefold()
+    if related_plan != _normalize_hook_path(active_plan_rel).casefold():
+        return False
+    related_item = str(data.get("related_roadmap_item") or "").strip()
+    covered_items = _active_plan_open_checkpoint_roadmap_items(plan_data)
+    if related_item and related_item in covered_items:
+        return True
+    source_incubation = _normalize_hook_path(str(plan_data.get("source_incubation") or "")).casefold()
+    return bool(source_incubation and source_incubation == _normalize_hook_path(path).casefold())
+
+
+def _roadmap_mentions_active_plan_open_checkpoint(
+    inventory: Inventory,
+    active_plan_rel: str,
+    source_note_paths: set[str],
+) -> bool:
+    text = _route_file_text_for_checkpoint(inventory, "project/roadmap.md")
+    if text is None:
+        return False
+    lowered = text.casefold()
+    if _normalize_hook_path(active_plan_rel).casefold() not in lowered:
+        return False
+    return all(_normalize_hook_path(path).casefold() in lowered for path in source_note_paths)
 
 
 def _coherent_post_closeout_lifecycle_vcs_finalization_paths(
@@ -6412,6 +6574,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(
 ) -> set[str]:
     if _active_plan_ready_for_route_produced_lifecycle_git(inventory) and _coherent_route_produced_lifecycle_paths(inventory, paths):
         return _normalized_route_produced_lifecycle_paths(inventory, paths)
+    active_plan_open_paths = _coherent_active_plan_open_checkpoint_paths(inventory, paths)
+    if active_plan_open_paths:
+        return active_plan_open_paths
     roadmap_promotion_paths = _coherent_roadmap_promotion_checkpoint_paths(
         inventory,
         paths,
@@ -6821,6 +6986,9 @@ def _coherent_lifecycle_stage_paths_with_existing_index(
     ):
         combined = _normalized_route_produced_lifecycle_paths(inventory, combined_paths)
         return combined if normalized_current <= combined else set()
+    active_plan_open_paths = _coherent_active_plan_open_checkpoint_paths(inventory, combined_paths)
+    if active_plan_open_paths and normalized_current <= active_plan_open_paths:
+        return active_plan_open_paths
     combined = _coherent_post_closeout_lifecycle_route_checkpoint_paths(
         inventory,
         combined_paths,
