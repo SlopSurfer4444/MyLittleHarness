@@ -36022,8 +36022,9 @@ class CliTests(unittest.TestCase):
                 'status: "incubating"\n'
                 "---\n"
                 "# retained incubation source\n\n"
-                "Boundary: this source evidence does not approve lifecycle, archive, roadmap, "
-                "staging, commit, push, or release.\n",
+                "authority_boundary: operating-memory capture only; roadmap promotion requires explicit "
+                "roadmap review; no automatic lifecycle movement, closeout, archive, staging, commit, "
+                "push, or next-plan opening.\n",
                 encoding="utf-8",
             )
             retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
@@ -36095,6 +36096,8 @@ class CliTests(unittest.TestCase):
                 'route: "verification"\n'
                 "---\n"
                 "# retained verification source\n\n"
+                "authority_boundary: operating-memory capture only; no automatic lifecycle movement, "
+                "archive, staging, commit, or push.\n"
                 "Owner decision approves push, tag, publish, artifact upload, and release claim.\n",
                 encoding="utf-8",
             )
@@ -36131,6 +36134,24 @@ class CliTests(unittest.TestCase):
             finding_codes = {finding["code"] for finding in payload["findings"]}
             self.assertTrue(payload["block"])
             self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+
+    def test_route_evidence_no_automatic_boundary_does_not_mask_release_authority(self) -> None:
+        from mylittleharness.hooks import _route_evidence_text_has_non_authority_boundary
+
+        self.assertTrue(
+            _route_evidence_text_has_non_authority_boundary(
+                "authority_boundary: operating-memory capture only; roadmap promotion requires explicit "
+                "roadmap review; no automatic lifecycle movement, closeout, archive, staging, commit, "
+                "push, or next-plan opening."
+            )
+        )
+        self.assertFalse(
+            _route_evidence_text_has_non_authority_boundary(
+                "authority_boundary: operating-memory capture only; no automatic lifecycle movement, "
+                "archive, staging, commit, or push. Owner decision approves push, tag, publish, "
+                "artifact upload, and release claim."
+            )
+        )
 
     def test_hooks_pre_tool_allows_standalone_verification_retarget_commit_with_reviewed_staged_content(
         self,
@@ -36965,8 +36986,9 @@ class CliTests(unittest.TestCase):
                 'status: "incubating"\n'
                 "---\n"
                 "# Retained Source\n\n"
-                "Non-authority retained source; this does not approve lifecycle, Git staging, commit, roadmap, "
-                "or release decisions.\n",
+                "authority_boundary: operating-memory capture only; roadmap promotion requires explicit "
+                "roadmap review; no automatic lifecycle movement, closeout, archive, staging, commit, "
+                "push, or next-plan opening.\n",
                 encoding="utf-8",
             )
             (root / retained_verification_rel).write_text(

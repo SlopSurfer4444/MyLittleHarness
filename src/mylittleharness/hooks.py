@@ -8103,8 +8103,10 @@ def _route_evidence_grants_authority(value: object) -> bool:
 
 
 def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
+    if _route_evidence_text_has_release_authorizing_claim(text):
+        return False
     content = text.casefold()
-    return (
+    explicit_non_authority = (
         (
             "cannot approve" in content
             or "does not approve" in content
@@ -8116,6 +8118,12 @@ def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
         and ("lifecycle" in content or "roadmap" in content)
         and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
     )
+    no_automatic_boundary = (
+        "no automatic" in content
+        and ("lifecycle" in content or "roadmap" in content)
+        and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
+    )
+    return explicit_non_authority or no_automatic_boundary
 
 
 def _route_evidence_text_has_safe_release_boundary(text: str) -> bool:
