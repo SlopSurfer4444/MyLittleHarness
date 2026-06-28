@@ -5460,8 +5460,31 @@ def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: st
                 staged_paths,
                 prefer_staged_state=True,
             )
+            or _coherent_post_closeout_standalone_verification_checkpoint_commit_paths(
+                inventory,
+                staged_paths,
+            )
         )
     return True
+
+
+def _coherent_post_closeout_standalone_verification_checkpoint_commit_paths(
+    inventory: Inventory, paths: tuple[str, ...]
+) -> set[str]:
+    if not paths:
+        return set()
+    normalized = tuple(
+        _normalize_hook_path(_hook_route_rel_path(inventory, path) or path).casefold()
+        for path in paths
+    )
+    if not all(_is_top_level_verification_checkpoint_path(path) for path in normalized):
+        return set()
+    if not all(
+        _is_reviewed_staged_top_level_verification_checkpoint_file(inventory, path)
+        for path in normalized
+    ):
+        return set()
+    return set(normalized)
 
 
 def _post_closeout_lifecycle_vcs_finalization_paths(inventory: Inventory, command: str) -> set[str]:
@@ -7702,14 +7725,34 @@ def _route_evidence_text_has_release_authorizing_claim(text: str) -> bool:
         return False
     if re.search(
         r"\b(?:owner decision|owner gate|owner approval|approval packet|release decision)\s+"
-        r"(?:has\s+)?(?:approves|approved|authorizes|authorized|grants|granted)\b",
+        r"(?:has\s+)?"
+        r"(?:approves|approved|authorizes|authorized|grants|granted|allows|allowed|permits|permitted|clears|cleared|greenlights|greenlit)\b",
         content,
     ):
         return True
-    if re.search(rf"\b(?:approves|authorizes|grants)\b[^\n.]*\b{release_term}\b", content):
+    if re.search(
+        rf"\b(?:approves|authorizes|grants|allows|permits|clears|greenlights)\b[^\n.]*\b{release_term}\b",
+        content,
+    ):
         return True
-    if re.search(rf"\bapproved for\b[^\n.]*\b{release_term}\b", content):
-        return not re.search(r"\b(?:not|never|no)\s+approved for\b", content)
+    if re.search(
+        rf"\b(?:approved|authorized|granted|allowed|permitted|cleared|greenlit) for\b[^\n.]*\b{release_term}\b",
+        content,
+    ):
+        return not re.search(
+            r"\b(?:not|never|no)\s+(?:approved|authorized|granted|allowed|permitted|cleared|greenlit) for\b",
+            content,
+        )
+    if re.search(
+        rf"\b{release_term}\b\s+"
+        r"(?:is|are|was|were|has\s+been|have\s+been)\s+"
+        r"(?!(?:not|never|no)\b)"
+        r"(?:approved|authorized|granted|allowed|permitted|cleared|greenlit)\s+"
+        r"(?:by|via|from)\s+"
+        r"(?:owner decision|owner gate|owner approval|approval packet|release decision)\b",
+        content,
+    ):
+        return True
     return False
 
 
@@ -8468,8 +8511,28 @@ def _is_reviewed_top_level_verification_checkpoint_file(inventory: Inventory, pa
         if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
             return False
         text = route_path.read_text(encoding="utf-8")
-        frontmatter = parse_frontmatter(text)
     except (OSError, UnicodeDecodeError):
+        return False
+    return _is_reviewed_top_level_verification_checkpoint_text(inventory, path, text)
+
+
+def _is_reviewed_staged_top_level_verification_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    if not _is_top_level_verification_checkpoint_path(path):
+        return False
+    text = _git_staged_file_text_for_root(inventory.root, path)
+    if text is None:
+        return False
+    return _is_reviewed_top_level_verification_checkpoint_text(inventory, path, text)
+
+
+def _is_reviewed_top_level_verification_checkpoint_text(
+    inventory: Inventory, path: str, text: str
+) -> bool:
+    if not _is_top_level_verification_checkpoint_path(path):
+        return False
+    try:
+        frontmatter = parse_frontmatter(text)
+    except (TypeError, ValueError):
         return False
     if not frontmatter.has_frontmatter or frontmatter.errors:
         return False
@@ -8508,11 +8571,16 @@ def _verification_checkpoint_has_unreviewed_incubation_source_member(
 ) -> bool:
     source_members = data.get("source_members")
     if not isinstance(source_members, list):
-        return False
+        return "source_members" in data
     for member in source_members:
-        clean = _hook_route_rel_path(inventory, str(member or "")).casefold()
+        if not isinstance(member, str) or not member.strip():
+            return True
+        raw = member.strip()
+        if _source_member_route_token_is_malformed(raw):
+            return True
+        clean = _hook_route_rel_path(inventory, raw).casefold()
         if not clean:
-            continue
+            return True
         if _is_meta_feedback_incubation_route_path(clean):
             return True
         if _is_memory_hygiene_archive_reference_path(clean) and not _is_reviewed_memory_hygiene_archive_reference_file(
@@ -8520,6 +8588,14 @@ def _verification_checkpoint_has_unreviewed_incubation_source_member(
         ):
             return True
     return False
+
+
+def _source_member_route_token_is_malformed(raw: str) -> bool:
+    normalized = _normalize_hook_path(raw).casefold()
+    if normalized.startswith(("{", "[")):
+        return True
+    first_segment = normalized.split("/", 1)[0]
+    return ":" in first_segment
 
 
 def _route_frontmatter_grants_checkpoint_authority(data: dict[str, object]) -> bool:

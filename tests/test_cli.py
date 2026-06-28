@@ -35637,6 +35637,187 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_standalone_verification_retarget_commit_with_reviewed_staged_content(
+        self,
+    ) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_note_rel = self._write_public_rc_archive_reference_fixture(root)
+            verification_rel = "project/" + "verification/2026-06-20-public-rc-compat-framing-preflight.md"
+            verification_path = root / verification_rel
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            safe_staged_text = (
+                "---\n"
+                'title: "Public RC compatibility framing preflight"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                'related_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "source_members:\n"
+                f'  - "{archive_note_rel}"\n'
+                'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "---\n"
+                "# Public RC compatibility framing preflight\n\n"
+                "RC readiness conclusion: technical/package preflight is green, with the remaining "
+                "owner gate limited to explicit approval before push, tag, publish, artifact upload, "
+                "final marketing README rewrite, or release claim.\n"
+            )
+            verification_path.write_text(
+                safe_staged_text.replace(
+                    "owner gate limited to explicit approval before",
+                    "owner decision approves",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git commit -F reviewed-message.txt",
+                }
+            )
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=(verification_rel,)),
+                patch(
+                    "mylittleharness.hooks._git_staged_file_text_for_root",
+                    return_value=safe_staged_text,
+                ) as staged_blob,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            staged_blob.assert_called_with(root, verification_rel)
+
+    def test_hooks_pre_tool_blocks_standalone_verification_retarget_commit_with_unsafe_staged_content(
+        self,
+    ) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_note_rel = self._write_public_rc_archive_reference_fixture(root)
+            live_note_rel = "project/" + "plan-incubation/public-rc-source-neutrality-gate.md"
+            unreviewed_archive_rel = (
+                "project/archive/reference/incubation/unreviewed-public-rc-source-neutrality-gate.md"
+            )
+            verification_rel = "project/verification/public-rc-retarget.md"
+            verification_path = root / verification_rel
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            safe_worktree_text = (
+                "---\n"
+                'title: "Public RC compatibility framing preflight"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                "source_members:\n"
+                f'  - "{archive_note_rel}"\n'
+                'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "---\n"
+                "# Public RC compatibility framing preflight\n\n"
+                "RC readiness remains owner gate limited to explicit approval before push, tag, "
+                "publish, artifact upload, final marketing README rewrite, or release claim.\n"
+            )
+            verification_path.write_text(safe_worktree_text, encoding="utf-8")
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git commit -F reviewed-message.txt",
+                }
+            )
+            cases = {
+                "release_authorizing_allows": (
+                    (verification_rel,),
+                    safe_worktree_text.replace(
+                        "owner gate limited to explicit approval before",
+                        "owner gate allows",
+                        1,
+                    ),
+                    True,
+                ),
+                "release_authorizing_passive": (
+                    (verification_rel,),
+                    safe_worktree_text.replace(
+                        "RC readiness remains owner gate limited to explicit approval before push, tag, "
+                        "publish, artifact upload, final marketing README rewrite, or release claim.",
+                        "Push is cleared by owner gate for tag, publish, artifact upload, and release claim.",
+                        1,
+                    ),
+                    True,
+                ),
+                "live_source_member": (
+                    (verification_rel,),
+                    safe_worktree_text.replace(
+                        f'  - "{archive_note_rel}"\n',
+                        f'  - "{live_note_rel}"\n',
+                        1,
+                    ),
+                    True,
+                ),
+                "unreviewed_archive_source_member": (
+                    (verification_rel,),
+                    safe_worktree_text.replace(
+                        f'  - "{archive_note_rel}"\n',
+                        f'  - "{unreviewed_archive_rel}"\n',
+                        1,
+                    ),
+                    True,
+                ),
+                "scalar_live_source_member": (
+                    (verification_rel,),
+                    safe_worktree_text.replace(
+                        "source_members:\n" f'  - "{archive_note_rel}"\n',
+                        f'source_members: "{live_note_rel}"\n',
+                        1,
+                    ),
+                    True,
+                ),
+                "malformed_list_live_source_member": (
+                    (verification_rel,),
+                    (
+                        "---\n"
+                        'title: "Public RC compatibility framing preflight"\n'
+                        'status: "passed"\n'
+                        'route: "verification"\n'
+                        "source_members:\n"
+                        f'  - path: "{live_note_rel}"\n'
+                        'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                        'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                        "---\n"
+                        "# Public RC compatibility framing preflight\n\n"
+                        "Boundary: this verification is evidence only. It does not approve lifecycle, "
+                        "archive, roadmap, staging, commit, push, release, or publication.\n"
+                    ),
+                    True,
+                ),
+                "mixed_staged_paths": ((verification_rel, "README.md"), safe_worktree_text, False),
+            }
+
+            for name, (staged_paths, staged_text, should_read_staged_blob) in cases.items():
+                with self.subTest(name=name):
+                    with (
+                        patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths),
+                        patch(
+                            "mylittleharness.hooks._git_staged_file_text_for_root",
+                            return_value=staged_text,
+                        ) as staged_blob,
+                    ):
+                        payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
+                    if should_read_staged_blob:
+                        staged_blob.assert_called_with(root, verification_rel)
+                    else:
+                        staged_blob.assert_not_called()
+
     def test_hooks_pre_tool_blocks_standalone_verification_retarget_without_safe_boundary(
         self,
     ) -> None:
@@ -35655,6 +35836,10 @@ class CliTests(unittest.TestCase):
                     (archive_note_rel,),
                     "Owner gate approves push, tag, publish, artifact upload, and release claim. "
                     "Boundary: this note does not approve lifecycle, archive, roadmap, staging, or commit.\n",
+                ),
+                "release_authorizing_passive": (
+                    (archive_note_rel,),
+                    "Push is cleared by owner gate for tag, publish, artifact upload, and release claim.\n",
                 ),
                 "live_source_member": (
                     (live_note_rel,),
