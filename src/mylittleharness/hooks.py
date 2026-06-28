@@ -6743,17 +6743,18 @@ def _is_reviewed_post_closeout_top_level_verification_extra_file(
         for member in source_members
         if str(member or "").strip()
     }
+    if not normalized_members:
+        return False
     if not normalized_members.intersection(reviewed_source_archives):
         return False
-    content = text.casefold()
-    has_release_boundary = (
-        "no push" in content
-        or "approval before" in content
-        or "owner gate" in content
-    ) and any(
-        term in content for term in ("push", "tag", "publish", "artifact upload", "release claim")
-    )
-    return _route_evidence_text_has_non_authority_boundary(text) or has_release_boundary
+    if not all(
+        member in reviewed_source_archives or _is_reviewed_memory_hygiene_archive_reference_file(inventory, member)
+        for member in normalized_members
+    ):
+        return False
+    if _route_evidence_text_has_release_authorizing_claim(text):
+        return False
+    return _route_evidence_text_has_non_authority_boundary(text) or _route_evidence_text_has_safe_release_boundary(text)
 
 
 def _coherent_route_produced_lifecycle_stage_paths(
@@ -7683,6 +7684,35 @@ def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
     )
 
 
+def _route_evidence_text_has_safe_release_boundary(text: str) -> bool:
+    if _route_evidence_text_has_release_authorizing_claim(text):
+        return False
+    content = text.casefold()
+    return (
+        "no push" in content
+        or "approval before" in content
+        or "owner gate" in content
+    ) and any(term in content for term in ("push", "tag", "publish", "artifact upload", "release claim"))
+
+
+def _route_evidence_text_has_release_authorizing_claim(text: str) -> bool:
+    content = text.casefold()
+    release_term = r"(?:push|tag|publish|artifact upload|release claim)"
+    if not re.search(rf"\b{release_term}\b", content):
+        return False
+    if re.search(
+        r"\b(?:owner decision|owner gate|owner approval|approval packet|release decision)\s+"
+        r"(?:has\s+)?(?:approves|approved|authorizes|authorized|grants|granted)\b",
+        content,
+    ):
+        return True
+    if re.search(rf"\b(?:approves|authorizes|grants)\b[^\n.]*\b{release_term}\b", content):
+        return True
+    if re.search(rf"\bapproved for\b[^\n.]*\b{release_term}\b", content):
+        return not re.search(r"\b(?:not|never|no)\s+approved for\b", content)
+    return False
+
+
 def _is_meta_feedback_incubation_route_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.startswith("project/plan-incubation/") and rel.endswith(".md")
@@ -8443,9 +8473,53 @@ def _is_reviewed_top_level_verification_checkpoint_file(inventory: Inventory, pa
         return False
     if not frontmatter.has_frontmatter or frontmatter.errors:
         return False
-    if _route_frontmatter_grants_checkpoint_authority(frontmatter.data):
+    data = frontmatter.data
+    if _route_frontmatter_grants_checkpoint_authority(data):
         return False
+    if _route_evidence_text_has_release_authorizing_claim(text):
+        return False
+    if _verification_checkpoint_has_unreviewed_incubation_source_member(inventory, data):
+        return False
+    if _route_evidence_text_has_safe_release_boundary(text):
+        if str(data.get("route") or "").strip().casefold() != "verification":
+            return False
+        return _verification_checkpoint_has_only_reviewed_archive_source_members(inventory, data)
     return _route_evidence_text_has_non_authority_boundary(text)
+
+
+def _verification_checkpoint_has_only_reviewed_archive_source_members(
+    inventory: Inventory, data: dict[str, object]
+) -> bool:
+    source_members = data.get("source_members")
+    if not isinstance(source_members, list):
+        return False
+    normalized_members = [
+        _hook_route_rel_path(inventory, str(member or "")).casefold()
+        for member in source_members
+        if str(member or "").strip()
+    ]
+    if not normalized_members:
+        return False
+    return all(_is_reviewed_memory_hygiene_archive_reference_file(inventory, member) for member in normalized_members)
+
+
+def _verification_checkpoint_has_unreviewed_incubation_source_member(
+    inventory: Inventory, data: dict[str, object]
+) -> bool:
+    source_members = data.get("source_members")
+    if not isinstance(source_members, list):
+        return False
+    for member in source_members:
+        clean = _hook_route_rel_path(inventory, str(member or "")).casefold()
+        if not clean:
+            continue
+        if _is_meta_feedback_incubation_route_path(clean):
+            return True
+        if _is_memory_hygiene_archive_reference_path(clean) and not _is_reviewed_memory_hygiene_archive_reference_file(
+            inventory, clean
+        ):
+            return True
+    return False
 
 
 def _route_frontmatter_grants_checkpoint_authority(data: dict[str, object]) -> bool:

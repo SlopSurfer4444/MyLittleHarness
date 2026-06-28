@@ -35597,6 +35597,121 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["block"])
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
 
+    def test_hooks_pre_tool_allows_standalone_verification_retarget_with_reviewed_archive_source(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_note_rel = self._write_public_rc_archive_reference_fixture(root)
+            verification_rel = "project/" + "verification/2026-06-20-public-rc-compat-framing-preflight.md"
+            verification_path = root / verification_rel
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            verification_path.write_text(
+                "---\n"
+                'title: "Public RC compatibility framing preflight"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                'related_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "source_members:\n"
+                f'  - "{archive_note_rel}"\n'
+                'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "---\n"
+                "# Public RC compatibility framing preflight\n\n"
+                "RC readiness conclusion: technical/package preflight is green, with the remaining "
+                "owner gate limited to explicit approval before push, tag, publish, artifact upload, "
+                "final marketing README rewrite, or release claim.\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {verification_rel}",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_blocks_standalone_verification_retarget_without_safe_boundary(
+        self,
+    ) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_note_rel = self._write_public_rc_archive_reference_fixture(root)
+            live_note_rel = "project/" + "plan-incubation/public-rc-source-neutrality-gate.md"
+            cases = {
+                "release_authorizing": (
+                    (archive_note_rel,),
+                    "Owner decision approves push, tag, publish, artifact upload, and release claim.\n",
+                ),
+                "owner_gate_authorizing": (
+                    (archive_note_rel,),
+                    "Owner gate approves push, tag, publish, artifact upload, and release claim. "
+                    "Boundary: this note does not approve lifecycle, archive, roadmap, staging, or commit.\n",
+                ),
+                "live_source_member": (
+                    (live_note_rel,),
+                    "RC readiness remains owner gate limited to explicit approval before push, tag, "
+                    "publish, artifact upload, final marketing README rewrite, or release claim.\n",
+                ),
+                "live_source_member_non_authority": (
+                    (live_note_rel,),
+                    "Boundary: this verification is evidence only. It does not approve lifecycle, "
+                    "archive, roadmap, staging, commit, push, release, or publication.\n",
+                ),
+                "unreviewed_archive_source_member": (
+                    ("project/archive/reference/incubation/unreviewed-public-rc-source-neutrality-gate.md",),
+                    "Boundary: this verification is evidence only. It does not approve lifecycle, "
+                    "archive, roadmap, staging, commit, push, release, or publication.\n",
+                ),
+                "mixed_source_members": (
+                    (archive_note_rel, live_note_rel),
+                    "RC readiness remains owner gate limited to explicit approval before push, tag, "
+                    "publish, artifact upload, final marketing README rewrite, or release claim.\n",
+                ),
+            }
+
+            for name, (source_members, body) in cases.items():
+                with self.subTest(name=name):
+                    verification_rel = f"project/verification/{name}-public-rc-retarget.md"
+                    verification_path = root / verification_rel
+                    verification_path.parent.mkdir(parents=True, exist_ok=True)
+                    verification_path.write_text(
+                        "---\n"
+                        'title: "Public RC compatibility framing preflight"\n'
+                        'status: "passed"\n'
+                        'route: "verification"\n'
+                        "source_members:\n"
+                        + "".join(f'  - "{member}"\n' for member in source_members)
+                        + 'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                        'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                        "---\n"
+                        "# Public RC compatibility framing preflight\n\n"
+                        f"{body}",
+                        encoding="utf-8",
+                    )
+                    stage_input = json.dumps(
+                        {
+                            "toolName": "shell_command",
+                            "command": f"git add -- {verification_rel}",
+                        }
+                    )
+
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+                    self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+
     def test_hooks_pre_tool_allows_exact_archived_source_incubation_tombstone_stage(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -36104,6 +36219,34 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return note_rel
+
+    def _write_public_rc_archive_reference_fixture(self, root: Path) -> str:
+        archive_note_rel = (
+            "project/" + "archive/reference/incubation/2026-06-28-public-rc-source-neutrality-gate.md"
+        )
+        archive_note_path = root / archive_note_rel
+        archive_note_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_note_path.write_text(
+            "---\n"
+            'topic: "public RC source neutrality gate"\n'
+            'status: "implemented"\n'
+            'source: "MyLittleHarness incubation route"\n'
+            'related_plan: "project/archive/plans/2026-06-28-first-class-route-intake-framework.md"\n'
+            'archived_plan: "project/archive/plans/2026-06-28-first-class-route-intake-framework.md"\n'
+            'implemented_by: "project/archive/plans/2026-06-28-first-class-route-intake-framework.md"\n'
+            f'archived_to: "{archive_note_rel}"\n'
+            "---\n"
+            "# public RC source neutrality gate\n\n"
+            "## Provenance\n\n"
+            "- Source: MyLittleHarness incubation route\n"
+            "- Non-authority note: incubation is temporary synthesis; promoted plan/state remains authority.\n\n"
+            "## Entries\n\n"
+            "[MLH-Fix-Candidate]\n"
+            "authority_boundary: evidence only; cannot approve lifecycle, archive, roadmap, staging, "
+            "commit, push, tag, publish, release claim, or publication.\n",
+            encoding="utf-8",
+        )
+        return archive_note_rel
 
     def _write_reviewed_worker_receipt_checkpoint_fixture(self, root: Path) -> tuple[str, str, str]:
         receipt_rel = "project/" + "verification/worker-run-receipts/launch-1-worker-1.json"
