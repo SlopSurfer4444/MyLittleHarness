@@ -41965,6 +41965,170 @@ class CliTests(unittest.TestCase):
             self.assertTrue(archive_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", archive_codes)
 
+    def test_hooks_pre_tool_allows_active_plan_phase_transition_checkpoint_package(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="pending")
+            state_rel = "project/" + "project-state.md"
+            plan_rel = "project/" + "implementation-plan.md"
+            roadmap_rel = "project/" + "roadmap.md"
+            state_path = root / state_rel
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-2-verification-and-docs"',
+                )
+                + "\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                + "- state_writeback: moved active_phase to phase-2-verification-and-docs\n"
+                + "- phase_status: pending\n"
+                + "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / plan_rel).write_text(
+                "---\n"
+                'plan_id: "phase-transition-checkpoint"\n'
+                'status: "pending"\n'
+                'active_phase: "phase-2-verification-and-docs"\n'
+                'phase_status: "pending"\n'
+                'docs_decision: "not-needed"\n'
+                "---\n"
+                "# Phase Transition Checkpoint\n",
+                encoding="utf-8",
+            )
+
+            stage_paths = (state_rel, plan_rel)
+            message_file = Path(tmp) / "message.txt"
+            message_file.write_text("checkpoint\n", encoding="utf-8")
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths]),
+                }
+            )
+            bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths])
+                    + "; git diff --cached --name-status; git diff --cached --check",
+                }
+            )
+            full_diff_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths]) + "; git diff --cached",
+                }
+            )
+            commit_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "commit", "-F", str(message_file)]),
+                }
+            )
+            single_state_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", state_rel]),
+                }
+            )
+            extra_roadmap_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths, roadmap_rel]),
+                }
+            )
+            safe_state_text = state_path.read_text(encoding="utf-8")
+            safe_plan_text = (root / plan_rel).read_text(encoding="utf-8")
+
+            def safe_staged_text(_root: Path, rel_path: str) -> str | None:
+                return {
+                    state_rel: safe_state_text,
+                    plan_rel: safe_plan_text,
+                }.get(rel_path)
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths", return_value=stage_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=safe_staged_text),
+            ):
+                stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+                bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bundle_input)
+                full_diff_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], full_diff_input)
+                commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+                single_state_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], single_state_input)
+                extra_roadmap_payload = hook_event_payload(
+                    load_inventory(root), HOOK_PRE_TOOL_USE, [], extra_roadmap_input
+                )
+
+            stage_codes = {finding["code"] for finding in stage_payload["findings"]}
+            bundle_codes = {finding["code"] for finding in bundle_payload["findings"]}
+            full_diff_codes = {finding["code"] for finding in full_diff_payload["findings"]}
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            single_state_codes = {finding["code"] for finding in single_state_payload["findings"]}
+            extra_roadmap_codes = {finding["code"] for finding in extra_roadmap_payload["findings"]}
+            self.assertFalse(stage_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", stage_codes)
+            self.assertFalse(bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", bundle_codes)
+            self.assertTrue(full_diff_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", full_diff_codes)
+            self.assertFalse(commit_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-commit", commit_codes)
+            self.assertTrue(single_state_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", single_state_codes)
+            self.assertTrue(extra_roadmap_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", extra_roadmap_codes)
+
+            state_path.write_text(safe_state_text.split("\n<!-- BEGIN mylittleharness-closeout-writeback v1 -->", 1)[0], encoding="utf-8")
+            no_marker_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            no_marker_codes = {finding["code"] for finding in no_marker_payload["findings"]}
+            self.assertTrue(no_marker_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", no_marker_codes)
+
+            state_path.write_text(
+                safe_state_text.replace(
+                    "- state_writeback: moved active_phase to phase-2-verification-and-docs\n",
+                    "- state_writeback: moved active_phase to stale-earlier-phase\n",
+                ),
+                encoding="utf-8",
+            )
+            stale_marker_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            stale_marker_codes = {finding["code"] for finding in stale_marker_payload["findings"]}
+            self.assertTrue(stale_marker_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", stale_marker_codes)
+
+            state_path.write_text(safe_state_text, encoding="utf-8")
+            staged_bad_state_text = safe_state_text.replace(
+                'active_phase: "phase-2-verification-and-docs"',
+                'active_phase: "unreviewed-phase"',
+                1,
+            )
+            staged_bad_plan_text = safe_plan_text.replace(
+                'active_phase: "phase-2-verification-and-docs"',
+                'active_phase: "unreviewed-phase"',
+                1,
+            )
+
+            def staged_text(_root: Path, rel_path: str) -> str | None:
+                return {
+                    state_rel: staged_bad_state_text,
+                    plan_rel: staged_bad_plan_text,
+                }.get(rel_path)
+
+            with (
+                patch("mylittleharness.hooks._git_staged_paths", return_value=stage_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=staged_text),
+            ):
+                staged_bad_commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
+            staged_bad_commit_codes = {finding["code"] for finding in staged_bad_commit_payload["findings"]}
+            self.assertTrue(staged_bad_commit_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", staged_bad_commit_codes)
+
     def test_hooks_pre_tool_allows_blocked_active_plan_lifecycle_checkpoint_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 

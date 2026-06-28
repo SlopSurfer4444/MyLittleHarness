@@ -4884,6 +4884,8 @@ def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, comma
         return True
     if _coherent_active_plan_open_checkpoint_paths(inventory, pathspecs):
         return True
+    if _coherent_active_plan_phase_transition_checkpoint_paths(inventory, pathspecs):
+        return True
     if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
         return False
     return bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
@@ -4912,6 +4914,8 @@ def _is_route_produced_lifecycle_route_stage_review_bundle(inventory: Inventory,
     coherent = bool(_coherent_roadmap_promotion_checkpoint_paths(inventory, pathspecs))
     if not coherent:
         coherent = bool(_coherent_active_plan_open_checkpoint_paths(inventory, pathspecs))
+    if not coherent:
+        coherent = bool(_coherent_active_plan_phase_transition_checkpoint_paths(inventory, pathspecs))
     if not coherent and _active_plan_ready_for_route_produced_lifecycle_git(inventory):
         coherent = bool(_coherent_route_produced_lifecycle_stage_paths(inventory, pathspecs))
     if not coherent:
@@ -6106,6 +6110,12 @@ def _is_route_produced_lifecycle_commit_command(inventory: Inventory, command: s
     staged_paths = _git_staged_paths(inventory)
     if _coherent_active_plan_open_checkpoint_paths(inventory, staged_paths):
         return True
+    if _coherent_active_plan_phase_transition_checkpoint_paths(
+        inventory,
+        staged_paths,
+        prefer_staged_content=True,
+    ):
+        return True
     if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
         return False
     return _coherent_route_produced_lifecycle_paths(inventory, staged_paths)
@@ -6255,11 +6265,93 @@ def _coherent_active_plan_open_checkpoint_paths(
     return normalized
 
 
+def _coherent_active_plan_phase_transition_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
+) -> set[str]:
+    if not _has_active_plan(inventory):
+        return set()
+    state_rel = "project/" + "project-state.md"
+    state_text = _route_file_text_for_checkpoint(
+        inventory,
+        state_rel,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if state_text is None:
+        return set()
+    try:
+        state_frontmatter = parse_frontmatter(state_text)
+    except ValueError:
+        return set()
+    if not state_frontmatter.has_frontmatter or state_frontmatter.errors:
+        return set()
+    state_data = state_frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "active":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "pending":
+        return set()
+    active_plan_rel = _normalize_hook_path(str(state_data.get("active_plan") or "")).casefold()
+    if not active_plan_rel:
+        return set()
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if normalized != {state_rel, active_plan_rel}:
+        return set()
+    if not _state_has_current_phase_transition_writeback(state_text, state_data):
+        return set()
+    plan_data = _active_plan_open_checkpoint_frontmatter(
+        inventory,
+        active_plan_rel,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if plan_data is None:
+        return set()
+    if not _active_plan_open_checkpoint_matches_state(state_data, plan_data, active_plan_rel):
+        return set()
+    return normalized
+
+
+def _state_has_current_phase_transition_writeback(state_text: str, state_data: dict[str, object]) -> bool:
+    active_phase = str(state_data.get("active_phase") or "").strip().casefold()
+    phase_status = str(state_data.get("phase_status") or "").strip().casefold()
+    if not active_phase or phase_status != "pending":
+        return False
+    blocks = _route_writeback_blocks(state_text)
+    if not blocks:
+        return False
+    latest = blocks[-1].casefold()
+    return "state_writeback" in latest and "active_phase" in latest and active_phase in latest and "pending" in latest
+
+
+def _route_writeback_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    for marker in ROUTE_WRITEBACK_MARKERS:
+        end_marker = marker.replace("BEGIN", "END", 1)
+        start = 0
+        while True:
+            index = text.find(marker, start)
+            if index < 0:
+                break
+            end = text.find(end_marker, index + len(marker))
+            if end < 0:
+                break
+            blocks.append(text[index : end + len(end_marker)])
+            start = end + len(end_marker)
+    return sorted(blocks, key=text.find)
+
+
 def _active_plan_open_checkpoint_frontmatter(
     inventory: Inventory,
     active_plan_rel: str,
+    *,
+    prefer_staged_content: bool = False,
 ) -> dict[str, object] | None:
-    text = _route_file_text_for_checkpoint(inventory, active_plan_rel)
+    text = _route_file_text_for_checkpoint(
+        inventory,
+        active_plan_rel,
+        prefer_staged_content=prefer_staged_content,
+    )
     if text is None:
         return None
     try:
@@ -6281,11 +6373,13 @@ def _active_plan_open_checkpoint_matches_state(
     active_phase = str(plan_data.get("active_phase") or "").strip()
     plan_id = str(plan_data.get("plan_id") or "").strip()
     state_plan = _normalize_hook_path(str(state_data.get("active_plan") or "")).casefold()
+    state_phase = str(state_data.get("active_phase") or "").strip()
     if state_plan and state_plan != _normalize_hook_path(active_plan_rel).casefold():
         return False
     return bool(
         plan_id
         and active_phase
+        and active_phase == state_phase
         and plan_status == "pending"
         and phase_status == "pending"
         and phase_status == str(state_data.get("phase_status") or "").strip().casefold()
@@ -6596,6 +6690,9 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(
     active_plan_open_paths = _coherent_active_plan_open_checkpoint_paths(inventory, paths)
     if active_plan_open_paths:
         return active_plan_open_paths
+    active_plan_phase_transition_paths = _coherent_active_plan_phase_transition_checkpoint_paths(inventory, paths)
+    if active_plan_phase_transition_paths:
+        return active_plan_phase_transition_paths
     roadmap_promotion_paths = _coherent_roadmap_promotion_checkpoint_paths(
         inventory,
         paths,
