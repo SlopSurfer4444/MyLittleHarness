@@ -6235,8 +6235,6 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
         return False
     if archive_paths and last_archive_rel and last_archive_rel not in normalized:
         return False
-    if roadmap_rel in normalized and not archive_paths and active_plan_rel and active_plan_rel not in normalized:
-        return False
     return True
 
 

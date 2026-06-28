@@ -41496,14 +41496,26 @@ class CliTests(unittest.TestCase):
                     "command": " ".join(["git", "add", "--", state_rel, active_plan_rel, roadmap_rel]),
                 }
             )
-            partial_stage_input = json.dumps(
+            state_roadmap_input = json.dumps(
                 {
                     "toolName": "shell_command",
                     "command": " ".join(["git", "add", "--", state_rel, roadmap_rel]),
                 }
             )
+            partial_stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", state_rel]),
+                }
+            )
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            state_roadmap_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                state_roadmap_input,
+            )
             active_plan_payload = hook_event_payload(
                 load_inventory(root),
                 HOOK_PRE_TOOL_USE,
@@ -41513,12 +41525,16 @@ class CliTests(unittest.TestCase):
             partial_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], partial_stage_input)
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
+            state_roadmap_codes = {finding["code"] for finding in state_roadmap_payload["findings"]}
             active_plan_codes = {finding["code"] for finding in active_plan_payload["findings"]}
             partial_codes = {finding["code"] for finding in partial_payload["findings"]}
             partial_messages = "\n".join(str(finding["message"]) for finding in partial_payload["findings"])
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertFalse(state_roadmap_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", state_roadmap_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", state_roadmap_codes)
             self.assertFalse(active_plan_payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", active_plan_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", active_plan_codes)
@@ -42282,11 +42298,14 @@ class CliTests(unittest.TestCase):
             ):
                 active_plan_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_f_input)
             with patch("mylittleharness.hooks._git_staged_paths", return_value=(state_rel, roadmap_rel)):
+                state_roadmap_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_f_input)
+            with patch("mylittleharness.hooks._git_staged_paths", return_value=(state_rel,)):
                 partial_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_f_input)
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
             lower_codes = {finding["code"] for finding in lower_payload["findings"]}
             active_plan_codes = {finding["code"] for finding in active_plan_payload["findings"]}
+            state_roadmap_codes = {finding["code"] for finding in state_roadmap_payload["findings"]}
             partial_codes = {finding["code"] for finding in partial_payload["findings"]}
             partial_messages = "\n".join(str(finding["message"]) for finding in partial_payload["findings"])
             self.assertFalse(payload["block"])
@@ -42295,6 +42314,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(active_plan_payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-commit", active_plan_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", active_plan_codes)
+            self.assertFalse(state_roadmap_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-commit", state_roadmap_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", state_roadmap_codes)
             self.assertTrue(lower_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", lower_codes)
             self.assertTrue(partial_payload["block"])
