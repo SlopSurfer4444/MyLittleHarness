@@ -2055,7 +2055,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "allowed exact Git staging of existing MLH lifecycle route files for a reviewed active plan-open "
                     "package or active-phase route writeback evidence; broad add, generated/runtime caches, "
                     "partial lifecycle staging, commit, push, roadmap movement, and future lifecycle decisions remain unapproved; "
-                    "review bundles may append only git status --short and git diff --cached --check in the same operating root; "
+                    "review bundles may append only git status and staged diff summary/check commands in the same operating root; "
                     "if Git ignore rules hide a route-created artifact, use git add -f -- <exact-route-artifact> for that artifact only"
                 ),
                 paths[0] if paths else None,
@@ -2127,7 +2127,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 (
                     "allowed exact Git staging from the configured product_source_root workdir "
                     f"{stage_context}; "
-                    "review bundles may append only git status --short and git diff --cached --check in the same product root; "
+                    "review bundles may append only git status and staged diff summary/check commands in the same product root; "
                     "operating-root lifecycle files, broad add, wildcards, directories, commit, push, reset, and clean "
                     "remain outside this allowance"
                 ),
@@ -5738,7 +5738,7 @@ def _reviewed_local_vcs_checkpoint_review_bundle(
                     f"actual command workdir/root is {target_inventory.root.resolve()}; "
                     "split any message-file creation from the final narrow local VCS command; "
                     "checkpoint convenience bundle may contain only exact git add/stage followed by "
-                    "read-only git status and git diff --cached --check review commands"
+                    "read-only git status and staged diff summary/check review commands"
                 ),
             )
         segment_root, segment_reason = _neighbor_mlh_root_inventory(inventory, data, segment)
@@ -5985,7 +5985,8 @@ def _is_reviewed_local_vcs_checkpoint_review_segment(command: str) -> bool:
     if subcommand != "diff" or subcommand_index < 0:
         return False
     args = {_clean_token(token) for token in tokens[subcommand_index + 1 :] if _clean_token(token)}
-    return "--cached" in args and "--check" in args
+    staged_summary_args = {"--check", "--name-status", "--name-only"}
+    return "--cached" in args and bool(args & staged_summary_args)
 
 
 def _checkpoint_uses_visible_workdir(inventory: Inventory, data: dict[str, object], target_root: Path) -> bool:

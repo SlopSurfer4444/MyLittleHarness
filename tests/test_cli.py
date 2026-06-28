@@ -40737,7 +40737,7 @@ class CliTests(unittest.TestCase):
             bundle_messages = "\n".join(str(finding["message"]) for finding in bundle_payload["findings"])
             self.assertFalse(bundle_payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", bundle_codes)
-            self.assertIn("review bundles may append only git status --short", bundle_messages)
+            self.assertIn("review bundles may append only git status and staged diff summary/check commands", bundle_messages)
             self.assertIn("git add -f -- <exact-route-artifact>", bundle_messages)
             self.assertTrue(broad_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_codes)
@@ -41878,6 +41878,21 @@ class CliTests(unittest.TestCase):
                     + "; git status --short; git diff --cached --check",
                 }
             )
+            name_status_bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths])
+                    + "; git diff --cached --name-status; git diff --cached --name-only",
+                }
+            )
+            full_diff_bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "workdir": str(root),
+                    "command": " ".join(["git", "add", "--", *stage_paths]) + "; git diff --cached",
+                }
+            )
             commit_input = json.dumps(
                 {
                     "toolName": "shell_command",
@@ -41918,12 +41933,20 @@ class CliTests(unittest.TestCase):
             with patch("mylittleharness.hooks._git_staged_paths", return_value=stage_paths):
                 stage_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
                 bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bundle_input)
+                name_status_bundle_payload = hook_event_payload(
+                    load_inventory(root), HOOK_PRE_TOOL_USE, [], name_status_bundle_input
+                )
+                full_diff_bundle_payload = hook_event_payload(
+                    load_inventory(root), HOOK_PRE_TOOL_USE, [], full_diff_bundle_input
+                )
                 commit_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], commit_input)
                 unrelated_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], unrelated_input)
                 archive_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], archive_input)
 
             stage_codes = {finding["code"] for finding in stage_payload["findings"]}
             bundle_codes = {finding["code"] for finding in bundle_payload["findings"]}
+            name_status_bundle_codes = {finding["code"] for finding in name_status_bundle_payload["findings"]}
+            full_diff_bundle_codes = {finding["code"] for finding in full_diff_bundle_payload["findings"]}
             commit_codes = {finding["code"] for finding in commit_payload["findings"]}
             unrelated_codes = {finding["code"] for finding in unrelated_payload["findings"]}
             archive_codes = {finding["code"] for finding in archive_payload["findings"]}
@@ -41931,6 +41954,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", stage_codes)
             self.assertFalse(bundle_payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", bundle_codes)
+            self.assertFalse(name_status_bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", name_status_bundle_codes)
+            self.assertTrue(full_diff_bundle_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", full_diff_bundle_codes)
             self.assertFalse(commit_payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-commit", commit_codes)
             self.assertTrue(unrelated_payload["block"])
@@ -41975,6 +42002,13 @@ class CliTests(unittest.TestCase):
                     "command": " ".join(["git", "add", "--", state_rel, plan_rel, *note_rels]),
                 }
             )
+            bundle_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": " ".join(["git", "add", "--", state_rel, plan_rel, *note_rels])
+                    + "; git diff --cached --name-status",
+                }
+            )
             single_note_input = json.dumps(
                 {
                     "toolName": "shell_command",
@@ -41983,13 +42017,17 @@ class CliTests(unittest.TestCase):
             )
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+            bundle_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], bundle_input)
             single_note_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], single_note_input)
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
+            bundle_codes = {finding["code"] for finding in bundle_payload["findings"]}
             single_note_codes = {finding["code"] for finding in single_note_payload["findings"]}
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertFalse(bundle_payload["block"])
+            self.assertIn("hooks-policy-allow-route-produced-lifecycle-route-staging", bundle_codes)
             self.assertFalse(single_note_payload["block"])
             self.assertTrue(
                 {
