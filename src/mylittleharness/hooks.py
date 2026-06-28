@@ -4843,7 +4843,9 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
     ):
         return True
     if has_top_level_verification:
-        return False
+        if _has_shell_command_separator(command):
+            return False
+        return _coherent_post_closeout_top_level_verification_stage_paths(inventory, pathspecs)
     if all(_is_tracked_existing_lifecycle_route_file(inventory, path) for path in paths):
         return True
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
@@ -4870,6 +4872,20 @@ def _is_post_closeout_lifecycle_route_stage_path(inventory: Inventory, path: str
         _is_existing_lifecycle_route_file(inventory, path)
         or _is_post_closeout_active_plan_tombstone_path(inventory, path)
         or _is_post_closeout_source_incubation_tombstone_path(inventory, path)
+    )
+
+
+def _coherent_post_closeout_top_level_verification_stage_paths(
+    inventory: Inventory, paths: list[str] | tuple[str, ...]
+) -> bool:
+    normalized = tuple(
+        _normalize_hook_path(_hook_route_rel_path(inventory, path) or path).casefold()
+        for path in paths
+    )
+    return bool(normalized) and all(
+        _is_top_level_verification_checkpoint_path(path)
+        and _is_reviewed_top_level_verification_checkpoint_file(inventory, path)
+        for path in normalized
     )
 
 

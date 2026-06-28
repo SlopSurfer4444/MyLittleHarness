@@ -36004,7 +36004,7 @@ class CliTests(unittest.TestCase):
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
             self.assertFalse(payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
     def test_hooks_pre_tool_allows_standalone_verification_retarget_with_retained_source_members(self) -> None:
@@ -36073,7 +36073,7 @@ class CliTests(unittest.TestCase):
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
             self.assertFalse(payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
@@ -36886,7 +36886,7 @@ class CliTests(unittest.TestCase):
             )
             allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
             self.assertFalse(allowed_payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", allowed_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", allowed_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", allowed_codes)
 
             symphony_payload = hook_event_payload(
@@ -36897,7 +36897,7 @@ class CliTests(unittest.TestCase):
             )
             symphony_codes = {finding["code"] for finding in symphony_payload["findings"]}
             self.assertFalse(symphony_payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", symphony_codes)
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", symphony_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", symphony_codes)
 
             blocked_cases = {
@@ -36931,6 +36931,114 @@ class CliTests(unittest.TestCase):
             active_codes = {finding["code"] for finding in active_payload["findings"]}
             self.assertTrue(active_payload["block"])
             self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", active_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", active_codes)
+
+    def test_hooks_pre_tool_allows_reviewed_top_level_verification_lifecycle_staging(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target_rel = "project/verification/2026-06-17-mlh-warning-zero-reconciliation.md"
+            archive_rel = "project/archive/reference/incubation/2026-06-28-plan-target-artifacts-scoped-hotfix-route-gap.md"
+            incubation_rel = "project/plan-incubation/handoff-accepted-packet-route-alias-normalization-gap.md"
+            retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
+            unreviewed_rel = "project/verification/unreviewed.md"
+            source_rel = "README.md"
+            for rel in (target_rel, archive_rel, incubation_rel, retained_verification_rel, unreviewed_rel):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / archive_rel).write_text(
+                "---\n"
+                'source: "mylittleharness incubation route"\n'
+                'status: "implemented"\n'
+                f'archived_to: "{archive_rel}"\n'
+                'related_plan: "project/archive/plans/2026-06-17-scoped-hotfix-mlh-warning-zero-reconciliation.md"\n'
+                "---\n"
+                "# Archived Source\n\n"
+                "Non-authority archive reference; this does not approve lifecycle, Git staging, commit, roadmap, "
+                "or release decisions.\n",
+                encoding="utf-8",
+            )
+            (root / incubation_rel).write_text(
+                "---\n"
+                'topic: "handoff-accepted-packet-route-alias-normalization-gap"\n'
+                'source: "mylittleharness incubation route"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# Retained Source\n\n"
+                "Non-authority retained source; this does not approve lifecycle, Git staging, commit, roadmap, "
+                "or release decisions.\n",
+                encoding="utf-8",
+            )
+            (root / retained_verification_rel).write_text(
+                "---\n"
+                'route: "verification"\n'
+                'status: "partial"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Coverage\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, or release decisions.\n",
+                encoding="utf-8",
+            )
+            (root / target_rel).write_text(
+                "---\n"
+                'title: "MLH Warning Zero Reconciliation"\n'
+                'status: "partially-verified"\n'
+                'route: "verification"\n'
+                'intake_source: "--text-file -"\n'
+                "source_members:\n"
+                f'  - "{incubation_rel}"\n'
+                f'  - "{archive_rel}"\n'
+                f'  - "{retained_verification_rel}"\n'
+                'related_plan: "project/archive/plans/2026-06-17-scoped-hotfix-mlh-warning-zero-reconciliation.md"\n'
+                'docs_decision: "updated"\n'
+                "---\n"
+                "# MLH Warning Zero Reconciliation\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                "release, or source truth decisions.\n",
+                encoding="utf-8",
+            )
+            (root / unreviewed_rel).write_text(
+                "---\n"
+                'title: "Unreviewed"\n'
+                "---\n"
+                "# Unreviewed\n\n"
+                "No reviewed boundary.\n",
+                encoding="utf-8",
+            )
+            (root / source_rel).write_text("# Fixture\n", encoding="utf-8")
+
+            allowed_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"git add -- {target_rel}"}),
+            )
+            allowed_codes = {finding["code"] for finding in allowed_payload["findings"]}
+            self.assertFalse(allowed_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", allowed_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", allowed_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", allowed_codes)
+
+            blocked_cases = {
+                "broad": "git add -- project/verification",
+                "mixed": f"git add -- {target_rel} {source_rel}",
+                "separator-add": f"git add -- {target_rel}; git add .",
+                "separator-commit": f"git add -- {target_rel}; git commit -m checkpoint",
+                "separator-push": f"git add -- {target_rel}; git push origin main",
+                "separator-tag": f"git add -- {target_rel}; git tag v1.0.0",
+                "unreviewed": f"git add -- {unreviewed_rel}",
+            }
+            for name, command in blocked_cases.items():
+                with self.subTest(name=name):
+                    payload = hook_event_payload(
+                        load_inventory(root),
+                        HOOK_PRE_TOOL_USE,
+                        [],
+                        json.dumps({"toolName": "shell_command", "command": command}),
+                    )
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", codes)
 
     def _write_post_closeout_lifecycle_finalization_fixture(
         self,
