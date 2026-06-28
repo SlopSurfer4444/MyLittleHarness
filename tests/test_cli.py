@@ -40064,9 +40064,13 @@ class CliTests(unittest.TestCase):
             test_stage_codes = {finding["code"] for finding in test_stage_payload["findings"]}
             source_commit_codes = {finding["code"] for finding in source_commit_payload["findings"]}
             test_commit_codes = {finding["code"] for finding in test_commit_payload["findings"]}
+            source_stage_messages = "\n".join(str(finding["message"]) for finding in source_stage_payload["findings"])
+            source_stage_next_safe = source_stage_messages.split("next_safe_command=", 1)[1]
             self.assertTrue(source_stage_payload["block"])
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", source_stage_codes)
             self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", source_stage_codes)
+            self.assertIn("tests/test_cli.py", source_stage_next_safe)
+            self.assertNotIn("src/mylittleharness/hooks.py", source_stage_next_safe)
             self.assertFalse(test_stage_payload["block"])
             self.assertIn("hooks-policy-allow-product-source-vcs-staging", test_stage_codes)
             self.assertTrue(source_commit_payload["block"])

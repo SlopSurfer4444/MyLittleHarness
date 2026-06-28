@@ -9585,7 +9585,7 @@ def _active_plan_product_source_target_pathspecs(inventory: Inventory, product_r
             continue
         if not candidate.is_file() or candidate.is_symlink():
             continue
-        if not _is_active_plan_target_artifact(inventory, str(candidate)):
+        if not _is_active_plan_product_artifact(inventory, str(candidate)):
             continue
         targets.append(_product_source_tracked_pathspec(product_root, rel) or rel)
     return tuple(_dedupe_nonempty(targets))
