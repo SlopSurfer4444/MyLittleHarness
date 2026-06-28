@@ -9354,6 +9354,8 @@ def _product_source_vcs_next_safe_command(inventory: Inventory, data: dict[str, 
     subcommand = _git_subcommand(command)
     if subcommand not in {"add", "stage", "commit"}:
         return ""
+    if subcommand == "commit" and _product_source_vcs_roots(inventory, data, command)[1] is None:
+        return ""
     git_prefix = _product_source_vcs_command_prefix(inventory, data, product_root)
     if subcommand in {"add", "stage"}:
         exact_predicate = (

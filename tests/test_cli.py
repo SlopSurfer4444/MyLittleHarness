@@ -39474,6 +39474,19 @@ class CliTests(unittest.TestCase):
             self.assertIn("src/mylittleharness/hooks.py tests/test_cli.py", hidden_workdir_messages)
             self.assertNotIn("writeback --dry-run", hidden_workdir_messages)
 
+            operator_commit_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "functions.shell_command", "command": "git " + "commit -m checkpoint"}),
+            )
+            operator_commit_messages = "\n".join(
+                str(finding["message"]) for finding in operator_commit_payload["findings"]
+            )
+            self.assertTrue(operator_commit_payload["block"])
+            self.assertIn("writeback --dry-run", operator_commit_messages)
+            self.assertNotIn(str(product_root.resolve()), operator_commit_messages)
+
             def staged_paths(git_root: Path) -> tuple[str, ...]:
                 if git_root.resolve() == product_root.resolve():
                     return ("src/mylittleharness/hooks.py", "tests/test_cli.py")
