@@ -9235,11 +9235,11 @@ def _git_mutation_next_safe_command(inventory: Inventory, data: dict[str, object
     actual_root_next_safe = _actual_root_vcs_next_safe_command(inventory, data, command)
     if actual_root_next_safe:
         return actual_root_next_safe
-    if _has_active_plan(inventory):
-        return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
     product_source_next_safe = _product_source_vcs_next_safe_command(inventory, data, command)
     if product_source_next_safe:
         return product_source_next_safe
+    if _has_active_plan(inventory):
+        return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
     return "gi" + "t add -- <exact-reviewed-files>; " + "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
 
 
@@ -9356,16 +9356,23 @@ def _product_source_vcs_next_safe_command(inventory: Inventory, data: dict[str, 
         return ""
     git_prefix = _product_source_vcs_command_prefix(inventory, data, product_root)
     if subcommand in {"add", "stage"}:
+        exact_predicate = (
+            _is_exact_active_plan_product_source_stage_file
+            if _has_active_plan(inventory)
+            else _is_exact_post_closeout_stage_file
+        )
         pathspecs = [
             _product_source_tracked_pathspec(product_root, pathspec) or pathspec
             for pathspec in _git_stage_pathspecs(command)
-            if _is_exact_post_closeout_stage_file(
+            if exact_predicate(
                 inventory,
                 pathspec,
                 base_root=product_root,
                 boundary_root=product_root,
             )
         ]
+        if not pathspecs and _has_active_plan(inventory):
+            pathspecs = list(_active_plan_product_source_target_pathspecs(inventory, product_root))
         stage_target = " ".join(shell_arg(pathspec) for pathspec in pathspecs) or "<exact-reviewed-product-files>"
         return (
             f"{git_prefix} add -- {stage_target}; "
@@ -9374,6 +9381,31 @@ def _product_source_vcs_next_safe_command(inventory: Inventory, data: dict[str, 
             f"{git_prefix} commit -F <message-file>"
         )
     return f"{git_prefix} diff --cached --check; {git_prefix} commit -F <message-file>"
+
+
+def _active_plan_product_source_target_pathspecs(inventory: Inventory, product_root: Path) -> tuple[str, ...]:
+    plan = inventory.active_plan_surface
+    if not plan or not plan.exists:
+        return ()
+    artifacts = plan.frontmatter.data.get("target_artifacts")
+    if not isinstance(artifacts, list):
+        return ()
+    targets: list[str] = []
+    for artifact in artifacts:
+        rel = _normalize_hook_path(str(artifact or "")).strip()
+        if not rel or rel.startswith(":") or any(char in rel for char in "*?[]"):
+            continue
+        try:
+            candidate = (product_root / rel).resolve()
+            candidate.relative_to(product_root.resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not candidate.is_file() or candidate.is_symlink():
+            continue
+        if not _is_active_plan_target_artifact(inventory, str(candidate)):
+            continue
+        targets.append(_product_source_tracked_pathspec(product_root, rel) or rel)
+    return tuple(_dedupe_nonempty(targets))
 
 
 def _product_source_vcs_command_prefix(inventory: Inventory, data: dict[str, object], product_root: Path) -> str:

@@ -39457,6 +39457,23 @@ class CliTests(unittest.TestCase):
                     self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
                     self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", finding_codes)
 
+            hidden_workdir_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "functions.shell_command", "command": stage_command}),
+            )
+            hidden_workdir_codes = {finding["code"] for finding in hidden_workdir_payload["findings"]}
+            hidden_workdir_messages = "\n".join(
+                str(finding["message"]) for finding in hidden_workdir_payload["findings"]
+            )
+            self.assertTrue(hidden_workdir_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", hidden_workdir_codes)
+            self.assertIn("git -C", hidden_workdir_messages)
+            self.assertIn(str(product_root.resolve()), hidden_workdir_messages)
+            self.assertIn("src/mylittleharness/hooks.py tests/test_cli.py", hidden_workdir_messages)
+            self.assertNotIn("writeback --dry-run", hidden_workdir_messages)
+
             def staged_paths(git_root: Path) -> tuple[str, ...]:
                 if git_root.resolve() == product_root.resolve():
                     return ("src/mylittleharness/hooks.py", "tests/test_cli.py")
