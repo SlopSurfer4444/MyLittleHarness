@@ -636,6 +636,53 @@ class CliTests(unittest.TestCase):
         self.assertIn("release-readiness", findings[0].message)
         self.assertIn(readme_target, findings[0].message)
 
+    def test_active_plan_covered_roadmap_scope_accepts_multiple_backticked_write_scope_values(self) -> None:
+        planning_target = "src/" + "mylittleharness/planning.py"
+        checks_target = "src/" + "mylittleharness/checks.py"
+        test_target = "tests/test_cli.py"
+        plan_text = (
+            "---\n"
+            'plan_id: "multi-value-scope-plan"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'primary_roadmap_item: "plan-scope"\n'
+            "covered_roadmap_items:\n"
+            '  - "plan-scope"\n'
+            "target_artifacts:\n"
+            f'  - "{planning_target}"\n'
+            f'  - "{checks_target}"\n'
+            f'  - "{test_target}"\n'
+            "---\n"
+            "# Multi Value Scope Plan\n\n"
+            "### phase-1-implementation\n\n"
+            "- id: `phase-1-implementation`\n"
+            f"- write_scope: `{planning_target}`, `{checks_target}`, `{test_target}`\n"
+        )
+        plan = Surface(
+            root=Path("."),
+            rel_path="active-plan.md",
+            role="active-plan",
+            required=True,
+            path=Path("active-plan.md"),
+            exists=True,
+            content=plan_text,
+            frontmatter=parse_frontmatter(plan_text),
+        )
+        item_type = type("RoadmapItemStub", (), {})
+        item = item_type()
+        item.fields = {"target_artifacts": [planning_target, checks_target, test_target]}
+
+        with patch(
+            "mylittleharness.checks.roadmap_items_for_diagnostics",
+            return_value=({"plan-scope": item}, []),
+        ):
+            findings = _active_plan_covered_roadmap_scope_findings(
+                object(),
+                plan,
+                {"active_phase": "phase-1-implementation"},
+            )
+
+        self.assertEqual([], findings)
+
     def test_active_plan_scoped_interrupt_contract_reports_boundary(self) -> None:
         plan_text = (
             "---\n"

@@ -10821,7 +10821,7 @@ def _contract_text(value: object) -> str:
     text = str(value or "").strip()
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
         text = text[1:-1].strip()
-    if text.startswith("`") and text.endswith("`") and len(text) >= 2:
+    if text.startswith("`") and text.endswith("`") and text.count("`") == 2:
         text = text[1:-1].strip()
     return text
 
