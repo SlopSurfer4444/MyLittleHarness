@@ -6233,7 +6233,9 @@ def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[s
     archive_paths = {path for path in normalized if path.startswith("project/archive/plans/")}
     if archive_paths and roadmap_rel not in normalized:
         return False
-    if last_archive_rel and (roadmap_rel in normalized or archive_paths) and last_archive_rel not in normalized:
+    if archive_paths and last_archive_rel and last_archive_rel not in normalized:
+        return False
+    if roadmap_rel in normalized and not archive_paths and active_plan_rel and active_plan_rel not in normalized:
         return False
     return True
 
@@ -9716,14 +9718,17 @@ def _route_produced_lifecycle_suggested_stage_paths(inventory: Inventory, candid
     last_archive_rel = _last_archived_plan_rel_path(inventory)
     candidate_rels = {_hook_route_rel_path(inventory, path).casefold() for path in candidates if path}
     archive_rels = {path for path in candidate_rels if path.startswith(archive_prefix)}
-    if last_archive_rel:
+    if archive_rels and last_archive_rel:
         archive_rels.add(last_archive_rel)
     paths = [state_rel]
     if archive_rels:
         paths.append(roadmap_rel)
         paths.extend(sorted(archive_rels))
-    elif active_plan_rel:
-        paths.append(active_plan_rel)
+    else:
+        if active_plan_rel:
+            paths.append(active_plan_rel)
+        if roadmap_rel in candidate_rels:
+            paths.append(roadmap_rel)
     return [path for path in _dedupe_nonempty(paths) if _is_existing_lifecycle_route_file(inventory, path)]
 
 
