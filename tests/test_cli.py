@@ -35799,6 +35799,106 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
 
+    def test_hooks_pre_tool_allows_post_closeout_verification_retarget_with_retained_source_members(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel, roadmap_rel, archive_rel = self._write_post_closeout_route_package_checkpoint_fixture(root)
+            note_rel = self._write_reviewed_source_incubation_relationship_fixture(root, archive_rel)
+            note_path = root / note_rel
+            archive_note_rel = (
+                "project/"
+                + "archive/reference/incubation/2026-06-28-delegation-read-navigation-prompt-overblock.md"
+            )
+            archive_note_path = root / archive_note_rel
+            archive_note_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_text = note_path.read_text(encoding="utf-8")
+            archive_text = archive_text.replace('status: "incubating"\n', 'status: "implemented"\n', 1)
+            archive_text = archive_text.replace(
+                'promoted_to: "project/roadmap.md"\n',
+                (
+                    'promoted_to: "project/roadmap.md"\n'
+                    f'source_incubation: "{note_rel}"\n'
+                    f'archived_to: "{archive_note_rel}"\n'
+                ),
+                1,
+            )
+            archive_note_path.write_text(archive_text, encoding="utf-8")
+            note_path.unlink()
+            retained_incubation_rel = "project/plan-incubation/handoff-accepted-packet-route-alias-normalization-gap.md"
+            retained_incubation_path = root / retained_incubation_rel
+            retained_incubation_path.parent.mkdir(parents=True, exist_ok=True)
+            retained_incubation_path.write_text(
+                "---\n"
+                'topic: "handoff accepted packet route alias normalization gap"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# retained incubation source\n\n"
+                "Boundary: this source evidence does not approve lifecycle, archive, roadmap, "
+                "staging, commit, push, or release.\n",
+                encoding="utf-8",
+            )
+            retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
+            retained_verification_path = root / retained_verification_rel
+            retained_verification_path.parent.mkdir(parents=True, exist_ok=True)
+            retained_verification_path.write_text(
+                "---\n"
+                'title: "Bug hunt roadmap coverage"\n'
+                'status: "current"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# retained verification source\n\n"
+                "Boundary: this source evidence does not approve lifecycle, archive, roadmap, "
+                "staging, commit, push, or release.\n",
+                encoding="utf-8",
+            )
+            verification_rel = "project/" + "verification/2026-06-20-public-rc-compat-framing-preflight.md"
+            verification_path = root / verification_rel
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            verification_path.write_text(
+                "---\n"
+                'title: "Public RC compatibility framing preflight"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "source_members:\n"
+                f'  - "{retained_incubation_rel}"\n'
+                f'  - "{archive_note_rel}"\n'
+                f'  - "{retained_verification_rel}"\n'
+                f'archived_plan: "{archive_rel}"\n'
+                f'implemented_by: "{archive_rel}"\n'
+                "---\n"
+                "# Public RC compatibility framing preflight\n\n"
+                "RC readiness conclusion: technical/package preflight is green, with the remaining "
+                "owner gate limited to explicit approval before push, tag, publish, artifact upload, "
+                "final marketing README rewrite, or release claim.\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": "git add -- "
+                    + " ".join((state_rel, roadmap_rel, archive_rel, archive_note_rel, note_rel, verification_rel)),
+                }
+            )
+
+            def reports_deleted_path(_root: Path, path: str) -> bool:
+                return Path(path).as_posix().casefold() == note_rel.casefold()
+
+            with patch(
+                "mylittleharness.hooks._git_reports_deleted_path_for_root",
+                side_effect=reports_deleted_path,
+            ):
+                payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
     def test_hooks_pre_tool_blocks_post_closeout_route_package_with_release_authorizing_verification_retarget(
         self,
     ) -> None:
@@ -35906,6 +36006,131 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_allows_standalone_verification_retarget_with_retained_source_members(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_note_rel = self._write_public_rc_archive_reference_fixture(root)
+            retained_incubation_rel = "project/plan-incubation/handoff-accepted-packet-route-alias-normalization-gap.md"
+            retained_incubation_path = root / retained_incubation_rel
+            retained_incubation_path.parent.mkdir(parents=True, exist_ok=True)
+            retained_incubation_path.write_text(
+                "---\n"
+                'topic: "handoff accepted packet route alias normalization gap"\n'
+                'status: "incubating"\n'
+                "---\n"
+                "# retained incubation source\n\n"
+                "Boundary: this source evidence does not approve lifecycle, archive, roadmap, "
+                "staging, commit, push, or release.\n",
+                encoding="utf-8",
+            )
+            retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
+            retained_verification_path = root / retained_verification_rel
+            retained_verification_path.parent.mkdir(parents=True, exist_ok=True)
+            retained_verification_path.write_text(
+                "---\n"
+                'title: "Bug hunt roadmap coverage"\n'
+                'status: "current"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# retained verification source\n\n"
+                "Boundary: this source evidence does not approve lifecycle, archive, roadmap, "
+                "staging, commit, push, or release.\n",
+                encoding="utf-8",
+            )
+            verification_rel = "project/" + "verification/2026-06-20-public-rc-compat-framing-preflight.md"
+            verification_path = root / verification_rel
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            verification_path.write_text(
+                "---\n"
+                'title: "Public RC compatibility framing preflight"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                'related_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "source_members:\n"
+                f'  - "{retained_incubation_rel}"\n'
+                f'  - "{archive_note_rel}"\n'
+                f'  - "{retained_verification_rel}"\n'
+                'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "---\n"
+                "# Public RC compatibility framing preflight\n\n"
+                "RC readiness conclusion: technical/package preflight is green, with the remaining "
+                "owner gate limited to explicit approval before push, tag, publish, artifact upload, "
+                "final marketing README rewrite, or release claim.\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {verification_rel}",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+
+    def test_hooks_pre_tool_blocks_standalone_verification_retarget_with_authorizing_retained_source_member(
+        self,
+    ) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_note_rel = self._write_public_rc_archive_reference_fixture(root)
+            retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
+            retained_verification_path = root / retained_verification_rel
+            retained_verification_path.parent.mkdir(parents=True, exist_ok=True)
+            retained_verification_path.write_text(
+                "---\n"
+                'title: "Bug hunt roadmap coverage"\n'
+                'status: "current"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# retained verification source\n\n"
+                "Owner decision approves push, tag, publish, artifact upload, and release claim.\n",
+                encoding="utf-8",
+            )
+            verification_rel = "project/" + "verification/2026-06-20-public-rc-compat-framing-preflight.md"
+            verification_path = root / verification_rel
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            verification_path.write_text(
+                "---\n"
+                'title: "Public RC compatibility framing preflight"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                'related_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "source_members:\n"
+                f'  - "{archive_note_rel}"\n'
+                f'  - "{retained_verification_rel}"\n'
+                'archived_plan: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                'implemented_by: "project/archive/plans/2026-06-20-public-rc-readiness-preflight.md"\n'
+                "---\n"
+                "# Public RC compatibility framing preflight\n\n"
+                "RC readiness conclusion: technical/package preflight is green, with the remaining "
+                "owner gate limited to explicit approval before push, tag, publish, artifact upload, "
+                "final marketing README rewrite, or release claim.\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"git add -- {verification_rel}",
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            self.assertTrue(payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", finding_codes)
 
     def test_hooks_pre_tool_allows_standalone_verification_retarget_commit_with_reviewed_staged_content(
         self,

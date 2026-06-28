@@ -7077,9 +7077,55 @@ def _is_reviewed_post_closeout_top_level_verification_extra_file(
     if not normalized_members.intersection(reviewed_source_archives):
         return False
     if not all(
-        member in reviewed_source_archives or _is_reviewed_memory_hygiene_archive_reference_file(inventory, member)
+        _is_reviewed_post_closeout_verification_source_member(inventory, member, reviewed_source_archives)
         for member in normalized_members
     ):
+        return False
+    if _route_evidence_text_has_release_authorizing_claim(text):
+        return False
+    return _route_evidence_text_has_non_authority_boundary(text) or _route_evidence_text_has_safe_release_boundary(text)
+
+
+def _is_reviewed_post_closeout_verification_source_member(
+    inventory: Inventory,
+    member: str,
+    reviewed_source_archives: set[str],
+) -> bool:
+    if member in reviewed_source_archives:
+        return True
+    if _is_reviewed_memory_hygiene_archive_reference_file(inventory, member):
+        return True
+    if not _is_existing_lifecycle_route_file(inventory, member):
+        return False
+    if member in {ACTIVE_PLAN_ROUTE_PATH, "project/project-state.md", "project/roadmap.md"}:
+        return False
+    if member.startswith("project/archive/plans/"):
+        return False
+    if (
+        member.startswith("project/plan-incubation/")
+        or member.startswith("project/research/")
+        or member.startswith("project/verification/")
+    ):
+        return _is_reviewed_retained_lifecycle_source_member(inventory, member)
+    return member.startswith("project/attachments/")
+
+
+def _is_reviewed_retained_lifecycle_source_member(inventory: Inventory, member: str) -> bool:
+    if not member.endswith(".md"):
+        return False
+    route_path = _hook_route_file_path(inventory, member)
+    if route_path is None:
+        return False
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".md":
+            return False
+        text = route_path.read_text(encoding="utf-8")
+        frontmatter = parse_frontmatter(text)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return False
+    if _route_frontmatter_grants_checkpoint_authority(frontmatter.data):
         return False
     if _route_evidence_text_has_release_authorizing_claim(text):
         return False
@@ -8890,53 +8936,76 @@ def _is_reviewed_top_level_verification_checkpoint_text(
         return False
     if _route_evidence_text_has_release_authorizing_claim(text):
         return False
-    if _verification_checkpoint_has_unreviewed_incubation_source_member(inventory, data):
+    if _verification_checkpoint_has_invalid_source_member(inventory, data):
         return False
     if _route_evidence_text_has_safe_release_boundary(text):
         if str(data.get("route") or "").strip().casefold() != "verification":
             return False
-        return _verification_checkpoint_has_only_reviewed_archive_source_members(inventory, data)
+        return _verification_checkpoint_has_reviewed_archive_or_retained_source_members(inventory, data)
     return _route_evidence_text_has_non_authority_boundary(text)
 
 
-def _verification_checkpoint_has_only_reviewed_archive_source_members(
+def _verification_checkpoint_has_reviewed_archive_or_retained_source_members(
     inventory: Inventory, data: dict[str, object]
 ) -> bool:
-    source_members = data.get("source_members")
-    if not isinstance(source_members, list):
-        return False
-    normalized_members = [
-        _hook_route_rel_path(inventory, str(member or "")).casefold()
-        for member in source_members
-        if str(member or "").strip()
-    ]
+    normalized_members = _verification_checkpoint_normalized_source_members(inventory, data)
     if not normalized_members:
         return False
-    return all(_is_reviewed_memory_hygiene_archive_reference_file(inventory, member) for member in normalized_members)
+    reviewed_source_archives = {
+        member for member in normalized_members if _is_reviewed_memory_hygiene_archive_reference_file(inventory, member)
+    }
+    if not reviewed_source_archives:
+        return False
+    return all(
+        _is_reviewed_post_closeout_verification_source_member(inventory, member, reviewed_source_archives)
+        for member in normalized_members
+    )
 
 
-def _verification_checkpoint_has_unreviewed_incubation_source_member(
+def _verification_checkpoint_has_invalid_source_member(
     inventory: Inventory, data: dict[str, object]
 ) -> bool:
-    source_members = data.get("source_members")
-    if not isinstance(source_members, list):
-        return "source_members" in data
-    for member in source_members:
-        if not isinstance(member, str) or not member.strip():
+    if "source_members" not in data:
+        return False
+    normalized_members = _verification_checkpoint_normalized_source_members(inventory, data)
+    if not normalized_members:
+        return True
+    reviewed_source_archives = {
+        member for member in normalized_members if _is_reviewed_memory_hygiene_archive_reference_file(inventory, member)
+    }
+    if reviewed_source_archives:
+        return not all(
+            _is_reviewed_post_closeout_verification_source_member(inventory, member, reviewed_source_archives)
+            for member in normalized_members
+        )
+    for member in normalized_members:
+        if _is_meta_feedback_incubation_route_path(member):
             return True
-        raw = member.strip()
-        if _source_member_route_token_is_malformed(raw):
-            return True
-        clean = _hook_route_rel_path(inventory, raw).casefold()
-        if not clean:
-            return True
-        if _is_meta_feedback_incubation_route_path(clean):
-            return True
-        if _is_memory_hygiene_archive_reference_path(clean) and not _is_reviewed_memory_hygiene_archive_reference_file(
-            inventory, clean
+        if _is_memory_hygiene_archive_reference_path(member) and not _is_reviewed_memory_hygiene_archive_reference_file(
+            inventory, member
         ):
             return True
     return False
+
+
+def _verification_checkpoint_normalized_source_members(
+    inventory: Inventory, data: dict[str, object]
+) -> list[str]:
+    source_members = data.get("source_members")
+    if not isinstance(source_members, list):
+        return []
+    normalized: list[str] = []
+    for member in source_members:
+        if not isinstance(member, str) or not member.strip():
+            return []
+        raw = member.strip()
+        if _source_member_route_token_is_malformed(raw):
+            return []
+        clean = _hook_route_rel_path(inventory, raw).casefold()
+        if not clean:
+            return []
+        normalized.append(clean)
+    return normalized
 
 
 def _source_member_route_token_is_malformed(raw: str) -> bool:
