@@ -663,14 +663,10 @@ def _generated_phases(
         )
     )
     boundary = slice_contract.closeout_boundary if slice_contract else "explicit-closeout-required"
-    source_scope = groups["source"] or groups["other"] or groups["docs"] or targets
     test_scope = groups["tests"]
     docs_scope = _docs_impact_scope(report, groups)
-    if getattr(report, "docs_update_count", 0) > 0 and docs_scope:
-        docs_scope_set = set(docs_scope)
-        source_scope = tuple(target for target in source_scope if target not in docs_scope_set)
     all_scope = targets or ("project/implementation-plan.md",)
-    phase_1_scope = tuple(_dedupe_nonempty((*source_scope, *test_scope))) if test_scope else source_scope
+    phase_1_scope = _current_phase_write_scope_from_target_groups(targets, groups)
 
     phase_1 = GeneratedPlanPhase(
         phase_id=DEFAULT_ACTIVE_PHASE,
@@ -759,14 +755,10 @@ def _scoped_interrupt_generated_phases(
             )
         )
     )
-    source_scope = groups["source"] or groups["other"] or groups["docs"] or targets
     test_scope = groups["tests"]
     docs_scope = _docs_impact_scope(report, groups) if report else ()
-    if report and getattr(report, "docs_update_count", 0) > 0 and docs_scope:
-        docs_scope_set = set(docs_scope)
-        source_scope = tuple(target for target in source_scope if target not in docs_scope_set)
     all_scope = targets or (DEFAULT_PLAN_REL,)
-    phase_1_scope = tuple(_dedupe_nonempty((*source_scope, *test_scope))) if test_scope else source_scope
+    phase_1_scope = _current_phase_write_scope_from_target_groups(targets, groups)
     owner = (
         report.primary_roadmap_item
         if report
@@ -833,9 +825,8 @@ def _explicit_target_generated_phases(
 ) -> tuple[GeneratedPlanPhase, ...]:
     targets = tuple(request.target_artifacts)
     groups = _artifact_groups(targets)
-    source_scope = groups["source"] or groups["other"] or groups["docs"] or targets
     test_scope = groups["tests"]
-    phase_1_scope = tuple(_dedupe_nonempty((*source_scope, *test_scope))) if test_scope else source_scope
+    phase_1_scope = _current_phase_write_scope_from_target_groups(targets, groups)
     return (
         GeneratedPlanPhase(
             phase_id=DEFAULT_ACTIVE_PHASE,
@@ -855,6 +846,24 @@ def _explicit_target_generated_phases(
             refusal_or_escalation="stop before unsafe roots, destructive recovery, hidden infrastructure, unclear ownership, or edits outside this explicit write_scope.",
         ),
     )
+
+
+def _current_phase_write_scope_from_target_groups(
+    targets: tuple[str, ...],
+    groups: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    phase_scope = tuple(
+        _dedupe_nonempty(
+            (
+                *groups["source"],
+                *groups["other"],
+                *groups["docs"],
+                *groups["tests"],
+            )
+        )
+    )
+    concrete_scope = tuple(item for item in phase_scope if item != DOCS_WRITE_SCOPE_PLACEHOLDER)
+    return concrete_scope or phase_scope or targets or (DEFAULT_PLAN_REL,)
 
 
 def _non_implementation_generated_phases(

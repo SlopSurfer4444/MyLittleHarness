@@ -589,6 +589,53 @@ class CliTests(unittest.TestCase):
         self.assertIn("sibling-item", findings[0].message)
         self.assertIn(checks_target, findings[0].message)
 
+    def test_active_plan_covered_roadmap_scope_warns_on_single_item_phase_scope_drift(self) -> None:
+        planning_target = "src/" + "mylittleharness/planning.py"
+        readme_target = "README.md"
+        plan_text = (
+            "---\n"
+            'plan_id: "single-item-scope-drift-plan"\n'
+            'active_phase: "phase-1-implementation"\n'
+            'primary_roadmap_item: "release-readiness"\n'
+            "covered_roadmap_items:\n"
+            '  - "release-readiness"\n'
+            "target_artifacts:\n"
+            f'  - "{planning_target}"\n'
+            f'  - "{readme_target}"\n'
+            "---\n"
+            "# Single Item Scope Drift Plan\n\n"
+            "### phase-1-implementation\n\n"
+            "- id: `phase-1-implementation`\n"
+            f"- write_scope: `{planning_target}`\n"
+        )
+        plan = Surface(
+            root=Path("."),
+            rel_path="active-plan.md",
+            role="active-plan",
+            required=True,
+            path=Path("active-plan.md"),
+            exists=True,
+            content=plan_text,
+            frontmatter=parse_frontmatter(plan_text),
+        )
+        item_type = type("RoadmapItemStub", (), {})
+        item = item_type()
+        item.fields = {"target_artifacts": [planning_target, readme_target]}
+
+        with patch(
+            "mylittleharness.checks.roadmap_items_for_diagnostics",
+            return_value=({"release-readiness": item}, []),
+        ):
+            findings = _active_plan_covered_roadmap_scope_findings(
+                object(),
+                plan,
+                {"active_phase": "phase-1-implementation"},
+            )
+
+        self.assertEqual(["active-plan-covered-roadmap-write-scope-contract"], [finding.code for finding in findings])
+        self.assertIn("release-readiness", findings[0].message)
+        self.assertIn(readme_target, findings[0].message)
+
     def test_active_plan_scoped_interrupt_contract_reports_boundary(self) -> None:
         plan_text = (
             "---\n"
@@ -25844,6 +25891,79 @@ class CliTests(unittest.TestCase):
                 phase_1,
             )
 
+    def test_plan_apply_renders_mixed_target_artifacts_in_current_phase_write_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp) / "operator")
+            product_root = Path(tmp) / "product"
+            (product_root / "docs/specs").mkdir(parents=True)
+            for rel, text in {
+                "README.md": "# Product\n",
+                "CHANGELOG.md": "# Changelog\n",
+                "RELEASE_NOTES.md": "# Release Notes\n",
+                "pyproject.toml": "[project]\nname = \"demo\"\n",
+                "docs/specs/release-readiness.md": "# Release Readiness\n",
+            }.items():
+                target = product_root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            verification_rel = "project/verification/release-readiness.md"
+            (root / verification_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / verification_rel).write_text("# Release Readiness Evidence\n", encoding="utf-8")
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n',
+                    f'active_plan: ""\nproduct_source_root: "{product_root.as_posix()}"\n',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Release Readiness Scope\n\n"
+                "- `id`: `release-readiness-scope`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `release-readiness-scope`\n"
+                "- `slice_goal`: `Keep explicit release targets aligned with phase write scope.`\n"
+                "- `slice_members`: `[\"release-readiness-scope\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `scope rendering only`\n"
+                "- `dependencies`: `[]`\n"
+                "- `target_artifacts`: `[\"README.md\", \"pyproject.toml\", \"CHANGELOG.md\", \"RELEASE_NOTES.md\", \"docs/specs/release-readiness.md\", \"project/verification/release-readiness.md\"]`\n"
+                "- `verification_summary`: `Plan write-scope regression should pass.`\n"
+                "- `docs_decision`: `updated`\n"
+                "- `carry_forward`: `Do not let package metadata hide docs and verification targets.`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "release-readiness-scope",
+                        "--only-requested-item",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            phase_1 = plan_text.split("### phase-1-implementation", 1)[1].split("### phase-2-verification-and-docs", 1)[0]
+            for expected in (
+                "README.md",
+                "pyproject.toml",
+                "CHANGELOG.md",
+                "RELEASE_NOTES.md",
+                "docs/specs/release-readiness.md",
+                verification_rel,
+            ):
+                self.assertIn(f"`{expected}`", phase_1)
+
     def test_plan_apply_refuses_unreviewed_multi_item_slice_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -39244,8 +39364,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-product-source-vcs-staging", review_bundle_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", review_bundle_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", review_bundle_codes)
-            self.assertIn("review bundles may append only git status --short", review_bundle_messages)
-            self.assertIn("diff --cached --check", review_bundle_messages)
+            self.assertIn("review bundles may append only git status and staged diff summary/check commands", review_bundle_messages)
             self.assertTrue(broad_review_bundle_payload["block"])
             self.assertNotIn("hooks-policy-allow-product-source-vcs-staging", broad_review_bundle_codes)
             self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", broad_review_bundle_codes)

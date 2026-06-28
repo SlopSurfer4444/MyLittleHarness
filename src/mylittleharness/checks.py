@@ -10189,7 +10189,11 @@ def _active_plan_covered_roadmap_scope_findings(
         return []
     plan_data = plan.frontmatter.data
     covered = _active_plan_covered_roadmap_item_ids(plan_data)
-    if len(covered) <= 1:
+    active_phase = _contract_text(
+        state_data.get("active_phase") or (plan_data.get("active_phase") if plan.frontmatter.has_frontmatter else "")
+    )
+    phase_scope_required = _active_phase_requires_full_target_artifact_scope(active_phase)
+    if not covered or (len(covered) <= 1 and not phase_scope_required):
         return []
     roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
     if parse_findings or not roadmap_items:
@@ -10211,7 +10215,7 @@ def _active_plan_covered_roadmap_scope_findings(
             continue
         target_keys = tuple(_normalize_route_metadata_path(target).casefold() for target in targets)
         plan_missing = [target for target, key in zip(targets, target_keys) if key and key not in plan_targets]
-        scope_missing = [target for target, key in zip(targets, target_keys) if key and key not in phase_scope]
+        scope_missing = [target for target, key in zip(targets, target_keys) if phase_scope_required and key and key not in phase_scope]
         if plan_missing:
             missing_plan_targets.append(f"{item_id}: {_summarize_contract_values(plan_missing)}")
         if scope_missing:
@@ -10237,6 +10241,13 @@ def _active_plan_covered_roadmap_scope_findings(
             plan.rel_path,
         )
     ]
+
+
+def _active_phase_requires_full_target_artifact_scope(active_phase: str) -> bool:
+    normalized = _contract_text(active_phase).casefold()
+    if not normalized:
+        return False
+    return normalized.startswith("phase-1") or "implementation" in normalized or "scoped-interrupt" in normalized
 
 
 def _active_plan_covered_roadmap_item_ids(plan_data: dict[str, object]) -> tuple[str, ...]:
