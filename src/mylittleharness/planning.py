@@ -207,6 +207,44 @@ def resolve_plan_request_from_roadmap(inventory: Inventory, request: PlanRequest
     )
 
 
+def _plan_request_with_update_active_target_artifact_hints(request: PlanRequest) -> PlanRequest:
+    if not request.update_active:
+        return request
+    hinted_targets = _request_text_target_artifact_suggestions(request)
+    if not hinted_targets:
+        return request
+    target_artifacts = _normalized_target_artifacts((*request.target_artifacts, *hinted_targets))
+    if target_artifacts == request.target_artifacts:
+        return request
+    return replace(request, target_artifacts=target_artifacts)
+
+
+def _plan_update_active_target_artifact_findings(
+    original_request: PlanRequest,
+    request: PlanRequest,
+    *,
+    apply: bool,
+) -> list[Finding]:
+    if not original_request.update_active:
+        return []
+    original_targets = set(original_request.target_artifacts)
+    materialized = tuple(target for target in request.target_artifacts if target not in original_targets)
+    if not materialized:
+        return []
+    prefix = "" if apply else "would "
+    return [
+        Finding(
+            "info",
+            "plan-update-active-target-artifacts",
+            (
+                f"{prefix}materialize exact target_artifacts from update-active task text: "
+                f"{', '.join(materialized)}; active-plan scope becomes machine-readable while roadmap metadata stays unchanged"
+            ),
+            DEFAULT_PLAN_REL,
+        )
+    ]
+
+
 def render_implementation_plan(
     request: PlanRequest,
     *,
@@ -1738,7 +1776,9 @@ def _plan_input_resolution_findings(resolution: PlanInputResolution, apply: bool
 
 def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Finding]:
     resolution = resolve_plan_request_from_roadmap(inventory, request)
-    request = resolution.request
+    original_request = resolution.request
+    request = _plan_request_with_update_active_target_artifact_hints(original_request)
+    resolution = replace(resolution, request=request)
     findings = [
         Finding("info", "plan-dry-run", "plan proposal only; no files were written"),
         _root_posture_finding(inventory),
@@ -1777,6 +1817,7 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
         )
     )
     findings.extend(_plan_input_resolution_findings(resolution, apply=False))
+    findings.extend(_plan_update_active_target_artifact_findings(original_request, request, apply=False))
     findings.extend(_plan_explicit_target_artifact_findings(request, apply=False))
     if roadmap_plans:
         findings.extend(_plan_roadmap_findings(roadmap_plans, apply=False))
@@ -1826,7 +1867,9 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
 
 def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Finding]:
     resolution = resolve_plan_request_from_roadmap(inventory, request)
-    request = resolution.request
+    original_request = resolution.request
+    request = _plan_request_with_update_active_target_artifact_hints(original_request)
+    resolution = replace(resolution, request=request)
     errors = _plan_current_action_eligibility_errors(inventory, request)
     if errors:
         return errors
@@ -1977,6 +2020,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         Finding("info", "plan-validation-posture", "run check after apply to verify lifecycle state, active-plan validation, and compact operating memory posture"),
     ]
     findings.extend(_plan_input_resolution_findings(resolution, apply=True))
+    findings.extend(_plan_update_active_target_artifact_findings(original_request, request, apply=True))
     findings.extend(_plan_explicit_target_artifact_findings(request, apply=True))
     findings.extend(roadmap_evidence_findings)
     if roadmap_plans:

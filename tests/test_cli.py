@@ -26482,6 +26482,41 @@ class CliTests(unittest.TestCase):
             self.assertIn('phase_status: "pending"', state_text)
             self.assertIn("Continue from active_phase `phase-1-implementation` with phase_status `pending`.", state_text)
 
+    def test_plan_apply_update_active_materializes_task_target_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--update-active",
+                        "--title",
+                        "Scoped Hotfix",
+                        "--objective",
+                        "Refresh a scoped hotfix plan without widening roadmap metadata.",
+                        "--task",
+                        (
+                            "Patch exact product targets src/mylittleharness/planning.py "
+                            "and tests/test_cli.py, then verify the scoped update."
+                        ),
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-update-active-target-artifacts", rendered)
+            self.assertIn("src/mylittleharness/planning.py", rendered)
+            self.assertIn("tests/test_cli.py", rendered)
+
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn("## Target Scope", plan_text)
+            self.assertIn('target_artifacts:\n  - "src/mylittleharness/planning.py"\n  - "tests/test_cli.py"', plan_text)
+            self.assertIn("- write_scope: `src/mylittleharness/planning.py`, `tests/test_cli.py`", plan_text)
+
     def test_plan_apply_refuses_dangerous_task_input_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
