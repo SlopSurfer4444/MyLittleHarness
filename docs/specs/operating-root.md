@@ -82,7 +82,7 @@ When an operator thread starts from a live operating root but must patch reusabl
 - product edits are made in the configured `product_source_root`, not copied through the operating root
 - focused product tests run from `product_source_root`
 - lifecycle closeout, archive, and roadmap status stay in the operating root through reviewed MLH routes
-- product-source Git staging and commit happen only after operating-root `plan_status = "none"`, using exact reviewed file pathspecs
+- product-source Git staging and commit may create reviewed local checkpoints while an operating-root active plan is open only for exact product-source files declared in `target_artifacts` and allowed by the current phase `write_scope`; post-closeout checkpoints still use exact reviewed file pathspecs
 
 This lane does not permit broad product-root writes, automatic cross-root copying, public remote mutation, release publication, lifecycle approval from hook output, or treating product-source compatibility fixtures as live operating memory.
 
