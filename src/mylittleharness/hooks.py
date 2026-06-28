@@ -5005,7 +5005,7 @@ def _is_exact_active_plan_product_source_stage_file(
         resolved = candidate.resolve()
     except (OSError, RuntimeError, ValueError):
         return False
-    return _is_active_plan_target_artifact(inventory, str(resolved))
+    return _is_active_plan_product_artifact(inventory, str(resolved))
 
 
 def _is_product_source_vcs_commit_command(inventory: Inventory, data: dict[str, object], command: str) -> bool:
@@ -5033,7 +5033,7 @@ def _active_plan_product_source_staged_paths_are_target_artifacts(
             candidate = (product_root / staged_path).resolve()
         except (OSError, RuntimeError, ValueError):
             return False
-        if not _is_active_plan_target_artifact(inventory, str(candidate)):
+        if not _is_active_plan_product_artifact(inventory, str(candidate)):
             return False
     return True
 
@@ -6234,7 +6234,8 @@ def _coherent_active_plan_open_checkpoint_paths(
     state_data = state.frontmatter.data
     if str(state_data.get("plan_status") or "").strip().casefold() != "active":
         return set()
-    if str(state_data.get("phase_status") or "").strip().casefold() != "pending":
+    phase_status = str(state_data.get("phase_status") or "").strip().casefold()
+    if not _active_plan_phase_transition_checkpoint_status_allows(phase_status):
         return set()
     active_plan_rel = _active_plan_rel_path(inventory)
     if not active_plan_rel:
@@ -6290,7 +6291,8 @@ def _coherent_active_plan_phase_transition_checkpoint_paths(
     state_data = state_frontmatter.data
     if str(state_data.get("plan_status") or "").strip().casefold() != "active":
         return set()
-    if str(state_data.get("phase_status") or "").strip().casefold() != "pending":
+    phase_status = str(state_data.get("phase_status") or "").strip().casefold()
+    if not _active_plan_phase_transition_checkpoint_status_allows(phase_status):
         return set()
     active_plan_rel = _normalize_hook_path(str(state_data.get("active_plan") or "")).casefold()
     if not active_plan_rel:
@@ -6315,13 +6317,23 @@ def _coherent_active_plan_phase_transition_checkpoint_paths(
 def _state_has_current_phase_transition_writeback(state_text: str, state_data: dict[str, object]) -> bool:
     active_phase = str(state_data.get("active_phase") or "").strip().casefold()
     phase_status = str(state_data.get("phase_status") or "").strip().casefold()
-    if not active_phase or phase_status != "pending":
+    if not active_phase or not _active_plan_phase_transition_checkpoint_status_allows(phase_status):
         return False
     blocks = _route_writeback_blocks(state_text)
     if not blocks:
         return False
     latest = blocks[-1].casefold()
-    return "state_writeback" in latest and "active_phase" in latest and active_phase in latest and "pending" in latest
+    return (
+        "state_writeback" in latest
+        and "active_phase" in latest
+        and active_phase in latest
+        and "phase_status" in latest
+        and phase_status in latest
+    )
+
+
+def _active_plan_phase_transition_checkpoint_status_allows(phase_status: str) -> bool:
+    return phase_status in {"active", "in_progress", "pending"}
 
 
 def _route_writeback_blocks(text: str) -> list[str]:
@@ -6374,15 +6386,17 @@ def _active_plan_open_checkpoint_matches_state(
     plan_id = str(plan_data.get("plan_id") or "").strip()
     state_plan = _normalize_hook_path(str(state_data.get("active_plan") or "")).casefold()
     state_phase = str(state_data.get("active_phase") or "").strip()
+    state_phase_status = str(state_data.get("phase_status") or "").strip().casefold()
+    expected_plan_status = "pending" if phase_status == "pending" else "active"
     if state_plan and state_plan != _normalize_hook_path(active_plan_rel).casefold():
         return False
     return bool(
         plan_id
         and active_phase
         and active_phase == state_phase
-        and plan_status == "pending"
-        and phase_status == "pending"
-        and phase_status == str(state_data.get("phase_status") or "").strip().casefold()
+        and plan_status == expected_plan_status
+        and _active_plan_phase_transition_checkpoint_status_allows(phase_status)
+        and phase_status == state_phase_status
     )
 
 
