@@ -10042,8 +10042,16 @@ def _is_active_plan_product_artifact(inventory: Inventory, path: str) -> bool:
     for artifact in artifacts:
         candidate = _normalize_hook_path(str(artifact or "")).casefold()
         if candidate and normalized == candidate:
-            return True
+            return _active_phase_write_scope_product_artifact_allows_path(inventory, normalized)
     return False
+
+
+def _active_phase_write_scope_product_artifact_allows_path(inventory: Inventory, product_rel: str) -> bool:
+    scope = _active_phase_write_scope_paths(inventory)
+    if not scope:
+        return True
+    normalized = _normalize_hook_path(product_rel).casefold()
+    return any(normalized == item.rstrip("/") for item in scope if item.rstrip("/"))
 
 
 def _is_active_plan_target_artifact(inventory: Inventory, path: str) -> bool:

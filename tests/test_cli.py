@@ -25776,6 +25776,74 @@ class CliTests(unittest.TestCase):
             self.assertIn("0 target artifacts across 2 roadmap items; report-only sizing signal, not a hard gate", rendered)
             self.assertIn("plan synthesis rationale is advisory evidence only", rendered)
 
+    def test_plan_apply_h10_product_source_guard_renders_phase_write_scope_from_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source_rel = "project/plan-incubation/h10-product-source-active-plan-guard-overblock.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "h10-product-source-active-plan-guard-overblock"\n'
+                'related_roadmap_item: "h10-product-source-active-plan-guard-overblock"\n'
+                "---\n"
+                "# H10 Product Source Guard\n\n"
+                "[MLH-Fix-Candidate] Exact active-plan product-source edits need product target scope.\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Fix H10 Product-source Active-plan Guard Overblock\n\n"
+                "- `id`: `h10-product-source-active-plan-guard-overblock`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `plan-scope-and-route-package-rails`\n"
+                "- `slice_goal`: `Make active-plan target scopes deterministic before product-source edits.`\n"
+                "- `slice_members`: `[\"h10-product-source-active-plan-guard-overblock\"]`\n"
+                "- `slice_dependencies`: `[]`\n"
+                "- `slice_closeout_boundary`: `Plan/scope/check guidance only; no active lifecycle bypass.`\n"
+                "- `dependencies`: `[]`\n"
+                f"- `source_incubation`: `{source_rel}`\n"
+                "- `related_specs`: `[]`\n"
+                "- `related_plan`: ``\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/hooks.py\", \"src/mylittleharness/planning.py\", \"tests/test_cli.py\"]`\n"
+                "- `verification_summary`: `Hook/plan tests for product-source target scope under active-plan guards.`\n"
+                "- `docs_decision`: `not-needed`\n"
+                "- `carry_forward`: `Resolve exact product-source edit route without widening cross-root mutation.`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--roadmap-item",
+                        "h10-product-source-active-plan-guard-overblock",
+                        "--only-requested-item",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-target-artifact-ownership", rendered)
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            for expected in (
+                '  - "src/mylittleharness/hooks.py"',
+                '  - "src/mylittleharness/planning.py"',
+                '  - "tests/test_cli.py"',
+            ):
+                self.assertIn(expected, plan_text)
+            phase_1 = plan_text.split("### phase-1-implementation", 1)[1].split("### phase-2-verification-and-docs", 1)[0]
+            self.assertIn(
+                "- write_scope: `src/mylittleharness/hooks.py`, `src/mylittleharness/planning.py`, `tests/test_cli.py`",
+                phase_1,
+            )
+
     def test_plan_apply_refuses_unreviewed_multi_item_slice_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -39816,6 +39884,83 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-active-plan-product-source-artifact", allowed_codes)
             self.assertTrue(blocked_payload["block"])
             self.assertIn("hooks-policy-block-product-root-path", blocked_codes)
+
+    def test_hooks_pre_tool_product_source_patch_respects_current_phase_write_scope(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_active_live_root(base / "operator", phase_status="pending")
+            product_root = base / "product"
+            source_path = product_root / "src" / "mylittleharness" / "hooks.py"
+            test_path = product_root / "tests" / "test_cli.py"
+            source_path.parent.mkdir(parents=True)
+            test_path.parent.mkdir(parents=True)
+            source_path.write_text("# hooks\n", encoding="utf-8")
+            test_path.write_text("def test_cli():\n    assert True\n", encoding="utf-8")
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"\nphase_status: "pending"',
+                    f'active_phase: "phase-2-verification-and-docs"\nphase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project" / "implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "product-source-phase-scope"\n'
+                'active_phase: "phase-2-verification-and-docs"\n'
+                'phase_status: "pending"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/hooks.py"\n'
+                '  - "tests/test_cli.py"\n'
+                "---\n"
+                "# Plan\n\n"
+                "### phase-1-implementation\n\n"
+                "- id: `phase-1-implementation`\n"
+                '- write_scope: `src/mylittleharness/hooks.py`, `tests/test_cli.py`\n\n'
+                "### phase-2-verification-and-docs\n\n"
+                "- id: `phase-2-verification-and-docs`\n"
+                "- write_scope: `tests/test_cli.py`\n",
+                encoding="utf-8",
+            )
+            source_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {source_path}\n"
+                "@@\n"
+                "-# hooks\n"
+                "+# hooks updated\n"
+                "*** End Patch\n"
+            )
+            test_patch = (
+                "*** Begin Patch\n"
+                f"*** Update File: {test_path}\n"
+                "@@\n"
+                "-def test_cli():\n"
+                "+def test_cli_updated():\n"
+                "*** End Patch\n"
+            )
+
+            source_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": source_patch}),
+            )
+            test_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "apply_patch", "input": test_patch}),
+            )
+
+            source_codes = {finding["code"] for finding in source_payload["findings"]}
+            test_codes = {finding["code"] for finding in test_payload["findings"]}
+            self.assertTrue(source_payload["block"])
+            self.assertIn("hooks-policy-block-product-root-path", source_codes)
+            self.assertNotIn("hooks-policy-allow-active-plan-product-source-artifact", source_codes)
+            self.assertFalse(test_payload["block"])
+            self.assertIn("hooks-policy-allow-active-plan-product-source-artifact", test_codes)
 
     def test_hooks_pre_tool_allows_active_plan_product_fixture_state_cleanup_without_lifecycle_bleed(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
