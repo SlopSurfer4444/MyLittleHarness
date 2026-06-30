@@ -37045,6 +37045,18 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", symphony_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", symphony_codes)
 
+            provider_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"git add -- {provider_smoke_rel}"}),
+            )
+            provider_codes = {finding["code"] for finding in provider_payload["findings"]}
+            self.assertFalse(provider_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", provider_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", provider_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", provider_codes)
+
             blocked_cases = {
                 "broad": f"git add -- project/verification",
                 "malformed": f"git add -- {malformed_rel}",
@@ -37087,10 +37099,39 @@ class CliTests(unittest.TestCase):
             archive_rel = "project/archive/reference/incubation/2026-06-28-plan-target-artifacts-scoped-hotfix-route-gap.md"
             incubation_rel = "project/plan-incubation/handoff-accepted-packet-route-alias-normalization-gap.md"
             retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
+            standing_delegation_rel = "project/decisions/standing-delegations/symphony-local-dogfood.json"
+            provider_smoke_rel = "project/verification/standing-delegation-provider-approved-smoke-2026-06-29.md"
+            provider_unreviewed_rel = "project/verification/provider-smoke-unreviewed-source.md"
             unreviewed_rel = "project/verification/unreviewed.md"
             source_rel = "README.md"
-            for rel in (target_rel, archive_rel, incubation_rel, retained_verification_rel, unreviewed_rel):
+            for rel in (
+                target_rel,
+                archive_rel,
+                incubation_rel,
+                retained_verification_rel,
+                standing_delegation_rel,
+                provider_smoke_rel,
+                provider_unreviewed_rel,
+                unreviewed_rel,
+            ):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / standing_delegation_rel).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.standing-delegation.v1",
+                        "record_type": "standing-delegation",
+                        "policy_id": "symphony-local-dogfood",
+                        "status": "evidence-only",
+                        "non_authority": (
+                            "policy evidence only; cannot approve lifecycle, Git staging, commit, "
+                            "roadmap, release, provider routing, or owner decisions"
+                        ),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             (root / archive_rel).write_text(
                 "---\n"
                 'source: "mylittleharness incubation route"\n'
@@ -37143,6 +37184,38 @@ class CliTests(unittest.TestCase):
                 "release, or source truth decisions.\n",
                 encoding="utf-8",
             )
+            (root / provider_smoke_rel).write_text(
+                "---\n"
+                'title: "Standing Delegation Provider Approved Smoke"\n'
+                'status: "verified"\n'
+                'route: "verification"\n'
+                'intake_source: "--text-file -"\n'
+                "source_members:\n"
+                f'  - "{standing_delegation_rel}"\n'
+                'related_plan: "project/archive/plans/2026-06-28-standing-delegation-policy-route.md"\n'
+                'docs_decision: "not-needed"\n'
+                "---\n"
+                "# Standing Delegation Provider Approved Smoke\n\n"
+                "Evidence only; no push, tag, publish, artifact upload, or release claim follows from this "
+                "note. It does not approve lifecycle, Git staging, commit, roadmap, provider routing, or "
+                "source-truth decisions.\n",
+                encoding="utf-8",
+            )
+            (root / provider_unreviewed_rel).write_text(
+                "---\n"
+                'title: "Provider Smoke Unreviewed Source"\n'
+                'status: "verified"\n'
+                'route: "verification"\n'
+                'intake_source: "--text-file -"\n'
+                "source_members:\n"
+                f'  - "{source_rel}"\n'
+                "---\n"
+                "# Provider Smoke Unreviewed Source\n\n"
+                "Evidence only; no push, tag, publish, artifact upload, or release claim follows from this "
+                "note. It does not approve lifecycle, Git staging, commit, roadmap, provider routing, or "
+                "source-truth decisions.\n",
+                encoding="utf-8",
+            )
             (root / unreviewed_rel).write_text(
                 "---\n"
                 'title: "Unreviewed"\n'
@@ -37172,6 +37245,7 @@ class CliTests(unittest.TestCase):
                 "separator-commit": f"git add -- {target_rel}; git commit -m checkpoint",
                 "separator-push": f"git add -- {target_rel}; git push origin main",
                 "separator-tag": f"git add -- {target_rel}; git tag v1.0.0",
+                "provider-unreviewed-source": f"git add -- {provider_unreviewed_rel}",
                 "unreviewed": f"git add -- {unreviewed_rel}",
             }
             for name, command in blocked_cases.items():
@@ -39554,10 +39628,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-post-closeout-local-vcs-commit", finding_codes)
             self.assertIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", finding_codes)
             self.assertTrue(bad_payload["block"])
-            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", bad_codes)
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", bad_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", bad_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", bad_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", bad_codes)
             self.assertTrue(unsafe_payload["block"])
-            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", unsafe_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-commit", unsafe_codes)
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-vcs-finalization", unsafe_codes)
 
     def test_hooks_pre_tool_allows_top_level_verification_post_closeout_package_staging_payload(self) -> None:
@@ -40363,6 +40440,92 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
             self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
+
+    def test_hooks_pre_tool_allows_current_rough_edge_campaign_delegation_envelopes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp) / "operator", phase_status="pending")
+            product_root = Path(tmp) / "product"
+            product_root.mkdir()
+            state_path = root / "project" / "project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'phase_status: "pending"',
+                    f'phase_status: "pending"\nproduct_source_root: "{product_root}"',
+                ),
+                encoding="utf-8",
+            )
+            prompt = (
+                "<codex_delegation><source_thread_id>019e7d92-c750-77c3-b74f-a8380ebc094f"
+                "</source_thread_id><input>Work in the MyLittleHarness-dev operating root on local main, "
+                f"with adjacent product source at {product_root}. Use MLH legal routes and exact local commits only. "
+                "Goal: fix accumulated MLH hook/route UX rough edges from standing-delegation and Cliproxy dogfood. "
+                "Verify real Codex wrapper payload shapes including tool_uses, nested parameters, JSON-string "
+                "arguments, and tool-level workdir. Treat this as coordinator/delegation/report context, not a "
+                "shell mutation. Preserve unrelated dirty work, keep unsafe shell mutations blocked, use dry-run "
+                "before apply routes when a route is actually invoked, and do not push, tag, release, publish, "
+                "launch providers, bypass hooks, or weaken mutation guards.</input></codex_delegation>"
+            )
+            hook_inputs = [
+                {
+                    "toolName": "multi_tool_use.parallel",
+                    "workdir": str(root),
+                    "tool_uses": [
+                        {
+                            "recipient_name": "codex_app.send_message_to_thread",
+                            "parameters": {
+                                "thread_id": "thread-1",
+                                "workdir": str(root),
+                                "message": prompt,
+                            },
+                        },
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {
+                                "workdir": str(root),
+                                "command": 'rg -n "tool_uses|workdir" src/mylittleharness/hooks.py tests/test_cli.py',
+                            },
+                        },
+                    ],
+                },
+                {
+                    "request": {
+                        "payload": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "codex_app.send_message_to_thread",
+                                        "arguments": json.dumps(
+                                            {
+                                                "thread_id": "thread-1",
+                                                "workdir": str(root),
+                                                "message": prompt,
+                                                "parameters": {
+                                                    "target": {
+                                                        "root": str(root),
+                                                        "product_source_root": str(product_root),
+                                                    }
+                                                },
+                                            }
+                                        ),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+            ]
+
+            for hook_input in hook_inputs:
+                with self.subTest(wrapper=json.dumps(hook_input)[:90]):
+                    payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(hook_input))
+
+                    finding_codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+                    self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
+                    self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
 
     def test_hooks_pre_tool_allows_real_codex_wrapper_coordination_reports_with_protected_terms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -41654,11 +41817,12 @@ class CliTests(unittest.TestCase):
 
             finding_codes = {finding["code"] for finding in payload["findings"]}
             messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            exact_paths = " ".join(sorted(checkpoint_paths))
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
             self.assertIn(
-                "next_safe_review=git diff --cached --check; git add -f -- <ignored-route-artifact-if-needed>; "
-                "git diff --cached --check; git commit -F <message-file>",
+                f"next_safe_review=git diff --cached --check; git check-ignore -v -- {exact_paths}; "
+                f"git add -f -- {exact_paths}; git diff --cached --check; git commit -F <message-file>",
                 messages,
             )
             self.assertNotIn("next_safe_review=git -C", messages)
@@ -41714,11 +41878,13 @@ class CliTests(unittest.TestCase):
             broad_codes = {finding["code"] for finding in broad_payload["findings"]}
             bundle_messages = "\n".join(str(finding["message"]) for finding in bundle_payload["findings"])
             broad_messages = "\n".join(str(finding["message"]) for finding in broad_payload["findings"])
+            exact_paths = " ".join(sorted(checkpoint_paths))
             self.assertFalse(bundle_payload["block"])
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", bundle_codes)
             self.assertIn("next_safe_review=", bundle_messages)
             self.assertIn("status --short", bundle_messages)
-            self.assertIn("add -f -- <ignored-route-artifact-if-needed>", bundle_messages)
+            self.assertIn(f"check-ignore -v -- {exact_paths}", bundle_messages)
+            self.assertIn(f"add -f -- {exact_paths}", bundle_messages)
             self.assertIn(str(neighbor_root.resolve()), bundle_messages)
             self.assertNotIn(str(product_root.resolve()), bundle_messages)
             self.assertTrue(broad_payload["block"])
@@ -44189,6 +44355,41 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
             self.assertIn(f"check-ignore -v -- {receipt_rel}", messages)
             self.assertIn(f"add -f -- {receipt_rel}", messages)
+            self.assertNotIn("<ignored-route-artifact-if-needed>", messages)
+
+    def test_hooks_pre_tool_agent_run_checkpoint_guidance_names_exact_force_add(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_live_root(Path(tmp) / "current")
+            root = make_live_root(Path(tmp) / "neighbor")
+            agent_run_rel = "project/" + "verification/agent-runs/ignored-run.md"
+            (root / agent_run_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / agent_run_rel).write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "ignored-run"\n'
+                'status: "succeeded"\n'
+                "---\n"
+                "# Ignored Run\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{root}" add -- {agent_run_rel}',
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertIn(f"check-ignore -v -- {agent_run_rel}", messages)
+            self.assertIn(f"add -f -- {agent_run_rel}", messages)
             self.assertNotIn("<ignored-route-artifact-if-needed>", messages)
 
     def test_hooks_pre_tool_allows_retention_route_and_receipt_backed_staging(self) -> None:
@@ -50464,7 +50665,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("- warning_classification: 0 blocking; 1 nonblocking; 0 known-environment", rendered)
         self.assertIn("route-metadata-changed-source-members", rendered)
 
-    def test_check_quick_json_classifies_actual_changed_source_members_warning_as_nonblocking(self) -> None:
+    def test_check_json_classifies_actual_changed_source_members_warning_as_nonblocking(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
             (root / ".git").mkdir()
@@ -50491,7 +50692,7 @@ class CliTests(unittest.TestCase):
 
             output = io.StringIO()
             with patch("mylittleharness.checks.probe_vcs", return_value=posture), redirect_stdout(output):
-                code = main(["--root", str(root), "check", "--quick", "--json"])
+                code = main(["--root", str(root), "check", "--json"])
 
             self.assertEqual(code, 0)
             payload = json.loads(output.getvalue())

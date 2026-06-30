@@ -1889,7 +1889,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/" + "implementation-plan.md",
             )
         )
-    for finding in _path_policy_findings(
+    path_policy_findings = _path_policy_findings(
         inventory,
         paths,
         allow_read_only_source_paths=allow_read_only_source_paths,
@@ -1907,8 +1907,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             set(reviewed_local_vcs_checkpoint.paths) | set(reviewed_local_vcs_index_split.paths)
         ),
         source_command=command,
-    ):
-        findings.append(finding)
+    )
+    findings.extend(path_policy_findings)
+    has_blocking_path_policy_finding = any(finding.severity == "error" for finding in path_policy_findings)
     if _is_product_source_root_mlh_mutation_command(inventory, command_data, command):
         findings.append(
             Finding(
@@ -2075,7 +2076,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else None,
             )
         )
-    if allow_post_closeout_local_vcs_commit:
+    if allow_post_closeout_local_vcs_commit and not has_blocking_path_policy_finding:
         findings.append(
             Finding(
                 "info",
@@ -9192,7 +9193,7 @@ def _is_reviewed_top_level_verification_checkpoint_text(
     if _route_evidence_text_has_safe_release_boundary(text):
         if str(data.get("route") or "").strip().casefold() != "verification":
             return False
-        return _verification_checkpoint_has_reviewed_archive_or_retained_source_members(inventory, data)
+        return _verification_checkpoint_has_reviewed_route_source_members(inventory, data)
     return _route_evidence_text_has_non_authority_boundary(text)
 
 
@@ -9211,6 +9212,26 @@ def _verification_checkpoint_has_reviewed_archive_or_retained_source_members(
         _is_reviewed_post_closeout_verification_source_member(inventory, member, reviewed_source_archives)
         for member in normalized_members
     )
+
+
+def _verification_checkpoint_has_reviewed_route_source_members(
+    inventory: Inventory, data: dict[str, object]
+) -> bool:
+    normalized_members = _verification_checkpoint_normalized_source_members(inventory, data)
+    if not normalized_members:
+        return False
+    return all(
+        _is_reviewed_verification_checkpoint_source_member(inventory, member)
+        for member in normalized_members
+    )
+
+
+def _is_reviewed_verification_checkpoint_source_member(inventory: Inventory, member: str) -> bool:
+    if _is_reviewed_coordination_checkpoint_route_file(inventory, member):
+        return True
+    if _is_reviewed_decision_checkpoint_artifact_file(inventory, member):
+        return True
+    return _is_reviewed_post_closeout_verification_source_member(inventory, member, set())
 
 
 def _verification_checkpoint_has_invalid_source_member(
