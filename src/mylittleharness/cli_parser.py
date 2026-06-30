@@ -390,6 +390,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Update only route frontmatter metadata on an existing project/verification/*.md target.",
     )
     intake.add_argument("--target", help="Explicit root-relative Markdown target for --apply.")
+    route_update = subparsers.add_parser(
+        "route-update",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: update one exact row field in an existing route-owned tracker Markdown file.",
+    )
+    route_update_mode = route_update.add_mutually_exclusive_group(required=True)
+    route_update_mode.add_argument("--dry-run", action="store_true", help="Preview one exact row-field route update without writing files.")
+    route_update_mode.add_argument("--apply", action="store_true", help="Apply one reviewed row-field route update with a matching proposal token.")
+    route_update.add_argument("--target", required=True, help="Existing root-relative project/decisions/*.md or project/plan-incubation/*.md target.")
+    route_update.add_argument("--row-id", required=True, help="Exact row marker id, matched as <!-- mlh-row:<id> -->.")
+    route_update.add_argument("--field", required=True, help="Allowed field name to update inside the selected row.")
+    route_update.add_argument("--value", required=True, help="Reviewed single-line replacement value for the selected field.")
+    route_update.add_argument("--proposal-token", dest="proposal_token", help="Proposal token emitted by the matching route-update dry-run.")
+    verification_supersede = subparsers.add_parser(
+        "verification-supersede",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: write a new verification report that supersedes an existing direct verification report.",
+    )
+    verification_supersede_mode = verification_supersede.add_mutually_exclusive_group(required=True)
+    verification_supersede_mode.add_argument("--dry-run", action="store_true", help="Preview a superseding verification report without writing files.")
+    verification_supersede_mode.add_argument("--apply", action="store_true", help="Write the reviewed superseding verification report with a matching proposal token.")
+    verification_supersede.add_argument("--target", required=True, help="Existing direct project/verification/*.md report being superseded.")
+    verification_supersede.add_argument("--new-target", dest="new_target", required=True, help="New direct project/verification/*.md report to write.")
+    verification_supersede.add_argument("--text-file", dest="text_file", required=True, help="UTF-8 reviewed superseding verification Markdown; use - for stdin.")
+    verification_supersede.add_argument("--reason", required=True, help="Single-line reason for superseding the existing report.")
+    verification_supersede.add_argument("--proposal-token", dest="proposal_token", help="Proposal token emitted by the matching verification-supersede dry-run.")
     research_import = subparsers.add_parser(
         "research-import",
         help=argparse.SUPPRESS,

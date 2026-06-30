@@ -70,6 +70,13 @@ CODEX_HOOK_STATUS_MESSAGES = {
     HOOK_POST_TOOL_USE: "Recording MLH tool-use posture",
     HOOK_STOP: "Checking MLH lifecycle tail",
 }
+NATIVE_HOOK_TIMEOUT_SECONDS = {
+    HOOK_SESSION_START: 30,
+    HOOK_USER_PROMPT_SUBMIT: 8,
+    HOOK_PRE_TOOL_USE: 5,
+    HOOK_POST_TOOL_USE: 3,
+    HOOK_STOP: 5,
+}
 INSTALLABLE_HOOKS = (HOOK_PRE_COMMIT,)
 CODEX_NATIVE_HOOKS = (HOOK_SESSION_START, HOOK_USER_PROMPT_SUBMIT, HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE, HOOK_STOP)
 NATIVE_ADAPTER_HOOKS = CODEX_NATIVE_HOOKS
@@ -426,9 +433,11 @@ MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
     "research-import",
     "retention",
     "roadmap",
+    "route-update",
     "suggest",
     "task-session",
     "transition",
+    "verification-supersede",
     "writeback",
 }
 WRITING_COMMAND_TOKENS = (
@@ -1195,6 +1204,28 @@ def render_codex_session_start_script() -> str:
             "from mylittleharness.hooks import CODEX_HOOK_EVENTS, CODEX_SESSION_START_EVENT, HOOK_SESSION_START, HOOK_STOP, codex_hook_command_output, codex_session_start_command_output",
             "from mylittleharness.inventory import load_inventory",
             "",
+            "POST_TOOL_FAST_SENSITIVE_MARKERS = (",
+            "    'project/', 'src/', 'docs/', '.git', 'git ', 'mylittleharness', 'writeback', 'roadmap',",
+            "    'route-update', 'evidence', 'repair', 'transition', 'memory-hygiene', 'meta-feedback',",
+            "    'projection', 'apply_patch', 'set-content', 'add-content', 'out-file', 'copy-item',",
+            "    'move-item', 'remove-item', '>', '>>', 'product_source_root',",
+            ")",
+            "",
+            "",
+            "def _post_tool_fast_payload(hook_event: str, hook_input: str):",
+            "    if hook_event != 'post-tool-use':",
+            "        return None",
+            "    lowered = hook_input.casefold().replace('\\\\\\\\', '/')",
+            "    if any(marker in lowered for marker in POST_TOOL_FAST_SENSITIVE_MARKERS):",
+            "        return None",
+            "    return {",
+            "        'continue': True,",
+            "        'hookSpecificOutput': {",
+            "            'hookEventName': 'PostToolUse',",
+            "            'additionalContext': 'MyLittleHarness post-tool-use fast path: no route-sensitive payload detected; full context was not refreshed. Hook output remains advisory.',",
+            "        },",
+            "    }",
+            "",
             "",
             "def _operating_root() -> Path:",
             "    return Path(__file__).resolve().parents[2]",
@@ -1205,7 +1236,10 @@ def render_codex_session_start_script() -> str:
             "    hook_event = os.environ.get(\"MLH_HOOK_EVENT\") or HOOK_SESSION_START",
             "    hook_input = sys.stdin.read()",
             "    try:",
-            "        if hook_event == HOOK_SESSION_START and not hook_input:",
+            "        fast_payload = _post_tool_fast_payload(hook_event, hook_input)",
+            "        if fast_payload is not None:",
+            "            payload = fast_payload",
+            "        elif hook_event == HOOK_SESSION_START and not hook_input:",
             "            payload = codex_session_start_command_output(load_inventory(root))",
             "        else:",
             "            payload = codex_hook_command_output(load_inventory(root), hook_event, hook_input)",
@@ -1260,6 +1294,30 @@ def render_native_hook_script(client: str) -> str:
             "",
             f"MLH_HOOK_CLIENT = {client_literal}",
             "",
+            "POST_TOOL_FAST_SENSITIVE_MARKERS = (",
+            "    'project/', 'src/', 'docs/', '.git', 'git ', 'mylittleharness', 'writeback', 'roadmap',",
+            "    'route-update', 'evidence', 'repair', 'transition', 'memory-hygiene', 'meta-feedback',",
+            "    'projection', 'apply_patch', 'set-content', 'add-content', 'out-file', 'copy-item',",
+            "    'move-item', 'remove-item', '>', '>>', 'product_source_root',",
+            ")",
+            "",
+            "",
+            "def _post_tool_fast_payload(hook_event: str, hook_input: str, client: str):",
+            "    if hook_event != 'post-tool-use':",
+            "        return None",
+            "    lowered = hook_input.casefold().replace('\\\\\\\\', '/')",
+            "    if any(marker in lowered for marker in POST_TOOL_FAST_SENSITIVE_MARKERS):",
+            "        return None",
+            "    if client == 'github-copilot':",
+            "        return {}",
+            "    return {",
+            "        'continue': True,",
+            "        'hookSpecificOutput': {",
+            "            'hookEventName': 'PostToolUse',",
+            "            'additionalContext': 'MyLittleHarness post-tool-use fast path: no route-sensitive payload detected; full context was not refreshed. Hook output remains advisory.',",
+            "        },",
+            "    }",
+            "",
             "",
             "def _operating_root() -> Path:",
             "    cwd = Path.cwd().resolve()",
@@ -1274,7 +1332,11 @@ def render_native_hook_script(client: str) -> str:
             "    hook_event = os.environ.get(\"MLH_HOOK_EVENT\") or HOOK_SESSION_START",
             "    hook_input = sys.stdin.read()",
             "    try:",
-            "        payload = hook_client_command_output(load_inventory(root), hook_event, MLH_HOOK_CLIENT, hook_input)",
+            "        fast_payload = _post_tool_fast_payload(hook_event, hook_input, MLH_HOOK_CLIENT)",
+            "        if fast_payload is not None:",
+            "            payload = fast_payload",
+            "        else:",
+            "            payload = hook_client_command_output(load_inventory(root), hook_event, MLH_HOOK_CLIENT, hook_input)",
             "    except Exception as exc:",
             "        payload = hook_client_failure_output(MLH_HOOK_CLIENT, hook_event, str(exc))",
             "    json.dump(payload, sys.stdout, ensure_ascii=True)",
@@ -1942,7 +2004,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "hooks-policy-block-opaque-script-file-execution",
                 (
                     "blocked script-file execution because the hook cannot inspect the delegated script body; "
-                    "run a first-class MLH dry-run/apply route or expand the script into a visible reviewed command; "
+                    "run a first-class MLH dry-run/apply route, expand the script into a visible reviewed command, "
+                    "or invoke the reviewed executable directly instead of a wrapper; "
                     f"next_safe_command=Get-Content -LiteralPath {shell_arg(opaque_script_target)}"
                 ),
                 opaque_script_target,
@@ -2962,6 +3025,8 @@ def _hook_direct_command_payloads(value: object, context: dict[str, object] | No
         return []
     local_context = _merge_hook_payload_context(context, _hook_payload_context(value))
     if _hook_payload_has_direct_command(value):
+        if _hook_context_is_subagent_delegation(local_context):
+            return []
         return [_merge_hook_payload_context(local_context, value)]
     payloads: list[dict[str, object]] = []
     for key in (
@@ -3023,6 +3088,17 @@ def _hook_payload_context(payload: dict[str, object]) -> dict[str, object]:
         if isinstance(value, str) and value.strip():
             context[key] = value
     return context
+
+
+def _hook_context_is_subagent_delegation(context: dict[str, object]) -> bool:
+    for key in ("toolName", "tool_name", "tool", "recipient_name", "name"):
+        value = context.get(key)
+        if not isinstance(value, str):
+            continue
+        tool_name = value.strip().casefold()
+        if any(tool_name.endswith(marker) or marker in tool_name for marker in READ_ONLY_SUBAGENT_DELEGATION_TOOLS):
+            return True
+    return False
 
 
 def _merge_hook_payload_context(context: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
@@ -3939,6 +4015,8 @@ def _delegation_prompt_text(data: dict[str, object], fallback_text: str) -> str:
             for key, item in value.items():
                 lowered_key = str(key).casefold()
                 if lowered_key in {"input", "prompt", "message", "body", "content", "task", "instructions"} and isinstance(item, str):
+                    prompt_parts.append(item)
+                elif lowered_key == "command" and isinstance(item, str) and _is_subagent_delegation_tool_request(data):
                     prompt_parts.append(item)
                 elif isinstance(item, (dict, list)):
                     collect(item)
@@ -9902,6 +9980,9 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if route_id == "active-plan":
         return mlh_command("plan", "--dry-run", "--roadmap-item", "<id>")
     if route_id == "incubation":
+        route_path = _hook_route_file_path(inventory, rel)
+        if route_path is not None and route_path.exists():
+            return mlh_command("route-update", "--dry-run", "--target", rel, "--row-id", "<id>", "--field", "<field>", "--value", '"<reviewed-line>"')
         return mlh_command("incubate", "--dry-run", "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--note-file", "-")
     if route_id == "operator-prompts":
         return mlh_command(
@@ -9917,9 +9998,28 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
         return mlh_command("research-import", "--dry-run", "--title", '"<title>"', "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--text-file", "-")
     if _is_temporary_roadmap_manifest_path(rel):
         return mlh_command("cleanup", "--dry-run", "--target", rel)
-    if route_id in {"adrs", "decisions", "product-docs"}:
+    if route_id == "decisions":
+        route_path = _hook_route_file_path(inventory, rel)
+        if route_path is not None and route_path.exists():
+            return mlh_command("route-update", "--dry-run", "--target", rel, "--row-id", "<id>", "--field", "<field>", "--value", '"<reviewed-line>"')
+        return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
+    if route_id in {"adrs", "product-docs"}:
         return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
     if route_id == "verification":
+        route_path = _hook_route_file_path(inventory, rel)
+        if route_path is not None and route_path.exists() and Path(rel).parent.as_posix() == "project/verification":
+            return mlh_command(
+                "verification-supersede",
+                "--dry-run",
+                "--target",
+                rel,
+                "--new-target",
+                "project/verification/<new-report>.md",
+                "--text-file",
+                "-",
+                "--reason",
+                '"<reason>"',
+            )
         return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
     if route_id == "stable-specs":
         return mlh_command("check", "--focus", "route-references")
@@ -10908,7 +11008,7 @@ def _codex_hook_group(hook_id: str) -> dict[str, object]:
             {
                 "type": "command",
                 "command": _codex_hook_command(hook_id),
-                "timeout": 30,
+                "timeout": _native_hook_timeout_seconds(hook_id),
                 "statusMessage": CODEX_HOOK_STATUS_MESSAGES[hook_id],
             }
         ],
@@ -10921,7 +11021,7 @@ def _claude_code_hook_group(hook_id: str) -> dict[str, object]:
             {
                 "type": "command",
                 "command": _native_hook_command(CLAUDE_CODE_CLIENT, hook_id),
-                "timeout": 30,
+                "timeout": _native_hook_timeout_seconds(hook_id),
                 "statusMessage": CODEX_HOOK_STATUS_MESSAGES[hook_id],
             }
         ],
@@ -10935,8 +11035,12 @@ def _github_copilot_hook_entry(hook_id: str) -> dict[str, object]:
     return {
         "type": "command",
         "command": _native_hook_command(GITHUB_COPILOT_CLIENT, hook_id),
-        "timeoutSec": 30,
+        "timeoutSec": _native_hook_timeout_seconds(hook_id),
     }
+
+
+def _native_hook_timeout_seconds(hook_id: str) -> int:
+    return NATIVE_HOOK_TIMEOUT_SECONDS.get(hook_id, 5)
 
 
 def _codex_hook_command(hook_id: str) -> str:

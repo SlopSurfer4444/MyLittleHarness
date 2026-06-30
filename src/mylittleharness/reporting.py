@@ -130,7 +130,9 @@ MUTATING_REPORT_COMMANDS = {
     "research-import",
     "repair",
     "roadmap",
+    "route-update",
     "transition",
+    "verification-supersede",
     "writeback",
 }
 CHANGE_CODE_MARKERS = (
@@ -1479,7 +1481,7 @@ def _normalized_command_text(raw: str) -> str:
 
 def _looks_like_report_command_action(command: str) -> bool:
     return re.search(
-        r"\b(mylittleharness|memory-hygiene|meta-feedback|roadmap|writeback|repair|plan|check|projection|hooks|adapter|mlhd|intake|attachment-import|research-import|research-distill|evidence|claim|handoff|approval-packet|approval-decision|discover|reconcile|git|rg)\b",
+        r"\b(mylittleharness|memory-hygiene|meta-feedback|roadmap|writeback|repair|plan|check|projection|hooks|adapter|mlhd|intake|route-update|verification-supersede|attachment-import|research-import|research-distill|evidence|claim|handoff|approval-packet|approval-decision|discover|reconcile|git|rg)\b",
         command or "",
     ) is not None
 
@@ -1662,7 +1664,7 @@ def _work_kind_for_command(command: str) -> str:
         return "coordination"
     if command == "attachment-import":
         return "evidence"
-    if command in {"plan", "roadmap", "incubate", "intake", "meta-feedback"}:
+    if command in {"plan", "roadmap", "incubate", "intake", "route-update", "verification-supersede", "meta-feedback"}:
         return "planning"
     if command in {"writeback", "transition", "closeout"}:
         return "lifecycle"
@@ -1710,7 +1712,7 @@ def _improvement_for_report(command: str, read_only_or_preview: bool, changed: b
         return "The command makes the current repository posture easier to judge before any mutating action."
     if command in {"writeback", "transition", "closeout"}:
         return "The next operator can resume from explicit lifecycle facts instead of chat memory."
-    if command in {"plan", "roadmap", "incubate", "intake", "meta-feedback"}:
+    if command in {"plan", "roadmap", "incubate", "intake", "route-update", "verification-supersede", "meta-feedback"}:
         return "The next planning step is recoverable from repo-visible routes."
     if changed:
         return "The report states the practical outcome before the detailed diagnostic log."

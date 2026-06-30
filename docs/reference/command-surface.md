@@ -52,6 +52,8 @@ by themselves.
 | `standing-delegation` | autonomy policy evidence | yes | yes | writes one append-only standing-delegation JSON with scope roots, allowed routine actions, expiration/revocation posture, owner attestation, and hard human boundaries; later routes must consume it explicitly |
 | `evidence --receipt-refresh` | evidence maintenance | yes | yes plus proposal token | refreshes `source_hashes` only for an existing worker-run receipt JSON |
 | `evidence --retarget-ref` | evidence maintenance | yes | yes plus proposal token | retargets scoped provenance refs in existing route-owned evidence |
+| `route-update` | route-owned tracker maintenance | yes | yes plus proposal token | updates one exact row field in existing decision/incubation tracker Markdown |
+| `verification-supersede` | verification report correction | yes | yes plus proposal token | writes one new direct verification report that supersedes an existing direct report with target and replacement hashes |
 | `incubate` | future idea/fix-candidate capture | yes | yes | writes non-authority incubation notes |
 | `intake` | incoming information route | yes | yes | writes one explicit target when reviewed |
 
@@ -117,6 +119,24 @@ targets refresh `source_hashes` after retargeting. It refuses path escapes,
 symlinks, missing new refs, malformed records, stale tokens, and authority
 overclaims, and it cannot approve lifecycle, archive, roadmap status,
 provider routing, staging, commits, or acceptance.
+Protected route-owned tracker row maintenance uses
+`route-update --dry-run --target project/plan-incubation/<tracker>.md
+--row-id <id> --field <field> --value "<reviewed-line>"`. The matching
+apply requires the reported `ru-*` proposal token and updates only the selected
+row field in an existing `project/decisions/*.md` or
+`project/plan-incubation/*.md` target with route frontmatter. It refuses
+missing or duplicate row markers, stale tokens, nested evidence/report targets,
+path escapes, symlinks, malformed frontmatter, unknown fields, multi-line body
+replacement, and authority overclaims.
+Reviewed correction of an existing verification report uses
+`verification-supersede --dry-run --target project/verification/<old>.md
+--new-target project/verification/<new>.md --text-file <reviewed-report.md>
+--reason "<reason>"`. The matching apply requires the reported `vs-*` proposal
+token and writes one new direct `project/verification/*.md` report that records
+the superseded target, old target hash, replacement text hash, and reason. It
+does not edit the old report body and refuses nested verification evidence
+routes, existing new targets, path escapes, symlinks, stale tokens, empty
+replacement content, and authority overclaims.
 `attachment-import` is the route for incoming PDFs, DOCX, XLSX, images, and
 ZIPs. It writes the original binary beside `artifact.md`; the binary remains
 source evidence, and the Markdown card is the metadata authority for hash,

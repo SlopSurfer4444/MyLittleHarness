@@ -65,15 +65,21 @@ from .checks import (
     load_for_root,
     make_cleanup_request,
     make_intake_request,
+    make_route_update_request,
+    make_verification_supersede_request,
     migrate_apply_findings,
     migrate_dry_run_findings,
     projection_cache_status_findings,
     detach_apply_sections,
     repair_apply_findings,
     repair_dry_run_findings,
+    route_update_apply_findings,
+    route_update_dry_run_findings,
     route_reference_inventory_findings,
     snapshot_inspect_findings,
     status_findings,
+    verification_supersede_apply_findings,
+    verification_supersede_dry_run_findings,
     detach_dry_run_sections,
     validation_findings,
 )
@@ -291,6 +297,8 @@ COMMANDS = (
     "reconcile",
     "closeout",
     "intake",
+    "route-update",
+    "verification-supersede",
     "discover",
     "attachment-import",
     "research-import",
@@ -324,6 +332,8 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "incubate",
     "incubation-reconcile",
     "intake",
+    "route-update",
+    "verification-supersede",
     "discover",
     "attachment-import",
     "memory-hygiene",
@@ -1146,6 +1156,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         report_name = "intake --apply" if args.apply else "intake --dry-run"
         findings = intake_apply_findings(inventory, request) if args.apply else intake_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "route-update":
+        request = make_route_update_request(args.target, args.row_id, args.field, args.value, args.proposal_token)
+        report_name = "route-update --apply" if args.apply else "route-update --dry-run"
+        findings = route_update_apply_findings(inventory, request) if args.apply else route_update_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "verification-supersede":
+        text_result = _read_text_argument("--text-file", args.text_file)
+        if text_result[1]:
+            emit_text(f"mylittleharness: {text_result[1]}", stream=sys.stderr)
+            return 2
+        request = make_verification_supersede_request(
+            args.target,
+            args.new_target,
+            text_result[0],
+            f"--text-file {args.text_file}",
+            args.reason,
+            args.proposal_token,
+        )
+        report_name = "verification-supersede --apply" if args.apply else "verification-supersede --dry-run"
+        findings = verification_supersede_apply_findings(inventory, request) if args.apply else verification_supersede_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -3606,6 +3643,24 @@ def _suggestions(command: str, findings) -> list[str]:
         ):
             return ["intake apply wrote one explicit draft ADR/decision note; acceptance remains a separate review decision."]
         return ["intake apply wrote one explicit routed note; classification remains advisory and does not approve lifecycle movement."]
+    if command == "route-update":
+        if any(finding.code == "route-update-preview" for finding in findings):
+            return ["route-update dry-run reported the exact target row, before/after hashes, and proposal token without writing files."]
+        if any(finding.code == "route-update-updated" for finding in findings):
+            return ["route-update apply updated one exact row field in an existing route-owned tracker; lifecycle, archive, roadmap status, staging, commit, push, provider routing, and release remain explicit."]
+        if any(finding.code == "route-update-current" for finding in findings):
+            return ["route-update found the selected row field already current; no route write was needed."]
+        if any(finding.code == "route-update-refused" and finding.severity == "error" for finding in findings):
+            return ["route-update apply was refused before protected route-owned Markdown changed; rerun dry-run for a fresh token if the target changed."]
+        return ["route-update completed without approving lifecycle, archive, roadmap status, staging, commit, push, provider routing, or release."]
+    if command == "verification-supersede":
+        if any(finding.code == "verification-supersede-preview" for finding in findings):
+            return ["verification-supersede dry-run reported the old report hash, replacement hash, new target, and proposal token without writing files."]
+        if any(finding.code == "verification-supersede-written" for finding in findings):
+            return ["verification-supersede apply wrote one new superseding verification report with lineage hashes; lifecycle, archive, roadmap status, staging, commit, push, provider routing, release, and target acceptance remain explicit."]
+        if any(finding.code == "verification-supersede-refused" and finding.severity == "error" for finding in findings):
+            return ["verification-supersede apply was refused before route-owned verification Markdown changed; rerun dry-run for a fresh token if the target or replacement changed."]
+        return ["verification-supersede completed without approving lifecycle, archive, roadmap status, staging, commit, push, provider routing, release, or target acceptance."]
     if command == "attachment-import":
         if any(finding.severity == "error" for finding in findings):
             return ["attachment-import apply was refused before any binary or metadata card was written."]
@@ -3862,6 +3917,8 @@ def _dry_run_refusal_suggestion(command: str, findings) -> str:
         "meta-feedback": "candidate note or cluster metadata",
         "plan": "active-plan or lifecycle update",
         "roadmap": "roadmap mutation",
+        "route-update": "route-owned tracker row update",
+        "verification-supersede": "superseding verification report",
         "transition": "lifecycle transition",
         "writeback": "closeout/state writeback",
     }

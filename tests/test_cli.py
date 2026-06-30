@@ -1346,6 +1346,36 @@ class CliTests(unittest.TestCase):
             self.assertIn("--stop-reason", rendered)
             self.assertIn("cannot approve closeout, archive, roadmap status", rendered)
 
+    def test_suggest_intent_routes_route_owned_tracker_row_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "route-update tracker row ledger update"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-owned-tracker-row-update", rendered)
+            self.assertIn("route-update --dry-run", rendered)
+            self.assertIn("--proposal-token <ru-token-from-dry-run>", rendered)
+
+    def test_suggest_intent_routes_existing_verification_report_supersede(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "correct existing verification report"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("verification-report-supersede", rendered)
+            self.assertIn("verification-supersede --dry-run", rendered)
+            self.assertIn("--proposal-token <vs-token-from-dry-run>", rendered)
+
     def test_suggest_json_reports_machine_readable_command_advice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -5228,6 +5258,8 @@ class CliTests(unittest.TestCase):
             (["snapshot", "--help"], "Advanced diagnostic: inspect repair snapshots"),
             (["writeback", "--help"], "Advanced mutating command: apply explicit closeout/state writeback"),
             (["intake", "--help"], "Advanced mutating command: route incoming information"),
+            (["route-update", "--help"], "Advanced mutating command: update one exact row field"),
+            (["verification-supersede", "--help"], "Advanced mutating command: write a new verification report"),
             (["incubate", "--help"], "Advanced mutating command: create or append explicit future-idea incubation"),
             (["plan", "--help"], "Advanced mutating command: create or replace a deterministic active"),
             (["memory-hygiene", "--help"], "Advanced mutating command: apply explicit research/incubation lifecycle"),
@@ -5723,6 +5755,337 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("--update-existing-metadata target route must be verification", output.getvalue())
+
+    def test_route_update_updates_exact_tracker_row_with_token_and_refuses_stale_preimage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "plan-incubation/ops-tracker.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\n"
+                'route: "incubation"\n'
+                "---\n"
+                "# Ops Tracker\n\n"
+                "<!-- mlh-row:hook-budget -->\n"
+                "- status: pending\n"
+                "- owner: mlh\n"
+                "- notes: initial\n\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--row-id",
+                            "hook-budget",
+                            "--field",
+                            "status",
+                            "--value",
+                            "reviewed",
+                        ]
+                    ),
+                    0,
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-update-preview", dry_rendered)
+            token_match = re.search(r"--proposal-token (ru-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            target_path.write_text(target_path.read_text(encoding="utf-8") + "- notes: concurrent change\n", encoding="utf-8")
+            stale_output = io.StringIO()
+            with redirect_stdout(stale_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--apply",
+                            "--target",
+                            target,
+                            "--row-id",
+                            "hook-budget",
+                            "--field",
+                            "status",
+                            "--value",
+                            "reviewed",
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    2,
+                )
+            self.assertIn("proposal token mismatch", stale_output.getvalue())
+            self.assertIn("- status: pending", target_path.read_text(encoding="utf-8"))
+
+            fresh_output = io.StringIO()
+            with redirect_stdout(fresh_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--row-id",
+                            "hook-budget",
+                            "--field",
+                            "status",
+                            "--value",
+                            "reviewed",
+                        ]
+                    ),
+                    0,
+                )
+            fresh_match = re.search(r"--proposal-token (ru-[a-f0-9]{16})", fresh_output.getvalue())
+            self.assertIsNotNone(fresh_match)
+            assert fresh_match is not None
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--apply",
+                            "--target",
+                            target,
+                            "--row-id",
+                            "hook-budget",
+                            "--field",
+                            "status",
+                            "--value",
+                            "reviewed",
+                            "--proposal-token",
+                            fresh_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("route-update-updated", apply_output.getvalue())
+            self.assertIn("- status: reviewed", target_path.read_text(encoding="utf-8"))
+
+    def test_route_update_refuses_broad_or_wrong_route_markdown_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            verification = "project/" + "verification/report.md"
+            verification_path = root / verification
+            verification_path.parent.mkdir(parents=True, exist_ok=True)
+            verification_path.write_text(
+                "---\nroute: verification\n---\n# Report\n\n<!-- mlh-row:row-1 -->\n- status: pending\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            verification,
+                            "--row-id",
+                            "row-1",
+                            "--field",
+                            "status",
+                            "--value",
+                            "reviewed",
+                        ]
+                    ),
+                    0,
+                )
+            rendered = output.getvalue()
+            self.assertIn("route-update-refused", rendered)
+            self.assertIn("project/decisions/*.md or project/plan-incubation/*.md", rendered)
+
+    def test_verification_supersede_writes_new_report_with_token_and_refuses_stale_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            old_target = "project/" + "verification/recovery-audit.md"
+            new_target = "project/" + "verification/recovery-audit-corrected.md"
+            old_path = root / old_target
+            old_path.parent.mkdir(parents=True, exist_ok=True)
+            old_path.write_text(
+                "---\n"
+                'title: "Recovery Audit"\n'
+                'status: "partial"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# Recovery Audit\n\n"
+                "Initial draft.\n",
+                encoding="utf-8",
+            )
+            replacement = root / "replacement.md"
+            replacement.write_text("# Corrected Recovery Audit\n\nStronger reviewed evidence.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "verification-supersede",
+                            "--dry-run",
+                            "--target",
+                            old_target,
+                            "--new-target",
+                            new_target,
+                            "--text-file",
+                            str(replacement),
+                            "--reason",
+                            "strengthen recovered-source audit evidence",
+                        ]
+                    ),
+                    0,
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("verification-supersede-preview", dry_rendered)
+            token_match = re.search(r"--proposal-token (vs-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            old_path.write_text(old_path.read_text(encoding="utf-8") + "\nLate correction.\n", encoding="utf-8")
+            stale_output = io.StringIO()
+            with redirect_stdout(stale_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "verification-supersede",
+                            "--apply",
+                            "--target",
+                            old_target,
+                            "--new-target",
+                            new_target,
+                            "--text-file",
+                            str(replacement),
+                            "--reason",
+                            "strengthen recovered-source audit evidence",
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    2,
+                )
+            self.assertIn("proposal token mismatch", stale_output.getvalue())
+            self.assertFalse((root / new_target).exists())
+
+            fresh_output = io.StringIO()
+            with redirect_stdout(fresh_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "verification-supersede",
+                            "--dry-run",
+                            "--target",
+                            old_target,
+                            "--new-target",
+                            new_target,
+                            "--text-file",
+                            str(replacement),
+                            "--reason",
+                            "strengthen recovered-source audit evidence",
+                        ]
+                    ),
+                    0,
+                )
+            fresh_match = re.search(r"--proposal-token (vs-[a-f0-9]{16})", fresh_output.getvalue())
+            self.assertIsNotNone(fresh_match)
+            assert fresh_match is not None
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "verification-supersede",
+                            "--apply",
+                            "--target",
+                            old_target,
+                            "--new-target",
+                            new_target,
+                            "--text-file",
+                            str(replacement),
+                            "--reason",
+                            "strengthen recovered-source audit evidence",
+                            "--proposal-token",
+                            fresh_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            rendered = apply_output.getvalue()
+            new_text = (root / new_target).read_text(encoding="utf-8")
+            self.assertIn("verification-supersede-written", rendered)
+            self.assertIn(f'supersedes: "{old_target}"', new_text)
+            self.assertIn('route: "verification"', new_text)
+            self.assertIn("Corrected Recovery Audit", new_text)
+            self.assertIn("replacement_source_sha256", new_text)
+            self.assertIn("Late correction.", old_path.read_text(encoding="utf-8"))
+
+    def test_verification_supersede_refuses_nested_or_existing_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            nested = "project/" + "verification/agent-runs/run-1.md"
+            nested_path = root / nested
+            nested_path.parent.mkdir(parents=True, exist_ok=True)
+            nested_path.write_text("---\nroute: verification\n---\n# Run\n", encoding="utf-8")
+            existing_new = "project/" + "verification/already.md"
+            (root / existing_new).write_text("---\nroute: verification\n---\n# Existing\n", encoding="utf-8")
+            replacement = root / "replacement.md"
+            replacement.write_text("# Replacement\n\nEvidence only.\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "verification-supersede",
+                            "--dry-run",
+                            "--target",
+                            nested,
+                            "--new-target",
+                            existing_new,
+                            "--text-file",
+                            str(replacement),
+                            "--reason",
+                            "correct nested run draft",
+                        ]
+                    ),
+                    0,
+                )
+            rendered = output.getvalue()
+            self.assertIn("verification-supersede-refused", rendered)
+            self.assertIn("directly under project/verification", rendered)
+            self.assertIn("--new-target must not already exist", rendered)
 
     def test_intake_apply_accepts_explicit_verification_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -32174,12 +32537,20 @@ class CliTests(unittest.TestCase):
                 "PostToolUse": "*",
                 "Stop": "*",
             }
+            expected_timeouts = {
+                "SessionStart": 30,
+                "UserPromptSubmit": 8,
+                "PreToolUse": 5,
+                "PostToolUse": 3,
+                "Stop": 5,
+            }
             for event_name, matcher in expected_events.items():
                 groups = config["hooks"][event_name]
                 self.assertEqual(matcher, groups[-1]["matcher"])
                 command = groups[-1]["hooks"][0]["command"]
                 self.assertIn("mylittleharness_session_start.py", command)
                 self.assertIn("MLH_HOOK_EVENT", command)
+                self.assertEqual(expected_timeouts[event_name], groups[-1]["hooks"][0]["timeout"])
                 self.assertIn("statusMessage", groups[-1]["hooks"][0])
             script_text = script_path.read_text(encoding="utf-8")
             self.assertIn("MLH_IMPORT_ROOT", script_text)
@@ -32190,6 +32561,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("MLH_HOOK_EVENT", script_text)
             self.assertIn("codex_hook_command_output", script_text)
             self.assertIn("codex_session_start_command_output", script_text)
+            self.assertIn("POST_TOOL_FAST_SENSITIVE_MARKERS", script_text)
+            self.assertIn("post-tool-use fast path", script_text)
             self.assertIn("json.dump(payload, sys.stdout", script_text)
 
             script_output = io.StringIO()
@@ -32223,6 +32596,24 @@ class CliTests(unittest.TestCase):
             self.assertEqual("PreToolUse", pre_tool_payload["hookSpecificOutput"]["hookEventName"])
             self.assertEqual("deny", pre_tool_payload["hookSpecificOutput"]["permissionDecision"])
             self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["permissionDecisionReason"])
+
+            post_tool_output = io.StringIO()
+            try:
+                os.chdir(root)
+                with (
+                    patch.dict(os.environ, {"MLH_HOOK_EVENT": "post-tool-use"}),
+                    patch("sys.stdin", io.StringIO(json.dumps({"toolName": "shell_command", "command": "Get-Date"}))),
+                    redirect_stdout(post_tool_output),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            post_tool_payload = json.loads(post_tool_output.getvalue())
+            self.assertTrue(post_tool_payload["continue"])
+            self.assertEqual("PostToolUse", post_tool_payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("fast path", post_tool_payload["hookSpecificOutput"]["additionalContext"])
 
     def test_hooks_codex_adapter_reports_policy_refresh_needed_for_stale_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -32291,17 +32682,27 @@ class CliTests(unittest.TestCase):
             self.assertTrue(settings_path.is_file())
             self.assertTrue(script_path.is_file())
             config = json.loads(settings_path.read_text(encoding="utf-8"))
+            expected_timeouts = {
+                "SessionStart": 30,
+                "UserPromptSubmit": 8,
+                "PreToolUse": 5,
+                "PostToolUse": 3,
+                "Stop": 5,
+            }
             for event_name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
                 groups = config["hooks"][event_name]
                 command = groups[-1]["hooks"][0]["command"]
                 self.assertIn("mylittleharness_hook.py", command)
                 self.assertIn("MLH_HOOK_EVENT", command)
+                self.assertEqual(expected_timeouts[event_name], groups[-1]["hooks"][0]["timeout"])
                 self.assertIn("statusMessage", groups[-1]["hooks"][0])
             self.assertEqual("*", config["hooks"]["PreToolUse"][-1]["matcher"])
             self.assertNotIn("matcher", config["hooks"]["UserPromptSubmit"][-1])
             script_text = script_path.read_text(encoding="utf-8")
             self.assertIn("MLH_HOOK_CLIENT = 'claude-code'", script_text)
             self.assertIn("hook_client_command_output", script_text)
+            self.assertIn("POST_TOOL_FAST_SENSITIVE_MARKERS", script_text)
+            self.assertIn("post-tool-use fast path", script_text)
             self.assertIn("json.dump(payload, sys.stdout", script_text)
 
             script_output = io.StringIO()
@@ -32331,6 +32732,24 @@ class CliTests(unittest.TestCase):
             self.assertEqual("PreToolUse", pre_tool_payload["hookSpecificOutput"]["hookEventName"])
             self.assertEqual("deny", pre_tool_payload["hookSpecificOutput"]["permissionDecision"])
             self.assertIn("frontmatter", pre_tool_payload["hookSpecificOutput"]["permissionDecisionReason"])
+
+            post_tool_output = io.StringIO()
+            try:
+                os.chdir(root)
+                with (
+                    patch.dict(os.environ, {"MLH_HOOK_EVENT": "post-tool-use"}),
+                    patch("sys.stdin", io.StringIO(json.dumps({"toolName": "shell_command", "command": "Get-Date"}))),
+                    redirect_stdout(post_tool_output),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            post_tool_payload = json.loads(post_tool_output.getvalue())
+            self.assertTrue(post_tool_payload["continue"])
+            self.assertEqual("PostToolUse", post_tool_payload["hookSpecificOutput"]["hookEventName"])
+            self.assertIn("fast path", post_tool_payload["hookSpecificOutput"]["additionalContext"])
 
     def test_hooks_native_adapter_writes_github_copilot_project_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -32362,15 +32781,24 @@ class CliTests(unittest.TestCase):
             self.assertTrue(script_path.is_file())
             config = json.loads(hooks_path.read_text(encoding="utf-8"))
             self.assertEqual(1, config["version"])
+            expected_timeouts = {
+                "sessionStart": 30,
+                "userPromptSubmitted": 8,
+                "preToolUse": 5,
+                "postToolUse": 3,
+                "agentStop": 5,
+            }
             for event_name in ("sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse", "agentStop"):
                 entries = config["hooks"][event_name]
                 self.assertEqual("command", entries[-1]["type"])
-                self.assertEqual(30, entries[-1]["timeoutSec"])
+                self.assertEqual(expected_timeouts[event_name], entries[-1]["timeoutSec"])
                 self.assertIn("mylittleharness_hook.py", entries[-1]["command"])
                 self.assertIn("MLH_HOOK_EVENT", entries[-1]["command"])
             script_text = script_path.read_text(encoding="utf-8")
             self.assertIn("MLH_HOOK_CLIENT = 'github-copilot'", script_text)
             self.assertIn("hook_client_command_output", script_text)
+            self.assertIn("POST_TOOL_FAST_SENSITIVE_MARKERS", script_text)
+            self.assertIn("post-tool-use fast path", script_text)
 
             script_output = io.StringIO()
             cwd = Path.cwd()
@@ -32397,6 +32825,21 @@ class CliTests(unittest.TestCase):
             pre_tool_payload = json.loads(pre_tool_output.getvalue())
             self.assertEqual("deny", pre_tool_payload["permissionDecision"])
             self.assertIn("frontmatter", pre_tool_payload["permissionDecisionReason"])
+
+            post_tool_output = io.StringIO()
+            try:
+                os.chdir(root)
+                with (
+                    patch.dict(os.environ, {"MLH_HOOK_EVENT": "post-tool-use"}),
+                    patch("sys.stdin", io.StringIO(json.dumps({"toolName": "shell_command", "command": "Get-Date"}))),
+                    redirect_stdout(post_tool_output),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    runpy.run_path(str(script_path), run_name="__main__")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(raised.exception.code, 0)
+            self.assertEqual({}, json.loads(post_tool_output.getvalue()))
 
     def test_hooks_native_adapter_refuses_unsafe_config_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -33745,6 +34188,48 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-subagent-delegation-shortcut", finding_codes)
             self.assertIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
             self.assertNotIn("hooks-policy-allow-delegation-prompt-context", finding_codes)
+
+    def test_hooks_pre_tool_allows_delegation_command_field_as_prompt_but_blocks_mixed_unsafe_child(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            prompt = (
+                "Read-only reviewer. Inspect AGENTS.md, project/project-state.md, and dashboard/check. "
+                "Do not write files, do not stage/commit/push, and do not bypass hooks."
+            )
+            safe_input = {
+                "toolName": "codex_app.create_thread",
+                "parameters": {"command": prompt, "title": "Safe command-field prompt"},
+            }
+            unsafe_mixed = {
+                "toolName": "multi_tool_use.parallel",
+                "tool_uses": [
+                    {
+                        "recipient_name": "codex_app.create_thread",
+                        "parameters": {"command": prompt, "title": "Safe command-field prompt"},
+                    },
+                    {
+                        "recipient_name": "functions.shell_command",
+                        "parameters": {
+                            "workdir": str(root),
+                            "command": "pdftoppm.cmd input.pdf output/page -png",
+                        },
+                    },
+                ],
+            }
+
+            safe_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(safe_input))
+            unsafe_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], json.dumps(unsafe_mixed))
+
+            safe_codes = {finding["code"] for finding in safe_payload["findings"]}
+            unsafe_codes = {finding["code"] for finding in unsafe_payload["findings"]}
+            self.assertFalse(safe_payload["block"])
+            self.assertIn("hooks-policy-allow-read-only-subagent-delegation", safe_codes)
+            self.assertNotIn("hooks-policy-block-subagent-delegation-shortcut", safe_codes)
+            self.assertTrue(unsafe_payload["block"])
+            self.assertIn("hooks-policy-block-opaque-script-file-execution", unsafe_codes)
+            self.assertNotIn("hooks-policy-allow-delegation-prompt-context", unsafe_codes)
 
     def test_hooks_pre_tool_handles_nested_codex_delegation_wrapper_and_actual_command(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -44343,6 +44828,88 @@ class CliTests(unittest.TestCase):
                     codes = {finding["code"] for finding in payload["findings"]}
                     self.assertTrue(payload["block"])
                     self.assertIn(expected_code, codes)
+
+    def test_hooks_pre_tool_allows_route_update_route_and_guides_raw_tracker_writes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "plan-incubation/ops-tracker.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\nroute: incubation\n---\n# Ops Tracker\n\n<!-- mlh-row:hook-budget -->\n- status: pending\n",
+                encoding="utf-8",
+            )
+            route_command = (
+                "mylittleharness --root . route-update --dry-run "
+                f"--target {target} --row-id hook-budget --field status --value reviewed"
+            )
+            route_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": route_command, "workdir": str(root)}),
+            )
+            raw_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"Set-Content {target} '# bypass'", "workdir": str(root)}),
+            )
+
+            route_codes = {finding["code"] for finding in route_payload["findings"]}
+            raw_messages = "\n".join(str(finding["message"]) for finding in raw_payload["findings"])
+            self.assertFalse(route_payload["block"])
+            self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", route_codes)
+            self.assertTrue(raw_payload["block"])
+            self.assertIn("route-update --dry-run", raw_messages)
+
+    def test_hooks_pre_tool_guides_raw_existing_verification_report_writes_to_supersede_route(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "verification/recovery-audit.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("---\nroute: verification\n---\n# Recovery Audit\n", encoding="utf-8")
+
+            raw_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"Set-Content {target} '# bypass'", "workdir": str(root)}),
+            )
+
+            raw_messages = "\n".join(str(finding["message"]) for finding in raw_payload["findings"])
+            self.assertTrue(raw_payload["block"])
+            self.assertIn("verification-supersede --dry-run", raw_messages)
+            self.assertNotIn("intake --dry-run --text-file - --target " + target, raw_messages)
+
+    def test_hooks_pre_tool_allows_direct_pdftoppm_exe_but_blocks_cmd_wrapper(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            exe_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": "pdftoppm.exe input.pdf output/page -png"}),
+            )
+            cmd_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": "pdftoppm.cmd input.pdf output/page -png"}),
+            )
+
+            cmd_messages = "\n".join(str(finding["message"]) for finding in cmd_payload["findings"])
+            self.assertFalse(exe_payload["block"])
+            self.assertTrue(cmd_payload["block"])
+            self.assertIn("hooks-policy-block-opaque-script-file-execution", {finding["code"] for finding in cmd_payload["findings"]})
+            self.assertIn("reviewed executable directly", cmd_messages)
 
     def test_hooks_pre_tool_allows_mlh_owner_route_stdin_payload_literals(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

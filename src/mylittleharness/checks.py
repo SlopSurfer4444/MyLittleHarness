@@ -1529,6 +1529,78 @@ class IntakeRequest:
     update_existing_metadata: bool = False
 
 
+@dataclass(frozen=True)
+class RouteUpdateRequest:
+    target: str
+    row_id: str
+    field: str
+    value: str
+    proposal_token: str = ""
+
+
+@dataclass(frozen=True)
+class RouteUpdatePlan:
+    rel_path: str
+    current_text: str
+    updated_text: str
+    row_id: str
+    field: str
+    value: str
+    current_target_hash: str
+    proposal_token: str
+
+
+@dataclass(frozen=True)
+class VerificationSupersedeRequest:
+    target: str
+    new_target: str
+    replacement_text: str
+    text_source: str
+    reason: str
+    proposal_token: str = ""
+
+
+@dataclass(frozen=True)
+class VerificationSupersedePlan:
+    target: str
+    new_target: str
+    current_text: str
+    new_text: str
+    reason: str
+    current_target_hash: str
+    replacement_text_hash: str
+    proposal_token: str
+
+
+ROUTE_UPDATE_TOKEN_PREFIX = "ru-"
+VERIFICATION_SUPERSEDE_TOKEN_PREFIX = "vs-"
+ROUTE_UPDATE_ALLOWED_FIELDS = {
+    "decisions": {
+        "decision",
+        "next_safe_command",
+        "notes",
+        "owner",
+        "rationale",
+        "status",
+        "superseded_by",
+    },
+    "incubation": {
+        "affected_routes",
+        "last_reviewed",
+        "manual_step",
+        "next_safe_command",
+        "notes",
+        "owner",
+        "safe_boundary",
+        "status",
+    },
+}
+ROUTE_UPDATE_ROUTE_ALIASES = {
+    "decisions": {"decisions", "decision"},
+    "incubation": {"incubation", "plan-incubation"},
+}
+
+
 INTAKE_VERIFICATION_STATUS_VALUES = ("pending", "passed", "failed", "partial", "partially-verified", "archived")
 INTAKE_DECISION_PACKET_FIELDS = (
     "confirmed_fixes",
@@ -1606,6 +1678,174 @@ def make_intake_request(
         source_members=_normalized_intake_metadata_paths(source_members or ()),
         update_existing_metadata=bool(update_existing_metadata),
     )
+
+
+def make_route_update_request(
+    target: str | None,
+    row_id: str | None,
+    field: str | None,
+    value: str | None,
+    proposal_token: str | None = None,
+) -> RouteUpdateRequest:
+    return RouteUpdateRequest(
+        target=_normalized_intake_target(target),
+        row_id=str(row_id or "").strip(),
+        field=_normalized_route_update_field(field),
+        value=str(value or "").strip(),
+        proposal_token=str(proposal_token or "").strip(),
+    )
+
+
+def make_verification_supersede_request(
+    target: str | None,
+    new_target: str | None,
+    replacement_text: str | None,
+    text_source: str | None,
+    reason: str | None,
+    proposal_token: str | None = None,
+) -> VerificationSupersedeRequest:
+    return VerificationSupersedeRequest(
+        target=_normalized_intake_target(target),
+        new_target=_normalized_intake_target(new_target),
+        replacement_text=str(replacement_text or ""),
+        text_source=str(text_source or "").strip(),
+        reason=str(reason or "").strip(),
+        proposal_token=str(proposal_token or "").strip(),
+    )
+
+
+def route_update_dry_run_findings(inventory: Inventory, request: RouteUpdateRequest) -> list[Finding]:
+    plan, findings = _route_update_plan(inventory, request, severity="warn")
+    base = [
+        Finding("info", "route-update-dry-run", "route-update proposal only; no files were written"),
+        Finding("info", "route-update-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    if plan is None:
+        return [*base, *findings, *_route_update_boundary_findings()]
+    return [*base, *findings, *_route_update_route_findings(plan, apply=False), *_route_update_boundary_findings()]
+
+
+def route_update_apply_findings(inventory: Inventory, request: RouteUpdateRequest) -> list[Finding]:
+    plan, findings = _route_update_plan(inventory, request, severity="error")
+    if plan is None:
+        return [*findings, *_route_update_boundary_findings()]
+    if not request.proposal_token:
+        return [
+            *findings,
+            Finding(
+                "error",
+                "route-update-refused",
+                f"apply requires --proposal-token {plan.proposal_token} from a matching dry-run",
+                plan.rel_path,
+            ),
+            *_route_update_boundary_findings(),
+        ]
+    if request.proposal_token != plan.proposal_token:
+        return [
+            *findings,
+            Finding(
+                "error",
+                "route-update-refused",
+                "proposal token mismatch; rerun route-update --dry-run because the target row or replacement value changed",
+                plan.rel_path,
+            ),
+            *_route_update_boundary_findings(),
+        ]
+    if plan.current_text == plan.updated_text:
+        return [*findings, *_route_update_route_findings(plan, apply=True), *_route_update_boundary_findings()]
+
+    target_path = inventory.root / plan.rel_path
+    operation = AtomicFileWrite(
+        target_path=target_path,
+        tmp_path=target_path.with_name(f".{target_path.name}.route-update.tmp"),
+        text=plan.updated_text,
+        backup_path=target_path.with_name(f".{target_path.name}.route-update.backup"),
+    )
+    try:
+        cleanup_warnings = apply_file_transaction([operation], root=inventory.root)
+    except FileTransactionError as exc:
+        return [
+            *findings,
+            Finding("error", "route-update-refused", f"route-update apply failed before the target write completed: {exc}", plan.rel_path),
+            *_route_update_boundary_findings(),
+        ]
+
+    result_findings = [
+        Finding("info", "route-update-apply", "route-update apply started"),
+        Finding("info", "route-update-updated", f"updated exact row {plan.row_id!r} field {plan.field!r} in {plan.rel_path}", plan.rel_path),
+        *findings,
+        *_route_update_route_findings(plan, apply=True),
+    ]
+    for warning in cleanup_warnings:
+        result_findings.append(Finding("warn", "route-update-backup-cleanup", warning, plan.rel_path))
+    result_findings.extend(_route_update_boundary_findings())
+    return result_findings
+
+
+def verification_supersede_dry_run_findings(inventory: Inventory, request: VerificationSupersedeRequest) -> list[Finding]:
+    plan, findings = _verification_supersede_plan(inventory, request, severity="warn")
+    base = [
+        Finding("info", "verification-supersede-dry-run", "verification-supersede proposal only; no files were written"),
+        Finding("info", "verification-supersede-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    if plan is None:
+        return [*base, *findings, *_verification_supersede_boundary_findings()]
+    return [*base, *findings, *_verification_supersede_route_findings(plan, apply=False), *_verification_supersede_boundary_findings()]
+
+
+def verification_supersede_apply_findings(inventory: Inventory, request: VerificationSupersedeRequest) -> list[Finding]:
+    plan, findings = _verification_supersede_plan(inventory, request, severity="error")
+    if plan is None:
+        return [*findings, *_verification_supersede_boundary_findings()]
+    if not request.proposal_token:
+        return [
+            *findings,
+            Finding(
+                "error",
+                "verification-supersede-refused",
+                f"apply requires --proposal-token {plan.proposal_token} from a matching dry-run",
+                plan.new_target,
+            ),
+            *_verification_supersede_boundary_findings(),
+        ]
+    if request.proposal_token != plan.proposal_token:
+        return [
+            *findings,
+            Finding(
+                "error",
+                "verification-supersede-refused",
+                "proposal token mismatch; rerun verification-supersede --dry-run because the superseded target, replacement text, reason, or new target changed",
+                plan.new_target,
+            ),
+            *_verification_supersede_boundary_findings(),
+        ]
+
+    new_path = inventory.root / plan.new_target
+    operation = AtomicFileWrite(
+        target_path=new_path,
+        tmp_path=new_path.with_name(f".{new_path.name}.verification-supersede.tmp"),
+        text=plan.new_text,
+        backup_path=new_path.with_name(f".{new_path.name}.verification-supersede.backup"),
+    )
+    try:
+        cleanup_warnings = apply_file_transaction([operation], root=inventory.root)
+    except FileTransactionError as exc:
+        return [
+            *findings,
+            Finding("error", "verification-supersede-refused", f"verification-supersede apply failed before the new target write completed: {exc}", plan.new_target),
+            *_verification_supersede_boundary_findings(),
+        ]
+
+    result_findings = [
+        Finding("info", "verification-supersede-apply", "verification-supersede apply started"),
+        Finding("info", "verification-supersede-written", f"wrote superseding verification report {plan.new_target} for {plan.target}", plan.new_target),
+        *findings,
+        *_verification_supersede_route_findings(plan, apply=True),
+    ]
+    for warning in cleanup_warnings:
+        result_findings.append(Finding("warn", "verification-supersede-backup-cleanup", warning, plan.new_target))
+    result_findings.extend(_verification_supersede_boundary_findings())
+    return result_findings
 
 
 def intake_dry_run_findings(inventory: Inventory, request: IntakeRequest) -> list[Finding]:
@@ -14621,6 +14861,442 @@ def _path_is_within(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _verification_supersede_plan(
+    inventory: Inventory,
+    request: VerificationSupersedeRequest,
+    *,
+    severity: str,
+) -> tuple[VerificationSupersedePlan | None, list[Finding]]:
+    errors = _verification_supersede_request_errors(inventory, request, severity)
+    if errors:
+        return None, errors
+    target_path = inventory.root / request.target
+    try:
+        current_text = target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return None, [Finding(severity, "verification-supersede-refused", f"target could not be read as UTF-8 text: {exc}", request.target)]
+
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    replacement_hash = hashlib.sha256(request.replacement_text.encode("utf-8")).hexdigest()
+    new_text = _verification_supersede_document_text(request, current_hash, replacement_hash)
+    proposal_token = _verification_supersede_token(request.target, request.new_target, current_hash, replacement_hash, request.reason, new_text)
+    plan = VerificationSupersedePlan(
+        target=request.target,
+        new_target=request.new_target,
+        current_text=current_text,
+        new_text=new_text,
+        reason=request.reason,
+        current_target_hash=current_hash,
+        replacement_text_hash=replacement_hash,
+        proposal_token=proposal_token,
+    )
+    return (
+        plan,
+        [
+            Finding("info", "verification-supersede-target", f"target={request.target}; new_target={request.new_target}", request.new_target),
+            Finding("info", "verification-supersede-source-hash", f"target sha256={current_hash}; replacement_text_sha256={replacement_hash}", request.target),
+        ],
+    )
+
+
+def _verification_supersede_request_errors(inventory: Inventory, request: VerificationSupersedeRequest, severity: str) -> list[Finding]:
+    errors: list[Finding] = []
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(Finding(severity, "verification-supersede-refused", "target is a product-source compatibility fixture; verification-supersede --apply is refused", request.new_target or request.target or None))
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(Finding(severity, "verification-supersede-refused", "target is fallback/archive or generated-output evidence; verification-supersede --apply is refused", request.new_target or request.target or None))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding(severity, "verification-supersede-refused", f"target root kind is {inventory.root_kind}; verification-supersede requires a live operating root", request.new_target or request.target or None))
+
+    if not request.target:
+        errors.append(Finding(severity, "verification-supersede-refused", "--target is required"))
+    if not request.new_target:
+        errors.append(Finding(severity, "verification-supersede-refused", "--new-target is required"))
+    if not request.target or not request.new_target:
+        return errors
+    for label, rel_path in (("--target", request.target), ("--new-target", request.new_target)):
+        if _intake_rel_has_absolute_or_parent_parts(rel_path):
+            errors.append(Finding(severity, "verification-supersede-refused", f"{label} must be a root-relative path without parent segments", rel_path))
+            continue
+        if not rel_path.endswith(".md"):
+            errors.append(Finding(severity, "verification-supersede-refused", f"{label} must be a Markdown file", rel_path))
+        if classify_memory_route(rel_path).route_id != "verification":
+            errors.append(Finding(severity, "verification-supersede-refused", f"{label} must be under project/verification/*.md", rel_path))
+        if Path(rel_path).parent.as_posix() != "project/verification":
+            errors.append(Finding(severity, "verification-supersede-refused", f"{label} must be directly under project/verification, not a nested evidence route", rel_path))
+    if request.target == request.new_target:
+        errors.append(Finding(severity, "verification-supersede-refused", "--new-target must differ from --target", request.new_target))
+    if not request.replacement_text.strip():
+        errors.append(Finding(severity, "verification-supersede-refused", "--text-file must provide reviewed superseding verification Markdown", request.new_target))
+    elif _verification_supersede_authority_overclaim(request.replacement_text):
+        errors.append(Finding(severity, "verification-supersede-refused", "replacement text must not claim lifecycle, archive, Git, provider, release, or target acceptance authority", request.new_target))
+    if not request.reason:
+        errors.append(Finding(severity, "verification-supersede-refused", "--reason is required", request.new_target))
+    elif "\n" in request.reason or "\r" in request.reason:
+        errors.append(Finding(severity, "verification-supersede-refused", "--reason must be a single reviewed line", request.new_target))
+    elif _verification_supersede_authority_overclaim(request.reason):
+        errors.append(Finding(severity, "verification-supersede-refused", "--reason must not claim lifecycle, archive, Git, provider, release, or target acceptance authority", request.new_target))
+
+    target_path = inventory.root / request.target
+    new_path = inventory.root / request.new_target
+    for label, rel_path, path in (("--target", request.target, target_path), ("--new-target", request.new_target, new_path)):
+        if _intake_path_escapes_root(inventory.root, path):
+            errors.append(Finding(severity, "verification-supersede-refused", f"{label} path escapes the target root", rel_path))
+            continue
+        for parent in _intake_parents_between(inventory.root, path.parent):
+            rel = parent.relative_to(inventory.root).as_posix()
+            if parent.exists() and parent.is_symlink():
+                errors.append(Finding(severity, "verification-supersede-refused", f"{label} directory contains a symlink segment: {rel}", rel))
+            elif parent.exists() and not parent.is_dir():
+                errors.append(Finding(severity, "verification-supersede-refused", f"{label} directory contains a non-directory segment: {rel}", rel))
+        if path.is_symlink():
+            errors.append(Finding(severity, "verification-supersede-refused", f"{label} must not be a symlink", rel_path))
+    if not target_path.exists():
+        errors.append(Finding(severity, "verification-supersede-refused", "--target must already exist", request.target))
+        return errors
+    if not target_path.is_file():
+        errors.append(Finding(severity, "verification-supersede-refused", "--target must be a regular Markdown file", request.target))
+        return errors
+    if new_path.exists():
+        errors.append(Finding(severity, "verification-supersede-refused", "--new-target must not already exist; supersession writes a new lineage target", request.new_target))
+    try:
+        target_text = target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        errors.append(Finding(severity, "verification-supersede-refused", f"--target could not be read as UTF-8 text: {exc}", request.target))
+        return errors
+    frontmatter = parse_frontmatter(target_text)
+    if not frontmatter.has_frontmatter:
+        errors.append(Finding(severity, "verification-supersede-refused", "--target must have route frontmatter", request.target))
+        return errors
+    for error in frontmatter.errors:
+        errors.append(Finding(severity, "verification-supersede-refused", f"--target frontmatter is malformed: {error}", request.target))
+    route = str(frontmatter.data.get("route") or "").strip()
+    if route and route != "verification":
+        errors.append(Finding(severity, "verification-supersede-refused", f"--target frontmatter route must be verification, got {route!r}", request.target))
+    return errors
+
+
+def _verification_supersede_document_text(request: VerificationSupersedeRequest, current_hash: str, replacement_hash: str) -> str:
+    title = _verification_supersede_title(request)
+    body = _verification_supersede_body(request.replacement_text)
+    return (
+        "---\n"
+        f'title: "{_yaml_double_quoted_value(title)}"\n'
+        'status: "pending"\n'
+        'route: "verification"\n'
+        f'supersedes: "{_yaml_double_quoted_value(request.target)}"\n'
+        f'supersedes_sha256: "{current_hash}"\n'
+        f'supersession_reason: "{_yaml_double_quoted_value(request.reason)}"\n'
+        f'replacement_source_sha256: "{replacement_hash}"\n'
+        f'replacement_source: "{_yaml_double_quoted_value(request.text_source or "--text-file")}"\n'
+        f'created: "{date.today().isoformat()}"\n'
+        "---\n"
+        f"# {title}\n\n"
+        f"- Supersedes: `{request.target}`\n"
+        f"- Superseded target sha256: `{current_hash}`\n"
+        f"- Replacement source sha256: `{replacement_hash}`\n"
+        f"- Reason: {request.reason}\n\n"
+        f"{body.rstrip()}\n"
+    )
+
+
+def _verification_supersede_title(request: VerificationSupersedeRequest) -> str:
+    _, body = _split_intake_payload_frontmatter(request.replacement_text)
+    for line in body.splitlines():
+        match = re.match(r"^#\s+(.+?)\s*$", line)
+        if match:
+            return _clean_intake_title(match.group(1))
+    stem = Path(request.new_target or request.target or "verification-supersede").stem.replace("-", " ").replace("_", " ")
+    return _clean_intake_title(stem.title())
+
+
+def _verification_supersede_body(text: str) -> str:
+    frontmatter, body = _split_intake_payload_frontmatter(text)
+    body = body.strip() or "(empty superseding verification body)"
+    if not frontmatter:
+        return body
+    return (
+        "## Superseding Report Payload Frontmatter\n\n"
+        "```yaml\n"
+        f"{frontmatter.rstrip()}\n"
+        "```\n\n"
+        "## Superseding Report Payload\n\n"
+        f"{body}"
+    )
+
+
+def _verification_supersede_authority_overclaim(value: str) -> bool:
+    lowered = value.casefold()
+    if not any(marker in lowered for marker in ("approve", "authoriz", "accepted", "safe to push", "release", "provider routing", "target acceptance")):
+        return False
+    if any(marker in lowered for marker in ("cannot", "does not", "do not", "not approve", "non-authority", "evidence only")):
+        return False
+    return any(marker in lowered for marker in ("lifecycle", "archive", "roadmap", "commit", "push", "release", "provider", "target"))
+
+
+def _verification_supersede_token(target_rel: str, new_target_rel: str, current_hash: str, replacement_hash: str, reason: str, new_text: str) -> str:
+    new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    payload = "\n".join((target_rel, new_target_rel, current_hash, replacement_hash, reason, new_hash))
+    return f"{VERIFICATION_SUPERSEDE_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _verification_supersede_route_findings(plan: VerificationSupersedePlan, *, apply: bool) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "verification-supersede-token",
+            (
+                f"current target sha256={plan.current_target_hash}; replacement_text_sha256={plan.replacement_text_hash}; "
+                f"proposal_token={plan.proposal_token}; apply with: mylittleharness --root <root> verification-supersede "
+                f"--apply --target {plan.target} --new-target {plan.new_target} --text-file <reviewed-report.md> "
+                f"--reason <reason> --proposal-token {plan.proposal_token}"
+            ),
+            plan.new_target,
+        )
+    ]
+    prefix = "wrote" if apply else "would write"
+    findings.extend(
+        [
+            Finding("info", "verification-supersede-written" if apply else "verification-supersede-preview", f"{prefix} superseding verification report {plan.new_target} for {plan.target}", plan.new_target),
+            *route_write_findings("verification-supersede-route-write", (RouteWriteEvidence(plan.new_target, None, plan.new_text),), apply=apply),
+        ]
+    )
+    return findings
+
+
+def _verification_supersede_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "verification-supersede-boundary",
+            "verification-supersede writes one new direct project/verification/*.md report that names the superseded target and hashes; it does not edit old reports, approve lifecycle, archive, roadmap status, staging, commit, push, provider routing, release, or target acceptance",
+            "project/verification",
+        )
+    ]
+
+
+def _normalized_route_update_field(value: object) -> str:
+    normalized = str(value or "").strip().replace("`", "").casefold()
+    return re.sub(r"[^a-z0-9_]+", "_", normalized).strip("_")
+
+
+def _route_update_plan(
+    inventory: Inventory,
+    request: RouteUpdateRequest,
+    *,
+    severity: str,
+) -> tuple[RouteUpdatePlan | None, list[Finding]]:
+    errors = _route_update_request_errors(inventory, request, severity)
+    if errors:
+        return None, errors
+    target_path = inventory.root / request.target
+    try:
+        current_text = target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return None, [Finding(severity, "route-update-refused", f"target could not be read as UTF-8 text: {exc}", request.target)]
+
+    route_id = classify_memory_route(request.target).route_id
+    row_span, row_findings = _route_update_row_span(current_text, request.row_id, severity, request.target)
+    if row_span is None:
+        return None, row_findings
+    field_span, field_findings = _route_update_field_span(current_text, row_span, request.field, severity, request.target)
+    if field_span is None:
+        return None, [*row_findings, *field_findings]
+
+    updated_text = current_text[: field_span[0]] + request.value + current_text[field_span[1] :]
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    proposal_token = _route_update_token(request.target, current_hash, request.row_id, request.field, request.value, updated_text)
+    plan = RouteUpdatePlan(
+        rel_path=request.target,
+        current_text=current_text,
+        updated_text=updated_text,
+        row_id=request.row_id,
+        field=request.field,
+        value=request.value,
+        current_target_hash=current_hash,
+        proposal_token=proposal_token,
+    )
+    return (
+        plan,
+        [
+            Finding("info", "route-update-target", f"route={route_id}; target={request.target}; row_id={request.row_id}; field={request.field}", request.target),
+            *row_findings,
+            *field_findings,
+        ],
+    )
+
+
+def _route_update_request_errors(inventory: Inventory, request: RouteUpdateRequest, severity: str) -> list[Finding]:
+    errors: list[Finding] = []
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(Finding(severity, "route-update-refused", "target is a product-source compatibility fixture; route-update --apply is refused", request.target or None))
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(Finding(severity, "route-update-refused", "target is fallback/archive or generated-output evidence; route-update --apply is refused", request.target or None))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding(severity, "route-update-refused", f"target root kind is {inventory.root_kind}; route-update requires a live operating root", request.target or None))
+    if not request.target:
+        errors.append(Finding(severity, "route-update-refused", "--target is required"))
+        return errors
+    if _intake_rel_has_absolute_or_parent_parts(request.target):
+        errors.append(Finding(severity, "route-update-refused", "--target must be a root-relative path without parent segments", request.target))
+        return errors
+    if not request.target.endswith(".md"):
+        errors.append(Finding(severity, "route-update-refused", "--target must be a Markdown file", request.target))
+
+    route_id = classify_memory_route(request.target).route_id
+    if route_id not in ROUTE_UPDATE_ALLOWED_FIELDS:
+        errors.append(
+            Finding(
+                severity,
+                "route-update-refused",
+                "--target must be an exact project/decisions/*.md or project/plan-incubation/*.md route-owned tracker",
+                request.target,
+            )
+        )
+    else:
+        parent = Path(request.target).parent.as_posix()
+        expected_parent = "project/decisions" if route_id == "decisions" else "project/plan-incubation"
+        if parent != expected_parent:
+            errors.append(Finding(severity, "route-update-refused", f"--target must be directly under {expected_parent}, not a nested route", request.target))
+        if request.field not in ROUTE_UPDATE_ALLOWED_FIELDS[route_id]:
+            allowed = ", ".join(sorted(ROUTE_UPDATE_ALLOWED_FIELDS[route_id]))
+            errors.append(Finding(severity, "route-update-refused", f"--field must be one of {allowed} for route {route_id}", request.target))
+
+    if not request.row_id:
+        errors.append(Finding(severity, "route-update-refused", "--row-id is required", request.target))
+    elif record_id_conflict(request.row_id):
+        errors.append(Finding(severity, "route-update-refused", f"--row-id is unsafe: {record_id_conflict(request.row_id)}", request.target))
+    if not request.field:
+        errors.append(Finding(severity, "route-update-refused", "--field is required", request.target))
+    if not request.value:
+        errors.append(Finding(severity, "route-update-refused", "--value is required", request.target))
+    elif "\n" in request.value or "\r" in request.value:
+        errors.append(Finding(severity, "route-update-refused", "--value must be a single reviewed line; freeform body replacement is not supported", request.target))
+    elif _route_update_value_authority_overclaim(request.value):
+        errors.append(Finding(severity, "route-update-refused", "--value must not claim lifecycle, archive, Git, provider, or release authority", request.target))
+
+    target_path = inventory.root / request.target
+    if _intake_path_escapes_root(inventory.root, target_path):
+        errors.append(Finding(severity, "route-update-refused", "target path escapes the target root", request.target))
+        return errors
+    for parent in _intake_parents_between(inventory.root, target_path.parent):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding(severity, "route-update-refused", f"target directory contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding(severity, "route-update-refused", f"target directory contains a non-directory segment: {rel}", rel))
+    if target_path.is_symlink():
+        errors.append(Finding(severity, "route-update-refused", "target must not be a symlink", request.target))
+        return errors
+    if not target_path.exists():
+        errors.append(Finding(severity, "route-update-refused", "target must already exist; route-update does not create Markdown files", request.target))
+        return errors
+    if not target_path.is_file():
+        errors.append(Finding(severity, "route-update-refused", "target must be a regular Markdown file", request.target))
+        return errors
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        errors.append(Finding(severity, "route-update-refused", f"target could not be read as UTF-8 text: {exc}", request.target))
+        return errors
+    frontmatter = parse_frontmatter(text)
+    if not frontmatter.has_frontmatter:
+        errors.append(Finding(severity, "route-update-refused", "target must have route frontmatter; route-update refuses to infer owner boundaries from body text", request.target))
+        return errors
+    for error in frontmatter.errors:
+        errors.append(Finding(severity, "route-update-refused", f"target frontmatter is malformed: {error}", request.target))
+    route_value = str(frontmatter.data.get("route") or "").strip().casefold()
+    if route_id in ROUTE_UPDATE_ALLOWED_FIELDS and route_value and route_value not in ROUTE_UPDATE_ROUTE_ALIASES[route_id]:
+        errors.append(Finding(severity, "route-update-refused", f"target frontmatter route {route_value!r} does not match route {route_id!r}", request.target))
+    return errors
+
+
+def _route_update_row_span(text: str, row_id: str, severity: str, source: str) -> tuple[tuple[int, int] | None, list[Finding]]:
+    pattern = re.compile(rf"(?m)^<!--\s*mlh-row:{re.escape(row_id)}\s*-->\s*$")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return None, [Finding(severity, "route-update-refused", f"row marker <!-- mlh-row:{row_id} --> was not found exactly once", source)]
+    if len(matches) > 1:
+        return None, [Finding(severity, "route-update-refused", f"row marker <!-- mlh-row:{row_id} --> is duplicated; exact row selector is required", source)]
+    start = matches[0].start()
+    next_match = re.search(r"(?m)^<!--\s*mlh-row:[^>]+-->\s*$", text[matches[0].end() :])
+    end = len(text) if next_match is None else matches[0].end() + next_match.start()
+    return (start, end), [Finding("info", "route-update-row", f"matched exact row marker mlh-row:{row_id}", source)]
+
+
+def _route_update_field_span(
+    text: str,
+    row_span: tuple[int, int],
+    field: str,
+    severity: str,
+    source: str,
+) -> tuple[tuple[int, int] | None, list[Finding]]:
+    row_text = text[row_span[0] : row_span[1]]
+    escaped = re.escape(field)
+    pattern = re.compile(rf"(?m)^(?P<prefix>\s*-\s*(?:`{escaped}`|{escaped})\s*:\s*)(?P<value>.*?)(?P<suffix>\s*)$")
+    matches = list(pattern.finditer(row_text))
+    if not matches:
+        return None, [Finding(severity, "route-update-refused", f"field {field!r} was not found as a single row bullet", source)]
+    if len(matches) > 1:
+        return None, [Finding(severity, "route-update-refused", f"field {field!r} is duplicated in the selected row", source)]
+    match = matches[0]
+    value_start = row_span[0] + match.start("value")
+    value_end = row_span[0] + match.end("value")
+    return (value_start, value_end), [Finding("info", "route-update-field", f"matched exact mutable field {field!r}", source)]
+
+
+def _route_update_value_authority_overclaim(value: str) -> bool:
+    lowered = value.casefold()
+    if not any(marker in lowered for marker in ("approve", "authoriz", "accepted", "safe to push", "release", "provider routing")):
+        return False
+    if any(marker in lowered for marker in ("cannot", "does not", "do not", "not approve", "non-authority", "evidence only")):
+        return False
+    return any(marker in lowered for marker in ("lifecycle", "archive", "roadmap", "commit", "push", "release", "provider"))
+
+
+def _route_update_token(target_rel: str, current_hash: str, row_id: str, field: str, value: str, updated_text: str) -> str:
+    updated_hash = hashlib.sha256(updated_text.encode("utf-8")).hexdigest()
+    payload = "\n".join((target_rel, current_hash, row_id, field, value, updated_hash))
+    return f"{ROUTE_UPDATE_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _route_update_route_findings(plan: RouteUpdatePlan, *, apply: bool) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "route-update-token",
+            (
+                f"current target sha256={plan.current_target_hash}; proposal_token={plan.proposal_token}; "
+                f"apply with: mylittleharness --root <root> route-update --apply --target {plan.rel_path} "
+                f"--row-id {plan.row_id} --field {plan.field} --value <reviewed-line> --proposal-token {plan.proposal_token}"
+            ),
+            plan.rel_path,
+        )
+    ]
+    if plan.current_text == plan.updated_text:
+        findings.append(Finding("info", "route-update-current", f"selected row field already has the reviewed value in {plan.rel_path}; no route write is needed", plan.rel_path))
+        return findings
+    prefix = "updated" if apply else "would update"
+    findings.extend(
+        [
+            Finding("info", "route-update-updated" if apply else "route-update-preview", f"{prefix} exact row {plan.row_id!r} field {plan.field!r} in {plan.rel_path}", plan.rel_path),
+            *route_write_findings("route-update-route-write", (RouteWriteEvidence(plan.rel_path, plan.current_text, plan.updated_text),), apply=apply),
+        ]
+    )
+    return findings
+
+
+def _route_update_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "route-update-boundary",
+            "route-update edits only one exact declared row field in existing route-owned decisions/incubation tracker Markdown; it cannot replace report bodies, create files, approve lifecycle, archive, roadmap, staging, commit, push, provider routing, or release",
+            "project/decisions",
+        )
+    ]
 
 
 def _intake_request_advice(request: IntakeRequest) -> IntakeRouteAdvice:

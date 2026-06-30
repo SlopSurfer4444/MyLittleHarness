@@ -753,6 +753,26 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         "intake classification is advisory; apply writes one explicit route target and cannot promote roadmap, closeout, archive, commit, or repair",
     ),
     CommandIntent(
+        "route-owned-tracker-row-update",
+        "Preview an exact row-field update for an existing decision or incubation tracker.",
+        (
+            "route-update",
+            "tracker update",
+            "ledger update",
+            "existing tracker",
+            "existing route-owned markdown",
+            "incubation row update",
+            "decision row update",
+            "operational tracker",
+        ),
+        "mylittleharness --root <root> route-update --dry-run --target project/plan-incubation/<tracker>.md --row-id <id> --field <field> --value \"<reviewed-line>\"",
+        (
+            "mylittleharness --root <root> route-update --apply --target project/plan-incubation/<tracker>.md --row-id <id> --field <field> --value \"<reviewed-line>\" --proposal-token <ru-token-from-dry-run>",
+        ),
+        "live operating root with existing project/decisions/*.md or project/plan-incubation/*.md tracker row marker",
+        "route-update edits one exact row field only; it cannot replace Markdown bodies, create files, approve lifecycle movement, archive, staging, commit, push, provider routing, or release",
+    ),
+    CommandIntent(
         "verification-evidence-record",
         "Preview a durable verification evidence note without direct route-file writes.",
         (
@@ -772,6 +792,26 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         ),
         "live operating root when reusable verification proof is worth a repo-visible artifact",
         "verification evidence routes are evidence only; intake/evidence reports cannot approve closeout, archive, roadmap status, staging, commit, push, or lifecycle movement",
+    ),
+    CommandIntent(
+        "verification-report-supersede",
+        "Preview a superseding verification report when an existing direct verification report needs correction.",
+        (
+            "verification supersede",
+            "verification-supersede",
+            "correct existing verification report",
+            "revise verification report",
+            "strengthen verification report",
+            "supersede verification report",
+            "existing verification report",
+            "verification report correction",
+        ),
+        "mylittleharness --root <root> verification-supersede --dry-run --target project/verification/<old>.md --new-target project/verification/<new>.md --text-file <reviewed-report.md> --reason \"<reason>\"",
+        (
+            "mylittleharness --root <root> verification-supersede --apply --target project/verification/<old>.md --new-target project/verification/<new>.md --text-file <reviewed-report.md> --reason \"<reason>\" --proposal-token <vs-token-from-dry-run>",
+        ),
+        "live operating root with an existing direct project/verification/*.md report and a reviewed replacement report body",
+        "verification-supersede writes a new lineage-bound verification report only; it does not edit the old report, approve lifecycle movement, archive, staging, commit, push, provider routing, release, or target acceptance",
     ),
     CommandIntent(
         "incubate-future-idea",
