@@ -247,6 +247,70 @@ class InventoryTests(unittest.TestCase):
             )
             self.assertTrue(all(finding.severity in {"warn", "info"} for finding in warnings))
 
+    def test_route_metadata_source_members_guides_stable_specs_to_related_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_route_metadata_live_root(Path(tmp))
+            (root / "project/research").mkdir(parents=True)
+            (root / "project/private").mkdir(parents=True)
+            (root / "project/specs/design").mkdir(parents=True)
+            (root / "project/private/raw-design-context.md").write_text("# Raw Context\n", encoding="utf-8")
+            (root / "project/research/source-input.md").write_text(
+                '---\nstatus: "imported"\n---\n# Source Input\n',
+                encoding="utf-8",
+            )
+            (root / "project/specs/design/ai-agent-distinctive-design-process.md").write_text(
+                '---\nspec_status: "accepted"\nimplementation_posture: "synced"\n---\n# Design Process\n',
+                encoding="utf-8",
+            )
+            (root / "project/specs/communityhero-ai-prepared-operator-workflow.md").write_text(
+                '---\nspec_status: "accepted"\nimplementation_posture: "synced"\n---\n# Operator Workflow\n',
+                encoding="utf-8",
+            )
+            (root / "project/specs/design/communityhero-editorial-command-cockpit-direction.md").write_text(
+                "---\n"
+                'spec_status: "accepted"\n'
+                'implementation_posture: "synced"\n'
+                "source_members:\n"
+                '  - "project/research/source-input.md"\n'
+                '  - "project/specs/design/ai-agent-distinctive-design-process.md"\n'
+                '  - "project/specs/communityhero-ai-prepared-operator-workflow.md"\n'
+                '  - "project/private/raw-design-context.md"\n'
+                "---\n"
+                "# Editorial Command Cockpit Direction\n",
+                encoding="utf-8",
+            )
+            (root / "project/research/ai-assisted-design-asset-workflow-2026-06-29.md").write_text(
+                "---\n"
+                'status: "imported"\n'
+                "source_members:\n"
+                '  - "project/research/source-input.md"\n'
+                "related_specs:\n"
+                '  - "project/specs/design/communityhero-editorial-command-cockpit-direction.md"\n'
+                '  - "project/specs/design/ai-agent-distinctive-design-process.md"\n'
+                "---\n"
+                "# AI Assisted Design Asset Workflow\n",
+                encoding="utf-8",
+            )
+
+            findings = validation_findings(load_inventory(root))
+            destination_warnings = [finding for finding in findings if finding.code == "route-metadata-destination"]
+            messages = "\n".join(finding.message for finding in destination_warnings)
+
+            self.assertIn("source_members must point to route-level source evidence, not stable specs", messages)
+            self.assertIn("move stable spec references to related_specs", messages)
+            self.assertIn('suggest --intent "route reference recovery"', messages)
+            self.assertIn("project/specs/design/ai-agent-distinctive-design-process.md", messages)
+            self.assertIn("project/specs/communityhero-ai-prepared-operator-workflow.md", messages)
+            self.assertIn("source_members must point to an attachment, draft, incubation, research, or verification route: project/private/raw-design-context.md", messages)
+            self.assertFalse(
+                any(
+                    finding.source == "project/research/ai-assisted-design-asset-workflow-2026-06-29.md"
+                    and finding.code.startswith("route-metadata-")
+                    and finding.code != "route-metadata-authority"
+                    for finding in findings
+                )
+            )
+
     def test_route_metadata_validation_is_live_root_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=False, docmap=True)

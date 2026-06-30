@@ -579,6 +579,16 @@ def _source_members_destination_problem(normalized: str) -> str:
             "source_members must point to route-level source evidence, not decision or ADR artifacts; "
             f"cite decisions in the note body or route-specific relationship fields when that route owns them: {normalized}"
         )
+    route_id = classify_memory_route(normalized).route_id
+    if route_id == "stable-specs" or lowered.startswith("docs/specs/"):
+        return (
+            "source_members must point to route-level source evidence, not stable specs; "
+            "stable specs are contract dependencies, not source route members; move stable spec references "
+            "to related_specs and keep source_members for draft, incubation, research, verification, "
+            "or attachment evidence; next_safe_command=mylittleharness --root <root> "
+            "suggest --intent \"route reference recovery\"; repair_hint=review repair --dry-run for "
+            f"source-members-to-related-specs migration: {normalized}"
+        )
     if lowered.startswith(("src/", "tests/", "docs/")):
         return (
             "source_members must point to route-level source evidence, not code, test, or product-doc paths; "

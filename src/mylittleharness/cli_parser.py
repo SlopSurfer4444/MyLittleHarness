@@ -380,7 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "Route-owned source/evidence anchor for source_members, such as research, incubation, attachment, draft, "
-            "or top-level verification Markdown. Not nested receipt JSON, decisions, code, tests, or raw output. May be repeated."
+            "or top-level verification Markdown. Stable specs belong in related_specs, not source_members. "
+            "Not nested receipt JSON, decisions, code, tests, or raw output. May be repeated."
         ),
     )
     intake.add_argument(
@@ -407,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_import.add_argument("--topic", help="Optional frontmatter topic. Defaults to --title.")
     research_import.add_argument("--source", dest="source_label", help="Optional source/provenance label for the imported research.")
     research_import.add_argument("--related-prompt", dest="related_prompt", help="Optional root-relative prompt or framing artifact.")
-    research_import.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative route source evidence for source_members metadata. May be repeated.")
+    research_import.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative route source evidence for source_members metadata. Stable specs belong in related_specs, not source_members. May be repeated.")
     attachment_import = subparsers.add_parser(
         "attachment-import",
         help=argparse.SUPPRESS,
@@ -444,7 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator-supplied discovery status. draft/blocked/contested require planning reliance blocked.",
     )
     discover.add_argument("--source-ref", dest="source_refs", action="append", default=[], help="Root-relative source evidence reference. May be repeated.")
-    discover.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative source member reference. May be repeated.")
+    discover.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative source evidence reference. Stable specs belong in related_specs, not source_members. May be repeated.")
     discover.add_argument("--evidence-ref", dest="evidence_refs", action="append", default=[], help="Root-relative supporting evidence reference. May be repeated.")
     discover.add_argument("--selected-option", dest="selected_option", help="Optional operator-supplied selected option.")
     discover.add_argument("--rationale", help="Optional operator-supplied rationale.")
@@ -675,7 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     roadmap.add_argument("--slice-closeout-boundary", dest="slice_closeout_boundary", help="One-line advisory closeout boundary for the execution slice.")
     roadmap.add_argument("--source-incubation", dest="source_incubation", help="Root-relative source incubation route.")
     roadmap.add_argument("--source-research", dest="source_research", help="Root-relative source research route.")
-    roadmap.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative source evidence route covered by this roadmap item. May be repeated.")
+    roadmap.add_argument("--source-member", dest="source_members", action="append", default=[], help="Root-relative source evidence route covered by this roadmap item. Stable spec dependencies use --related-spec. May be repeated.")
     roadmap.add_argument("--related-spec", dest="related_specs", action="append", default=[], help="Root-relative related spec route. May be repeated.")
     roadmap.add_argument("--related-plan", dest="related_plan", help="Root-relative active or archived plan route.")
     roadmap.add_argument("--archived-plan", dest="archived_plan", help="Root-relative archived plan route.")

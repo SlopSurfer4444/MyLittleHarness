@@ -49317,6 +49317,85 @@ class CliTests(unittest.TestCase):
             self.assertEqual(["spec_status", "implementation_posture"], metadata["planned_frontmatter_keys_by_path"][spec_rel])
             self.assertEqual(["spec_status", "implementation_posture"], metadata["planned_frontmatter_keys_by_path"][docs_spec_rel])
 
+    def test_check_json_warns_when_source_members_points_to_stable_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            add_complete_scaffold(root)
+            rels = write_source_members_related_specs_fixture(root)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "validation", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            payload = json.loads(output.getvalue())
+            destination_findings = [
+                finding
+                for finding in payload["findings"]
+                if finding["code"] == "route-metadata-destination" and finding["source"] == rels["design_spec"]
+            ]
+            messages = "\n".join(finding["message"] for finding in destination_findings)
+            self.assertIn("source_members must point to route-level source evidence, not stable specs", messages)
+            self.assertIn("move stable spec references to related_specs", messages)
+            self.assertIn(rels["workflow_spec"], messages)
+            self.assertIn(rels["process_spec"], messages)
+            routes = [route for route in payload["next_safe_routes"] if route["source_code"] == "route-metadata-destination"]
+            self.assertTrue(routes)
+            self.assertEqual('mylittleharness --root <root> suggest --intent "route reference recovery"', routes[0]["command"])
+            self.assertEqual("read-only-report", routes[0]["write_class"])
+
+    def test_repair_apply_moves_stable_spec_source_members_to_related_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            add_complete_scaffold(root)
+            rels = write_source_members_related_specs_fixture(root)
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "repair", "--dry-run"])
+            dry_rendered = dry_output.getvalue()
+
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("source-members-related-specs-plan", dry_rendered)
+            self.assertIn("selected repair class: source-members-related-specs-repair", dry_rendered)
+            self.assertIn(rels["workflow_spec"], dry_rendered)
+            self.assertIn(rels["process_spec"], dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "repair", "--apply"])
+            apply_rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 0)
+            self.assertIn("source-members-related-specs-updated", apply_rendered)
+            self.assertIn("source-members-related-specs-route-write", apply_rendered)
+            self.assertIn("source-members-related-specs-rerun", apply_rendered)
+
+            updated = parse_frontmatter((root / rels["design_spec"]).read_text(encoding="utf-8")).data
+            self.assertEqual([rels["source_research"]], updated["source_members"])
+            self.assertEqual([rels["process_spec"], rels["existing_related_spec"], rels["workflow_spec"]], updated["related_specs"])
+
+            snapshot_dirs = list((root / ".mylittleharness/snapshots/repair").iterdir())
+            self.assertEqual(1, len(snapshot_dirs))
+            metadata = json.loads((snapshot_dirs[0] / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual("source-members-related-specs-repair", metadata["repair_class"])
+            self.assertEqual([rels["design_spec"]], metadata["target_paths"])
+            self.assertEqual(["source_members", "related_specs"], metadata["planned_frontmatter_keys_by_path"][rels["design_spec"]])
+            self.assertEqual([rels["workflow_spec"], rels["process_spec"]], metadata["planned_moved_specs_by_path"][rels["design_spec"]])
+            copied_rel = metadata["copied_files"][0]["snapshot_path"]
+            self.assertEqual(before[rels["design_spec"]], (root / copied_rel).read_text(encoding="utf-8"))
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check", "--focus", "validation"])
+            check_rendered = check_output.getvalue()
+            self.assertEqual(check_code, 0)
+            self.assertNotIn("source_members must point to route-level source evidence, not stable specs", check_rendered)
+
     def test_repair_dry_run_reports_docmap_snapshot_plan_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -52412,6 +52491,56 @@ def make_operating_root(root: Path) -> Path:
 def add_complete_scaffold(root: Path) -> None:
     for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
         (root / rel_path).mkdir(parents=True, exist_ok=True)
+
+
+def write_source_members_related_specs_fixture(root: Path) -> dict[str, str]:
+    rels = {
+        "source_research": "project/research/source-input.md",
+        "workflow_spec": "project/specs/communityhero-ai-prepared-operator-workflow.md",
+        "process_spec": "project/specs/design/ai-agent-distinctive-design-process.md",
+        "existing_related_spec": "project/specs/design/existing-design-system.md",
+        "design_spec": "project/specs/design/communityhero-editorial-command-cockpit-direction.md",
+        "research_note": "project/research/ai-assisted-design-asset-workflow-2026-06-29.md",
+    }
+    (root / "project/research").mkdir(parents=True, exist_ok=True)
+    (root / "project/specs/design").mkdir(parents=True, exist_ok=True)
+    (root / rels["source_research"]).write_text(
+        '---\nstatus: "imported"\n---\n# Source Input\n',
+        encoding="utf-8",
+    )
+    for key in ("workflow_spec", "process_spec", "existing_related_spec"):
+        (root / rels[key]).write_text(
+            '---\nspec_status: "accepted"\nimplementation_posture: "synced"\n---\n# Stable Spec\n',
+            encoding="utf-8",
+        )
+    (root / rels["design_spec"]).write_text(
+        "---\n"
+        'spec_status: "accepted"\n'
+        'implementation_posture: "synced"\n'
+        "source_members:\n"
+        f'  - "{rels["source_research"]}"\n'
+        f'  - "{rels["workflow_spec"]}"\n'
+        f'  - "{rels["process_spec"]}"\n'
+        "related_specs:\n"
+        f'  - "{rels["process_spec"]}"\n'
+        f'  - "{rels["existing_related_spec"]}"\n'
+        "---\n"
+        "# Editorial Command Cockpit Direction\n",
+        encoding="utf-8",
+    )
+    (root / rels["research_note"]).write_text(
+        "---\n"
+        'status: "imported"\n'
+        "source_members:\n"
+        f'  - "{rels["source_research"]}"\n'
+        "related_specs:\n"
+        f'  - "{rels["design_spec"]}"\n'
+        f'  - "{rels["process_spec"]}"\n'
+        "---\n"
+        "# AI Assisted Design Asset Workflow\n",
+        encoding="utf-8",
+    )
+    return rels
 
 
 def write_complete_docmap(root: Path) -> None:

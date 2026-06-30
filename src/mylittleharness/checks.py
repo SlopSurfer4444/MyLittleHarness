@@ -1114,6 +1114,7 @@ DOCMAP_REPAIR_COPY_REL = "files/.agents/docmap.yaml"
 LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS = "lifecycle-markdown-frontmatter-repair"
 LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS = "lifecycle-source-provenance-repair"
 SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS = "spec-posture-frontmatter-repair"
+SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS = "source-members-related-specs-repair"
 STABLE_SPEC_CREATE_CLASS = "stable-spec-create"
 STABLE_SPEC_ROOT_REL = "project/specs/workflow"
 STABLE_SPEC_TEMPLATE_PACKAGE = "mylittleharness"
@@ -1570,6 +1571,17 @@ class SpecPostureFrontmatterPlan:
     rel_path: str
     route_id: str
     fields: dict[str, str]
+    current_text: str
+    updated_text: str
+
+
+@dataclass(frozen=True)
+class SourceMembersRelatedSpecsPlan:
+    rel_path: str
+    route_id: str
+    source_members: tuple[str, ...]
+    related_specs: tuple[str, ...]
+    moved_specs: tuple[str, ...]
     current_text: str
     updated_text: str
 
@@ -5449,7 +5461,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "mutation-guard",
-            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, snapshot-protected lifecycle source-provenance repair, snapshot-protected spec posture frontmatter repair, or snapshot-protected state frontmatter repair",
+            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, snapshot-protected lifecycle source-provenance repair, snapshot-protected spec posture frontmatter repair, snapshot-protected source_members to related_specs repair, or snapshot-protected state frontmatter repair",
         ),
     ]
     validation = validation_findings(inventory)
@@ -5462,6 +5474,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_lifecycle_markdown_frontmatter_plan_findings(inventory, validation))
     findings.extend(_lifecycle_source_provenance_plan_findings(inventory))
     findings.extend(_spec_posture_frontmatter_plan_findings(inventory, validation))
+    findings.extend(_source_members_related_specs_plan_findings(inventory, validation))
     findings.extend(_agents_contract_create_plan_findings(inventory, validation))
     findings.extend(_docmap_snapshot_plan_findings(inventory, validation))
     findings.extend(_docmap_create_plan_findings(inventory, validation))
@@ -5536,6 +5549,8 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
     if not errors:
         errors.extend(_spec_posture_frontmatter_apply_preflight_errors(inventory, validation))
     if not errors:
+        errors.extend(_source_members_related_specs_apply_preflight_errors(inventory))
+    if not errors:
         errors.extend(_repair_apply_preflight_errors(inventory))
     if not errors:
         errors.extend(_agents_contract_create_apply_preflight_errors(inventory, validation))
@@ -5557,7 +5572,7 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
             Finding(
                 "info",
                 "lifecycle-frontmatter-rerun",
-                "lifecycle markdown frontmatter repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+                    "lifecycle markdown frontmatter repair completed first; review validation and rerun repair --apply for any remaining route metadata, scaffold, docmap, or stable spec repair classes",
             )
         )
         return lifecycle_frontmatter_findings
@@ -5571,7 +5586,7 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
             Finding(
                 "info",
                 "lifecycle-source-provenance-rerun",
-                "lifecycle source-provenance repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+                    "lifecycle source-provenance repair completed first; review validation and rerun repair --apply for any remaining route metadata, scaffold, docmap, or stable spec repair classes",
             )
         )
         return lifecycle_source_findings
@@ -5585,10 +5600,24 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
             Finding(
                 "info",
                 "spec-posture-frontmatter-rerun",
-                "spec posture frontmatter repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+                "spec posture frontmatter repair completed first; review validation and rerun repair --apply for any remaining route metadata, scaffold, docmap, or stable spec repair classes",
             )
         )
         return spec_posture_findings
+
+    source_members_findings, source_members_changed = _source_members_related_specs_apply_findings(inventory)
+    if any(finding.severity == "error" for finding in source_members_findings):
+        return source_members_findings
+    if source_members_changed:
+        source_members_findings.extend(_post_repair_validation_findings(inventory))
+        source_members_findings.append(
+            Finding(
+                "info",
+                "source-members-related-specs-rerun",
+                "source_members to related_specs repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+            )
+        )
+        return source_members_findings
 
     findings: list[Finding] = [Finding("info", "repair-apply", "bounded repair apply started")]
     created_paths: list[str] = []
@@ -5633,7 +5662,7 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "repair-apply-boundary",
-            "repair --apply wrote only absent eager scaffold directories, selected create-only AGENTS.md creation, selected create-only docmap creation, selected create-only stable spec restoration, selected snapshot-protected lifecycle markdown frontmatter repair, selected snapshot-protected spec posture frontmatter repair, and selected snapshot-protected docmap route repair classes",
+            "repair --apply wrote only absent eager scaffold directories, selected create-only AGENTS.md creation, selected create-only docmap creation, selected create-only stable spec restoration, selected snapshot-protected lifecycle markdown frontmatter repair, selected snapshot-protected spec posture frontmatter repair, selected snapshot-protected source_members to related_specs repair, and selected snapshot-protected docmap route repair classes",
         )
     )
 
@@ -8684,6 +8713,545 @@ def _spec_posture_frontmatter_refusal_from(finding: Finding, severity: str = "er
     return Finding(severity, code, finding.message, finding.source, finding.line)
 
 
+def _source_members_related_specs_plan_findings(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "source-members-related-specs-plan-scope",
+            f"selected repair class: {SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS}; target route files: source_members stable spec refs",
+        )
+    ]
+
+    if _is_product_source_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "source-members-related-specs-plan-refused",
+                "target is a product-source compatibility fixture; route metadata relationship repair planning is report-only and snapshot creation is refused",
+                inventory.state.rel_path if inventory.state else ATTACH_STATE_REL_PATH,
+            )
+        )
+        return findings
+    if _is_fallback_or_archive_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "source-members-related-specs-plan-refused",
+                "target is fallback/archive or generated-output evidence; route metadata relationship repair planning is refused",
+                inventory.state.rel_path if inventory.state else None,
+            )
+        )
+        return findings
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "warn",
+                "source-members-related-specs-plan-refused",
+                f"target root kind is {inventory.root_kind}; source_members to related_specs repair requires an explicit live operating root",
+            )
+        )
+        return findings
+    if not _has_repair_apply_authority(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "source-members-related-specs-plan-refused",
+                "snapshot-protected source_members to related_specs repair would require an existing readable workflow-core manifest and strict project-state frontmatter authority",
+                inventory.manifest_surface.rel_path if inventory.manifest_surface else ATTACH_MANIFEST_REL_PATH,
+            )
+        )
+        return findings
+
+    candidates = _source_members_related_specs_candidate_rows(inventory)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "source-members-related-specs-plan-skipped",
+                "no source_members stable spec references require related_specs migration",
+            )
+        )
+        return findings
+
+    refusal = _source_members_related_specs_candidate_refusal(inventory, candidates, severity="warn")
+    if refusal:
+        findings.append(refusal)
+        return findings
+
+    plans = [plan for _surface, plan in candidates]
+    snapshot_dir = _source_members_related_specs_snapshot_dir(plans, SNAPSHOT_DRY_RUN_TIMESTAMP)
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        findings.append(_source_members_related_specs_refusal_from(boundary_conflict, "warn"))
+        return findings
+
+    target_paths = [plan.rel_path for plan in plans]
+    moved_specs = [spec for plan in plans for spec in plan.moved_specs]
+    metadata_fields = ", ".join([*SNAPSHOT_METADATA_FIELDS, "planned_frontmatter_keys_by_path", "planned_moved_specs_by_path"])
+    diagnostics = _source_members_related_specs_diagnostics_by_source(validation)
+    diagnostic_codes = ", ".join(sorted({finding.code for findings_by_path in diagnostics.values() for finding in findings_by_path}))
+    findings.extend(
+        [
+            Finding(
+                "warn",
+                "source-members-related-specs-plan",
+                (
+                    f"would move {len(moved_specs)} stable spec source_members ref(s) into related_specs; "
+                    "valid source_members evidence refs are preserved; source_members remains limited to source/evidence routes"
+                ),
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-targets",
+                f"planned target files: {_lifecycle_frontmatter_path_summary(target_paths)}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-moved",
+                f"planned stable spec refs: {', '.join(moved_specs)}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-snapshot-path",
+                f"planned snapshot directory: {snapshot_dir}/; metadata: {snapshot_dir}/snapshot.json; copied files under {snapshot_dir}/files/",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-metadata",
+                f"metadata fields: {metadata_fields}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-diagnostics",
+                f"source diagnostics: {diagnostic_codes or 'detected from route frontmatter'}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-rollback",
+                f"manual rollback only: copy files from {snapshot_dir}/files/ back to matching repo paths; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-authority",
+                "repair only retargets deterministic stable spec relationships; it cannot bless arbitrary source_members, approve lifecycle movement, closeout, archive, commit, or future repairs",
+                target_paths[0] if target_paths else None,
+            ),
+        ]
+    )
+    findings.extend(_source_members_related_specs_route_write_findings(plans, apply=False))
+    return findings
+
+
+def _source_members_related_specs_apply_preflight_errors(inventory: Inventory) -> list[Finding]:
+    candidates = _source_members_related_specs_candidate_rows(inventory)
+    if not candidates:
+        return []
+    refusal = _source_members_related_specs_candidate_refusal(inventory, candidates, severity="error")
+    if refusal:
+        return [refusal]
+    snapshot_dir = _source_members_related_specs_snapshot_dir([plan for _surface, plan in candidates], _current_snapshot_timestamp())
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        return [_source_members_related_specs_refusal_from(boundary_conflict)]
+    return []
+
+
+def _source_members_related_specs_apply_findings(inventory: Inventory) -> tuple[list[Finding], bool]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "source-members-related-specs-apply-scope",
+            f"selected repair class: {SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS}; target route files: source_members stable spec refs",
+        )
+    ]
+    candidates = _source_members_related_specs_candidate_rows(inventory)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "source-members-related-specs-apply-skipped",
+                "no source_members stable spec references required snapshot-protected migration",
+            )
+        )
+        return findings, False
+
+    plans = [plan for _surface, plan in candidates]
+    changed_plans = [plan for plan in plans if plan.current_text != plan.updated_text]
+    if not changed_plans:
+        findings.append(
+            Finding(
+                "info",
+                "source-members-related-specs-apply-skipped",
+                "planned source_members to related_specs migration already matched current files; no snapshot or rewrite was needed",
+            )
+        )
+        return findings, False
+
+    timestamp = _current_snapshot_timestamp()
+    snapshot_dir_rel = _source_members_related_specs_snapshot_dir(changed_plans, timestamp)
+    metadata_rel = f"{snapshot_dir_rel}/snapshot.json"
+    refreshed_validation = validation_findings(inventory)
+    diagnostics_by_path = _source_members_related_specs_diagnostics_by_source(refreshed_validation)
+    metadata = _source_members_related_specs_snapshot_metadata(
+        inventory,
+        timestamp,
+        snapshot_dir_rel,
+        changed_plans,
+        diagnostics_by_path,
+    )
+    operations: list[AtomicFileWrite] = []
+    for plan in changed_plans:
+        target = inventory.root / plan.rel_path
+        copy_path = inventory.root / _source_members_related_specs_copy_rel(snapshot_dir_rel, plan.rel_path)
+        operations.append(_lifecycle_frontmatter_atomic_write(copy_path, plan.current_text))
+        operations.append(_lifecycle_frontmatter_atomic_write(target, plan.updated_text))
+    operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
+
+    try:
+        cleanup_warnings = apply_file_transaction(operations, root=inventory.root)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "source-members-related-specs-refused",
+                f"snapshot-protected source_members to related_specs repair failed before target mutation completed: {exc}",
+                changed_plans[0].rel_path,
+            )
+        ], False
+
+    findings.append(
+        Finding(
+            "info",
+            "snapshot-created",
+            f"created repair snapshot before source_members to related_specs mutation: {snapshot_dir_rel}/",
+            changed_plans[0].rel_path,
+        )
+    )
+    for plan in changed_plans:
+        copy_rel = _source_members_related_specs_copy_rel(snapshot_dir_rel, plan.rel_path)
+        findings.extend(
+            [
+                Finding("info", "snapshot-copied-file", f"copied pre-repair bytes to {copy_rel}", plan.rel_path),
+                Finding(
+                    "info",
+                    "source-members-related-specs-updated",
+                    f"moved stable spec refs from source_members to related_specs: {', '.join(plan.moved_specs)}",
+                    plan.rel_path,
+                ),
+            ]
+        )
+    findings.extend(_source_members_related_specs_route_write_findings(changed_plans, apply=True))
+    findings.extend(
+        [
+            Finding("info", "snapshot-metadata-written", f"wrote snapshot metadata: {metadata_rel}", changed_plans[0].rel_path),
+            Finding(
+                "info",
+                "source-members-related-specs-rollback",
+                f"manual rollback only: copy files from {snapshot_dir_rel}/files/ back to matching repo paths; then run validate and audit-links",
+                changed_plans[0].rel_path,
+            ),
+            Finding(
+                "info",
+                "source-members-related-specs-authority",
+                "snapshot metadata and repaired route metadata are safety/routing evidence only and cannot approve source truth, closeout, archive, commit, lifecycle decisions, or future repairs",
+                changed_plans[0].rel_path,
+            ),
+        ]
+    )
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "repair-cleanup-warning", warning, changed_plans[0].rel_path))
+    return findings, True
+
+
+def _source_members_related_specs_candidate_rows(inventory: Inventory) -> list[tuple[Surface, SourceMembersRelatedSpecsPlan]]:
+    rows: list[tuple[Surface, SourceMembersRelatedSpecsPlan]] = []
+    for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path):
+        if surface.memory_route not in ROUTE_METADATA_VALIDATED_ROUTES or surface.path.suffix.lower() != ".md":
+            continue
+        if surface.frontmatter.errors or not surface.frontmatter.has_frontmatter:
+            continue
+        plan = _source_members_related_specs_plan(surface)
+        if plan is not None:
+            rows.append((surface, plan))
+    return rows
+
+
+def _source_members_related_specs_plan(surface: Surface) -> SourceMembersRelatedSpecsPlan | None:
+    data = surface.frontmatter.data
+    source_members = _frontmatter_relationship_path_values(data.get("source_members"))
+    if source_members is None:
+        return None
+    related_specs = _frontmatter_relationship_path_values(data.get("related_specs"))
+    if related_specs is None:
+        return None
+
+    moved_specs: list[str] = []
+    kept_source_members: list[str] = []
+    for value in source_members:
+        normalized = _normalize_route_metadata_path(value)
+        if _source_member_stable_spec_ref(normalized):
+            if normalized not in moved_specs:
+                moved_specs.append(normalized)
+            continue
+        kept_source_members.append(value)
+    if not moved_specs:
+        return None
+
+    merged_related_specs = list(related_specs)
+    for value in moved_specs:
+        if value not in merged_related_specs:
+            merged_related_specs.append(value)
+    updated_text = _source_members_related_specs_frontmatter_text(
+        surface.content,
+        tuple(kept_source_members),
+        tuple(merged_related_specs),
+    )
+    return SourceMembersRelatedSpecsPlan(
+        rel_path=surface.rel_path,
+        route_id=surface.memory_route,
+        source_members=tuple(kept_source_members),
+        related_specs=tuple(merged_related_specs),
+        moved_specs=tuple(moved_specs),
+        current_text=surface.content,
+        updated_text=updated_text,
+    )
+
+
+def _frontmatter_relationship_path_values(value: object) -> tuple[str, ...] | None:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        return (_normalize_route_metadata_path(stripped),) if stripped else None
+    if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+        return tuple(_normalize_route_metadata_path(item) for item in value)
+    return None
+
+
+def _source_member_stable_spec_ref(rel_path: str) -> bool:
+    normalized = _normalize_route_metadata_path(rel_path)
+    lowered = normalized.casefold()
+    if _route_metadata_path_is_unsafe(normalized):
+        return False
+    if not normalized.endswith(".md"):
+        return False
+    return classify_memory_route(normalized).route_id == "stable-specs" or lowered.startswith("docs/specs/")
+
+
+def _source_members_related_specs_frontmatter_text(
+    text: str,
+    source_members: tuple[str, ...],
+    related_specs: tuple[str, ...],
+) -> str:
+    updates: dict[str, tuple[str, ...]] = {"related_specs": related_specs}
+    removals: set[str] = set()
+    if source_members:
+        updates["source_members"] = source_members
+    else:
+        removals.add("source_members")
+    return _frontmatter_text_with_path_field_updates(text, updates, removals)
+
+
+def _frontmatter_text_with_path_field_updates(
+    text: str,
+    updates: dict[str, tuple[str, ...]],
+    removals: set[str],
+) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text
+    closing_index = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            closing_index = index
+            break
+    if closing_index is None:
+        return text
+
+    frontmatter_lines = lines[1:closing_index]
+    output: list[str] = []
+    written: set[str] = set()
+    index = 0
+    while index < len(frontmatter_lines):
+        line = frontmatter_lines[index]
+        match = re.match(r"^([A-Za-z0-9_-]+):(.*)$", line)
+        if not match:
+            output.append(line)
+            index += 1
+            continue
+        key = match.group(1)
+        next_index = index + 1
+        while next_index < len(frontmatter_lines) and frontmatter_lines[next_index].strip().startswith("- "):
+            next_index += 1
+        if key in updates:
+            output.extend(_frontmatter_path_field_lines(key, updates[key]))
+            written.add(key)
+        elif key not in removals:
+            output.extend(frontmatter_lines[index:next_index])
+        index = next_index
+
+    for key, values in updates.items():
+        if key not in written:
+            output.extend(_frontmatter_path_field_lines(key, values))
+    return "".join([lines[0], *output, *lines[closing_index:]])
+
+
+def _frontmatter_path_field_lines(key: str, values: tuple[str, ...]) -> list[str]:
+    if not values:
+        return []
+    return [f"{key}:\n", *[f'  - "{_yaml_double_quoted_value(value)}"\n' for value in values]]
+
+
+def _source_members_related_specs_candidate_refusal(
+    inventory: Inventory,
+    candidates: list[tuple[Surface, SourceMembersRelatedSpecsPlan]],
+    *,
+    severity: str,
+) -> Finding | None:
+    for surface, _plan in candidates:
+        target_conflict = _snapshot_target_conflict(inventory.root, surface.rel_path)
+        if target_conflict:
+            return _source_members_related_specs_refusal_from(target_conflict, severity)
+        if surface.read_error:
+            return Finding(
+                severity,
+                "source-members-related-specs-plan-refused" if severity == "warn" else "source-members-related-specs-refused",
+                f"target file could not be read as clean UTF-8 before source_members to related_specs repair: {surface.read_error}",
+                surface.rel_path,
+            )
+        if surface.frontmatter.errors:
+            return Finding(
+                severity,
+                "source-members-related-specs-plan-refused" if severity == "warn" else "source-members-related-specs-refused",
+                "target has malformed frontmatter; repair refuses to guess metadata boundaries",
+                surface.rel_path,
+            )
+    return None
+
+
+def _source_members_related_specs_snapshot_dir(plans: list[SourceMembersRelatedSpecsPlan], timestamp: str) -> str:
+    payload_parts: list[bytes] = [SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS.encode("utf-8")]
+    for plan in sorted(plans, key=lambda item: item.rel_path):
+        payload_parts.extend(
+            [
+                plan.rel_path.encode("utf-8"),
+                plan.route_id.encode("utf-8"),
+                "\n".join(plan.moved_specs).encode("utf-8"),
+                "\n".join(plan.source_members).encode("utf-8"),
+                "\n".join(plan.related_specs).encode("utf-8"),
+                plan.current_text.encode("utf-8"),
+                plan.updated_text.encode("utf-8"),
+            ]
+        )
+    hash_prefix = hashlib.sha256(b"\n".join(payload_parts)).hexdigest()[:12]
+    count = len(plans)
+    return f"{SNAPSHOT_REPAIR_ROOT_REL}/{timestamp}-{SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS}-{count}-files-{hash_prefix}"
+
+
+def _source_members_related_specs_snapshot_metadata(
+    inventory: Inventory,
+    timestamp: str,
+    snapshot_dir_rel: str,
+    plans: list[SourceMembersRelatedSpecsPlan],
+    diagnostics_by_path: dict[str, list[Finding]],
+) -> dict[str, object]:
+    copied_files = []
+    pre_repair_hashes: dict[str, str] = {}
+    source_diagnostics: list[dict[str, object]] = []
+    planned_keys: dict[str, list[str]] = {}
+    planned_moved_specs: dict[str, list[str]] = {}
+    target_paths = [plan.rel_path for plan in plans]
+    for plan in plans:
+        pre_repair_bytes = plan.current_text.encode("utf-8")
+        digest = hashlib.sha256(pre_repair_bytes).hexdigest()
+        copy_rel = _source_members_related_specs_copy_rel(snapshot_dir_rel, plan.rel_path)
+        copied_files.append(
+            {
+                "target_path": plan.rel_path,
+                "snapshot_path": copy_rel,
+                "sha256": digest,
+                "byte_count": len(pre_repair_bytes),
+            }
+        )
+        pre_repair_hashes[plan.rel_path] = digest
+        planned_keys[plan.rel_path] = ["source_members", "related_specs"]
+        planned_moved_specs[plan.rel_path] = list(plan.moved_specs)
+        for diagnostic in diagnostics_by_path.get(plan.rel_path, []):
+            source_diagnostics.append(
+                {
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                    "source": diagnostic.source,
+                    "line": diagnostic.line,
+                }
+            )
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "created_at_utc": timestamp,
+        "tool_name": "mylittleharness",
+        "tool_version": __version__,
+        "command": "repair --apply",
+        "root_kind": inventory.root_kind,
+        "repair_class": SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS,
+        "target_root": str(inventory.root),
+        "snapshot_root": snapshot_dir_rel,
+        "target_paths": target_paths,
+        "copied_files": copied_files,
+        "pre_repair_hashes": pre_repair_hashes,
+        "planned_post_repair_paths": target_paths,
+        "source_diagnostics": source_diagnostics,
+        "planned_route_entries": [],
+        "planned_frontmatter_keys_by_path": planned_keys,
+        "planned_moved_specs_by_path": planned_moved_specs,
+        "retention": "manual; MyLittleHarness does not silently delete, rotate, compress, move, or hide repair snapshots",
+        "rollback_instructions": (
+            f"Copy files from {snapshot_dir_rel}/files/ back to matching repo paths, then run "
+            "python -m mylittleharness --root <target-root> validate and "
+            "python -m mylittleharness --root <target-root> audit-links."
+        ),
+        "authority_note": (
+            "snapshot metadata and route metadata migration are safety/routing evidence only and cannot approve repair, "
+            "truth selection, closeout, archive, commit, lifecycle decisions, or future repairs"
+        ),
+    }
+
+
+def _source_members_related_specs_copy_rel(snapshot_dir_rel: str, rel_path: str) -> str:
+    return _repair_snapshot_copy_rel(snapshot_dir_rel, rel_path)
+
+
+def _source_members_related_specs_route_write_findings(
+    plans: list[SourceMembersRelatedSpecsPlan],
+    *,
+    apply: bool,
+) -> list[Finding]:
+    writes = tuple(RouteWriteEvidence(plan.rel_path, plan.current_text, plan.updated_text) for plan in plans)
+    return route_write_findings("source-members-related-specs-route-write", writes, apply=apply)
+
+
+def _source_members_related_specs_diagnostics_by_source(validation: list[Finding]) -> dict[str, list[Finding]]:
+    diagnostics_by_path: dict[str, list[Finding]] = {}
+    for finding in validation:
+        if finding.code != "route-metadata-destination" or not finding.source:
+            continue
+        if "source_members" not in finding.message or "stable spec" not in finding.message:
+            continue
+        diagnostics_by_path.setdefault(finding.source, []).append(finding)
+    return diagnostics_by_path
+
+
+def _source_members_related_specs_refusal_from(finding: Finding, severity: str = "error") -> Finding:
+    code = "source-members-related-specs-plan-refused" if severity == "warn" else "source-members-related-specs-refused"
+    return Finding(severity, code, finding.message, finding.source, finding.line)
+
+
 def _current_snapshot_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -9043,6 +9611,7 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
         LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS,
         LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS,
         SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS,
+        SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS,
     }:
         findings.append(Finding("info", "snapshot-repair-class", f"repair class: {repair_class}", f"{snapshot_rel}/snapshot.json"))
     else:
@@ -9106,6 +9675,7 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
         LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS,
         LIFECYCLE_SOURCE_PROVENANCE_REPAIR_CLASS,
         SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS,
+        SOURCE_MEMBERS_RELATED_SPECS_REPAIR_CLASS,
     }:
         if _is_frontmatter_keys_by_path(planned_frontmatter_keys_by_path):
             key_summary = "; ".join(
