@@ -1359,6 +1359,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("route-owned-tracker-row-update", rendered)
             self.assertIn("route-update --dry-run", rendered)
+            self.assertIn("--match-column ID", rendered)
+            self.assertIn("--append-row", rendered)
+            self.assertIn("--adopt-row-id", rendered)
             self.assertIn("--proposal-token <ru-token-from-dry-run>", rendered)
 
     def test_suggest_intent_routes_existing_verification_report_supersede(self) -> None:
@@ -5880,6 +5883,411 @@ class CliTests(unittest.TestCase):
                 )
             self.assertIn("route-update-updated", apply_output.getvalue())
             self.assertIn("- status: reviewed", target_path.read_text(encoding="utf-8"))
+
+    def test_route_update_updates_legacy_table_row_and_adopts_marker_for_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "plan-incubation/office-current-order-status.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\n"
+                'route: "incubation"\n'
+                "---\n"
+                "# Office Current Order Status\n\n"
+                "## Current Orders\n\n"
+                "| ID | Item | Order status | Payment status | Next action |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| ORD-1 | Desk | ordered | unpaid | chase supplier |\n"
+                "| ORD-2 | Chair | queued | unpaid | wait |\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "ORD-1",
+                            "--field",
+                            "Payment status",
+                            "--value",
+                            "paid",
+                            "--adopt-row-id",
+                            "ord-1",
+                        ]
+                    ),
+                    0,
+                )
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("table-row-update", dry_rendered)
+            self.assertIn("route-update-preview", dry_rendered)
+            token_match = re.search(r"--proposal-token (ru-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            target_path.write_text(target_path.read_text(encoding="utf-8") + "\nOperator note: supplier confirmed invoice.\n", encoding="utf-8")
+            stale_output = io.StringIO()
+            with redirect_stdout(stale_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--apply",
+                            "--target",
+                            target,
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "ORD-1",
+                            "--field",
+                            "Payment status",
+                            "--value",
+                            "paid",
+                            "--adopt-row-id",
+                            "ord-1",
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    2,
+                )
+            self.assertIn("proposal token mismatch", stale_output.getvalue())
+            self.assertIn("| ORD-1 | Desk | ordered | unpaid | chase supplier |", target_path.read_text(encoding="utf-8"))
+
+            fresh_output = io.StringIO()
+            with redirect_stdout(fresh_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "ORD-1",
+                            "--field",
+                            "Payment status",
+                            "--value",
+                            "paid",
+                            "--adopt-row-id",
+                            "ord-1",
+                        ]
+                    ),
+                    0,
+                )
+            fresh_match = re.search(r"--proposal-token (ru-[a-f0-9]{16})", fresh_output.getvalue())
+            self.assertIsNotNone(fresh_match)
+            assert fresh_match is not None
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--apply",
+                            "--target",
+                            target,
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "ORD-1",
+                            "--field",
+                            "Payment status",
+                            "--value",
+                            "paid",
+                            "--adopt-row-id",
+                            "ord-1",
+                            "--proposal-token",
+                            fresh_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            updated_text = target_path.read_text(encoding="utf-8")
+            self.assertIn("route-update-updated", apply_output.getvalue())
+            self.assertIn("| ORD-1 <!-- mlh-row:ord-1 --> | Desk | ordered | paid | chase supplier |", updated_text)
+            self.assertIn("| ORD-2 | Chair | queued | unpaid | wait |", updated_text)
+
+            marker_dry = io.StringIO()
+            with redirect_stdout(marker_dry):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--row-id",
+                            "ord-1",
+                            "--field",
+                            "Order status",
+                            "--value",
+                            "delivered",
+                        ]
+                    ),
+                    0,
+                )
+            marker_match = re.search(r"--proposal-token (ru-[a-f0-9]{16})", marker_dry.getvalue())
+            self.assertIsNotNone(marker_match)
+            assert marker_match is not None
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--apply",
+                            "--target",
+                            target,
+                            "--row-id",
+                            "ord-1",
+                            "--field",
+                            "Order status",
+                            "--value",
+                            "delivered",
+                            "--proposal-token",
+                            marker_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("| ORD-1 <!-- mlh-row:ord-1 --> | Desk | delivered | paid | chase supplier |", target_path.read_text(encoding="utf-8"))
+
+    def test_route_update_appends_legacy_table_row_and_refuses_duplicate_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "plan-incubation/office-current-procurement-bom.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\nroute: incubation\n---\n"
+                "# Office Current Procurement BOM\n\n"
+                "## Current BOM\n\n"
+                "| ID | Item | Qty | Status | Notes |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| BOM-1 | Desk | 1 | ordered | paid |\n",
+                encoding="utf-8",
+            )
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--table-heading",
+                            "Current BOM",
+                            "--append-row",
+                            "| BOM-2 | Monitor | 2 | proposed | owner review |",
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "BOM-2",
+                            "--adopt-row-id",
+                            "bom-2",
+                        ]
+                    ),
+                    0,
+                )
+            token_match = re.search(r"--proposal-token (ru-[a-f0-9]{16})", dry_output.getvalue())
+            self.assertIsNotNone(token_match)
+            assert token_match is not None
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--apply",
+                            "--target",
+                            target,
+                            "--table-heading",
+                            "Current BOM",
+                            "--append-row",
+                            "| BOM-2 | Monitor | 2 | proposed | owner review |",
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "BOM-2",
+                            "--adopt-row-id",
+                            "bom-2",
+                            "--proposal-token",
+                            token_match.group(1),
+                        ]
+                    ),
+                    0,
+                )
+            text = target_path.read_text(encoding="utf-8")
+            self.assertIn("| BOM-2 <!-- mlh-row:bom-2 --> | Monitor | 2 | proposed | owner review |", text)
+
+            duplicate_output = io.StringIO()
+            with redirect_stdout(duplicate_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--table-heading",
+                            "Current BOM",
+                            "--append-row",
+                            "| BOM-2 | Monitor | 2 | proposed | owner review |",
+                            "--match-column",
+                            "ID",
+                        ]
+                    ),
+                    0,
+                )
+            rendered = duplicate_output.getvalue()
+            self.assertIn("route-update-refused", rendered)
+            self.assertIn("duplicate existing", rendered)
+
+    def test_route_update_refuses_ambiguous_legacy_table_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "decisions/office-850k-expense-ledger.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\nroute: decisions\n---\n"
+                "# Expense Ledger\n\n"
+                "| Date | Item | Amount RUB | Status | Notes |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| 2026-06-20 | Desk | 1000 | pending | invoice A |\n"
+                "| 2026-06-21 | Desk | 2000 | pending | invoice B |\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--match-column",
+                            "Item",
+                            "--match-value",
+                            "Desk",
+                            "--field",
+                            "Status",
+                            "--value",
+                            "paid",
+                        ]
+                    ),
+                    0,
+                )
+            rendered = output.getvalue()
+            self.assertIn("route-update-refused", rendered)
+            self.assertIn("matched 2 rows", rendered)
+            self.assertNotIn("| 2026-06-20 | Desk | 1000 | paid |", target_path.read_text(encoding="utf-8"))
+
+    def test_route_update_refuses_raw_marker_syntax_in_reviewed_table_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/" + "plan-incubation/office-current-order-status.md"
+            target_path = root / target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                "---\nroute: incubation\n---\n"
+                "# Office Current Order Status\n\n"
+                "## Current Orders\n\n"
+                "| ID | Item | Payment status |\n"
+                "| --- | --- | --- |\n"
+                "| ORD-1 | Desk | unpaid |\n",
+                encoding="utf-8",
+            )
+
+            value_output = io.StringIO()
+            with redirect_stdout(value_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "ORD-1",
+                            "--field",
+                            "Payment status",
+                            "--value",
+                            "paid <!-- mlh-row:ord-1 -->",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("raw mlh-row markers", value_output.getvalue())
+            self.assertIn("| ORD-1 | Desk | unpaid |", target_path.read_text(encoding="utf-8"))
+
+            append_output = io.StringIO()
+            with redirect_stdout(append_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "route-update",
+                            "--dry-run",
+                            "--target",
+                            target,
+                            "--table-heading",
+                            "Current Orders",
+                            "--append-row",
+                            "| ORD-2 <!-- mlh-row:ord-2 --> | Chair | unpaid |",
+                            "--match-column",
+                            "ID",
+                            "--match-value",
+                            "ORD-2",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("raw mlh-row markers", append_output.getvalue())
+            self.assertNotIn("ORD-2", target_path.read_text(encoding="utf-8"))
 
     def test_route_update_refuses_broad_or_wrong_route_markdown_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -44864,6 +45272,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", route_codes)
             self.assertTrue(raw_payload["block"])
             self.assertIn("route-update --dry-run", raw_messages)
+            self.assertIn("--match-column ID", raw_messages)
 
     def test_hooks_pre_tool_guides_raw_existing_verification_report_writes_to_supersede_route(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

@@ -1535,6 +1535,11 @@ class RouteUpdateRequest:
     row_id: str
     field: str
     value: str
+    table_heading: str = ""
+    match_column: str = ""
+    match_value: str = ""
+    append_row: str = ""
+    adopt_row_id: str = ""
     proposal_token: str = ""
 
 
@@ -1546,8 +1551,36 @@ class RouteUpdatePlan:
     row_id: str
     field: str
     value: str
+    selector: str
+    action: str
     current_target_hash: str
     proposal_token: str
+
+
+@dataclass(frozen=True)
+class RouteUpdateTableCell:
+    value: str
+    value_start: int
+    value_end: int
+
+
+@dataclass(frozen=True)
+class RouteUpdateTableRow:
+    line_index: int
+    line_start: int
+    line_end: int
+    cells: tuple[RouteUpdateTableCell, ...]
+
+
+@dataclass(frozen=True)
+class RouteUpdateTable:
+    heading: str
+    header_line_index: int
+    separator_line_index: int
+    separator_line_end: int
+    header_cells: tuple[str, ...]
+    normalized_headers: tuple[str, ...]
+    rows: tuple[RouteUpdateTableRow, ...]
 
 
 @dataclass(frozen=True)
@@ -1685,6 +1718,11 @@ def make_route_update_request(
     row_id: str | None,
     field: str | None,
     value: str | None,
+    table_heading: str | None = None,
+    match_column: str | None = None,
+    match_value: str | None = None,
+    append_row: str | None = None,
+    adopt_row_id: str | None = None,
     proposal_token: str | None = None,
 ) -> RouteUpdateRequest:
     return RouteUpdateRequest(
@@ -1692,6 +1730,11 @@ def make_route_update_request(
         row_id=str(row_id or "").strip(),
         field=_normalized_route_update_field(field),
         value=str(value or "").strip(),
+        table_heading=str(table_heading or "").strip(),
+        match_column=_normalized_route_update_field(match_column),
+        match_value=str(match_value or "").strip(),
+        append_row=str(append_row or "").strip(),
+        adopt_row_id=str(adopt_row_id or "").strip(),
         proposal_token=str(proposal_token or "").strip(),
     )
 
@@ -1772,7 +1815,7 @@ def route_update_apply_findings(inventory: Inventory, request: RouteUpdateReques
 
     result_findings = [
         Finding("info", "route-update-apply", "route-update apply started"),
-        Finding("info", "route-update-updated", f"updated exact row {plan.row_id!r} field {plan.field!r} in {plan.rel_path}", plan.rel_path),
+        Finding("info", "route-update-updated", f"updated exact {plan.action} in {plan.rel_path}: {plan.selector}", plan.rel_path),
         *findings,
         *_route_update_route_findings(plan, apply=True),
     ]
@@ -15097,17 +15140,29 @@ def _route_update_plan(
     except (OSError, UnicodeError) as exc:
         return None, [Finding(severity, "route-update-refused", f"target could not be read as UTF-8 text: {exc}", request.target)]
 
-    route_id = classify_memory_route(request.target).route_id
-    row_span, row_findings = _route_update_row_span(current_text, request.row_id, severity, request.target)
-    if row_span is None:
-        return None, row_findings
-    field_span, field_findings = _route_update_field_span(current_text, row_span, request.field, severity, request.target)
-    if field_span is None:
-        return None, [*row_findings, *field_findings]
-
-    updated_text = current_text[: field_span[0]] + request.value + current_text[field_span[1] :]
     current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
-    proposal_token = _route_update_token(request.target, current_hash, request.row_id, request.field, request.value, updated_text)
+    route_id = classify_memory_route(request.target).route_id
+    if request.append_row:
+        updated_text, action, selector, row_findings = _route_update_append_table_text(current_text, request, severity, request.target)
+        if updated_text is None:
+            return None, row_findings
+    elif request.match_column or request.match_value or request.table_heading:
+        updated_text, action, selector, row_findings = _route_update_table_match_text(current_text, request, severity, request.target)
+        if updated_text is None:
+            return None, row_findings
+    else:
+        row_span, row_findings = _route_update_row_span(current_text, request.row_id, severity, request.target)
+        if row_span is None:
+            return None, row_findings
+        field_span, field_findings = _route_update_field_span(current_text, row_span, request.field, severity, request.target)
+        if field_span is None:
+            return None, [*row_findings, *field_findings]
+        updated_text = current_text[: field_span[0]] + request.value + current_text[field_span[1] :]
+        action = "row-field-update"
+        selector = f"row_id={request.row_id}; field={request.field}"
+        row_findings = [*row_findings, *field_findings]
+
+    proposal_token = _route_update_token(request, current_hash, updated_text)
     plan = RouteUpdatePlan(
         rel_path=request.target,
         current_text=current_text,
@@ -15115,15 +15170,16 @@ def _route_update_plan(
         row_id=request.row_id,
         field=request.field,
         value=request.value,
+        selector=selector,
+        action=action,
         current_target_hash=current_hash,
         proposal_token=proposal_token,
     )
     return (
         plan,
         [
-            Finding("info", "route-update-target", f"route={route_id}; target={request.target}; row_id={request.row_id}; field={request.field}", request.target),
+            Finding("info", "route-update-target", f"route={route_id}; target={request.target}; action={action}; {selector}", request.target),
             *row_findings,
-            *field_findings,
         ],
     )
 
@@ -15160,22 +15216,47 @@ def _route_update_request_errors(inventory: Inventory, request: RouteUpdateReque
         expected_parent = "project/decisions" if route_id == "decisions" else "project/plan-incubation"
         if parent != expected_parent:
             errors.append(Finding(severity, "route-update-refused", f"--target must be directly under {expected_parent}, not a nested route", request.target))
-        if request.field not in ROUTE_UPDATE_ALLOWED_FIELDS[route_id]:
-            allowed = ", ".join(sorted(ROUTE_UPDATE_ALLOWED_FIELDS[route_id]))
-            errors.append(Finding(severity, "route-update-refused", f"--field must be one of {allowed} for route {route_id}", request.target))
 
-    if not request.row_id:
-        errors.append(Finding(severity, "route-update-refused", "--row-id is required", request.target))
-    elif record_id_conflict(request.row_id):
+    if request.row_id and record_id_conflict(request.row_id):
         errors.append(Finding(severity, "route-update-refused", f"--row-id is unsafe: {record_id_conflict(request.row_id)}", request.target))
-    if not request.field:
-        errors.append(Finding(severity, "route-update-refused", "--field is required", request.target))
-    if not request.value:
-        errors.append(Finding(severity, "route-update-refused", "--value is required", request.target))
-    elif "\n" in request.value or "\r" in request.value:
-        errors.append(Finding(severity, "route-update-refused", "--value must be a single reviewed line; freeform body replacement is not supported", request.target))
-    elif _route_update_value_authority_overclaim(request.value):
-        errors.append(Finding(severity, "route-update-refused", "--value must not claim lifecycle, archive, Git, provider, or release authority", request.target))
+    if request.adopt_row_id and record_id_conflict(request.adopt_row_id):
+        errors.append(Finding(severity, "route-update-refused", f"--adopt-row-id is unsafe: {record_id_conflict(request.adopt_row_id)}", request.target))
+
+    table_selector = bool(request.table_heading or request.match_column or request.match_value)
+    if request.append_row:
+        if request.row_id:
+            errors.append(Finding(severity, "route-update-refused", "--append-row cannot be combined with --row-id", request.target))
+        if request.field or request.value:
+            errors.append(Finding(severity, "route-update-refused", "--append-row cannot be combined with --field or --value; the reviewed row contains the cell values", request.target))
+        if request.match_value and not request.match_column:
+            errors.append(Finding(severity, "route-update-refused", "--match-value with --append-row requires --match-column", request.target))
+        if "\n" in request.append_row or "\r" in request.append_row:
+            errors.append(Finding(severity, "route-update-refused", "--append-row must be one reviewed Markdown table row", request.target))
+        elif _route_update_contains_row_marker_syntax(request.append_row):
+            errors.append(Finding(severity, "route-update-refused", "--append-row must not contain raw mlh-row markers; use --adopt-row-id so route-update can validate the marker", request.target))
+        elif _route_update_value_authority_overclaim(request.append_row):
+            errors.append(Finding(severity, "route-update-refused", "--append-row must not claim lifecycle, archive, Git, provider, or release authority", request.target))
+    else:
+        if request.row_id and table_selector:
+            errors.append(Finding(severity, "route-update-refused", "--row-id cannot be combined with --table-heading, --match-column, or --match-value", request.target))
+        if not request.row_id and not table_selector:
+            errors.append(Finding(severity, "route-update-refused", "--row-id or a legacy table selector is required", request.target))
+        if table_selector and (not request.match_column or not request.match_value):
+            errors.append(Finding(severity, "route-update-refused", "legacy table updates require both --match-column and --match-value", request.target))
+        if not request.field and not request.adopt_row_id:
+            errors.append(Finding(severity, "route-update-refused", "--field is required unless --adopt-row-id is the only selected change", request.target))
+        if request.field and not request.value:
+            errors.append(Finding(severity, "route-update-refused", "--value is required when --field is supplied", request.target))
+        elif request.value and not request.field:
+            errors.append(Finding(severity, "route-update-refused", "--value requires --field", request.target))
+        elif request.value and ("\n" in request.value or "\r" in request.value):
+            errors.append(Finding(severity, "route-update-refused", "--value must be a single reviewed line; freeform body replacement is not supported", request.target))
+        elif request.value and "|" in request.value:
+            errors.append(Finding(severity, "route-update-refused", "--value must not contain Markdown table pipe characters", request.target))
+        elif request.value and _route_update_contains_row_marker_syntax(request.value):
+            errors.append(Finding(severity, "route-update-refused", "--value must not contain raw mlh-row markers; use --adopt-row-id so route-update can validate the marker", request.target))
+        elif request.value and _route_update_value_authority_overclaim(request.value):
+            errors.append(Finding(severity, "route-update-refused", "--value must not claim lifecycle, archive, Git, provider, or release authority", request.target))
 
     target_path = inventory.root / request.target
     if _intake_path_escapes_root(inventory.root, target_path):
@@ -15213,11 +15294,350 @@ def _route_update_request_errors(inventory: Inventory, request: RouteUpdateReque
     return errors
 
 
+def _route_update_line_body(line: str) -> str:
+    if line.endswith("\r\n"):
+        return line[:-2]
+    if line.endswith("\n") or line.endswith("\r"):
+        return line[:-1]
+    return line
+
+
+def _route_update_heading_text(line_body: str) -> str:
+    match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line_body)
+    return match.group(1).strip() if match else ""
+
+
+def _route_update_parse_table_line(line_body: str) -> tuple[RouteUpdateTableCell, ...] | None:
+    if "\\|" in line_body:
+        return None
+    first_pipe = line_body.find("|")
+    last_pipe = line_body.rfind("|")
+    if first_pipe < 0 or last_pipe <= first_pipe:
+        return None
+    if line_body[:first_pipe].strip() or line_body[last_pipe + 1 :].strip():
+        return None
+    pipes = [index for index, char in enumerate(line_body) if char == "|"]
+    if len(pipes) < 2:
+        return None
+    cells: list[RouteUpdateTableCell] = []
+    for left, right in zip(pipes, pipes[1:]):
+        raw_start = left + 1
+        raw_end = right
+        raw = line_body[raw_start:raw_end]
+        value = raw.strip()
+        if value:
+            leading = len(raw) - len(raw.lstrip())
+            trailing = len(raw.rstrip())
+            value_start = raw_start + leading
+            value_end = raw_start + trailing
+        else:
+            value_start = raw_start
+            value_end = raw_end
+        cells.append(RouteUpdateTableCell(value=value, value_start=value_start, value_end=value_end))
+    return tuple(cells)
+
+
+def _route_update_is_table_separator(cells: tuple[RouteUpdateTableCell, ...]) -> bool:
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.value.replace(" ", "")) for cell in cells)
+
+
+def _route_update_tables(text: str) -> list[RouteUpdateTable]:
+    lines = text.splitlines(keepends=True)
+    line_starts: list[int] = []
+    offset = 0
+    for line in lines:
+        line_starts.append(offset)
+        offset += len(line)
+
+    tables: list[RouteUpdateTable] = []
+    heading = ""
+    index = 0
+    while index < len(lines):
+        line_body = _route_update_line_body(lines[index])
+        new_heading = _route_update_heading_text(line_body)
+        if new_heading:
+            heading = new_heading
+
+        if index + 1 >= len(lines):
+            index += 1
+            continue
+        header_cells = _route_update_parse_table_line(line_body)
+        separator_cells = _route_update_parse_table_line(_route_update_line_body(lines[index + 1]))
+        if (
+            header_cells is None
+            or separator_cells is None
+            or len(header_cells) != len(separator_cells)
+            or not _route_update_is_table_separator(separator_cells)
+        ):
+            index += 1
+            continue
+
+        rows: list[RouteUpdateTableRow] = []
+        row_index = index + 2
+        while row_index < len(lines):
+            row_cells = _route_update_parse_table_line(_route_update_line_body(lines[row_index]))
+            if row_cells is None or _route_update_is_table_separator(row_cells):
+                break
+            if len(row_cells) != len(header_cells):
+                break
+            rows.append(
+                RouteUpdateTableRow(
+                    line_index=row_index,
+                    line_start=line_starts[row_index],
+                    line_end=line_starts[row_index] + len(lines[row_index]),
+                    cells=row_cells,
+                )
+            )
+            row_index += 1
+
+        tables.append(
+            RouteUpdateTable(
+                heading=heading,
+                header_line_index=index,
+                separator_line_index=index + 1,
+                separator_line_end=line_starts[index + 1] + len(lines[index + 1]),
+                header_cells=tuple(cell.value for cell in header_cells),
+                normalized_headers=tuple(_normalized_route_update_field(cell.value) for cell in header_cells),
+                rows=tuple(rows),
+            )
+        )
+        index = max(row_index, index + 2)
+    return tables
+
+
+def _route_update_selected_tables(
+    tables: list[RouteUpdateTable],
+    request: RouteUpdateRequest,
+    severity: str,
+    source: str,
+) -> tuple[list[RouteUpdateTable], list[Finding]]:
+    if not tables:
+        return [], [Finding(severity, "route-update-refused", "no simple Markdown pipe tables were found in the target", source)]
+    if not request.table_heading:
+        return tables, []
+    heading = _normalized_route_update_field(request.table_heading)
+    selected = [table for table in tables if _normalized_route_update_field(table.heading) == heading]
+    if not selected:
+        return [], [Finding(severity, "route-update-refused", f"table heading {request.table_heading!r} was not found", source)]
+    return selected, [Finding("info", "route-update-table", f"matched table heading {request.table_heading!r}", source)]
+
+
+def _route_update_header_index(
+    table: RouteUpdateTable,
+    normalized_header: str,
+    label: str,
+    severity: str,
+    source: str,
+) -> tuple[int | None, list[Finding]]:
+    matches = [index for index, header in enumerate(table.normalized_headers) if header == normalized_header]
+    if not matches:
+        return None, [Finding(severity, "route-update-refused", f"{label} was not found as an exact table header", source, table.header_line_index + 1)]
+    if len(matches) > 1:
+        return None, [Finding(severity, "route-update-refused", f"{label} matches duplicate normalized table headers", source, table.header_line_index + 1)]
+    return matches[0], []
+
+
+def _route_update_table_match(
+    tables: list[RouteUpdateTable],
+    request: RouteUpdateRequest,
+    severity: str,
+    source: str,
+) -> tuple[tuple[RouteUpdateTable, RouteUpdateTableRow, int] | None, list[Finding]]:
+    candidates: list[tuple[RouteUpdateTable, RouteUpdateTableRow, int]] = []
+    column_seen = False
+    duplicate_findings: list[Finding] = []
+    for table in tables:
+        match_index, index_findings = _route_update_header_index(table, request.match_column, f"--match-column {request.match_column!r}", severity, source)
+        if match_index is None:
+            if any("duplicate" in finding.message for finding in index_findings):
+                duplicate_findings.extend(index_findings)
+            continue
+        column_seen = True
+        for row in table.rows:
+            if _route_update_visible_cell_value(row.cells[match_index].value) == request.match_value:
+                candidates.append((table, row, match_index))
+    if duplicate_findings:
+        return None, duplicate_findings
+    if not column_seen:
+        return None, [Finding(severity, "route-update-refused", f"--match-column {request.match_column!r} was not found in selected tables", source)]
+    if not candidates:
+        return None, [Finding(severity, "route-update-refused", f"no table row matched {request.match_column}={request.match_value!r}", source)]
+    if len(candidates) > 1:
+        return None, [Finding(severity, "route-update-refused", f"table row selector {request.match_column}={request.match_value!r} matched {len(candidates)} rows; exact selector required", source)]
+    return candidates[0], [Finding("info", "route-update-row", f"matched table row {request.match_column}={request.match_value!r}", source, candidates[0][1].line_index + 1)]
+
+
+def _route_update_visible_cell_value(value: str) -> str:
+    return re.sub(r"\s*<!--\s*mlh-row:[^>]+-->\s*", " ", value).strip()
+
+
+def _route_update_row_marker_ids(text: str) -> tuple[str, ...]:
+    return tuple(match.group(1).strip() for match in re.finditer(r"<!--\s*mlh-row:([^>]+?)\s*-->", text))
+
+
+def _route_update_contains_row_marker_syntax(value: str) -> bool:
+    return bool(re.search(r"<!--\s*mlh-row\s*:", value, flags=re.IGNORECASE))
+
+
+def _route_update_cell_value_with_marker(value: str, row_id: str) -> str:
+    visible = _route_update_visible_cell_value(value)
+    return f"{visible} <!-- mlh-row:{row_id} -->".strip()
+
+
+def _route_update_cell_value_preserving_marker(value: str, replacement: str) -> str:
+    markers = " ".join(f"<!-- mlh-row:{row_id} -->" for row_id in _route_update_row_marker_ids(value))
+    return f"{replacement} {markers}".strip() if markers else replacement
+
+
+def _route_update_apply_replacements(text: str, replacements: list[tuple[int, int, str]]) -> str:
+    updated = text
+    for start, end, value in sorted(replacements, key=lambda item: item[0], reverse=True):
+        updated = updated[:start] + value + updated[end:]
+    return updated
+
+
+def _route_update_table_match_text(
+    text: str,
+    request: RouteUpdateRequest,
+    severity: str,
+    source: str,
+) -> tuple[str | None, str, str, list[Finding]]:
+    tables, table_findings = _route_update_selected_tables(_route_update_tables(text), request, severity, source)
+    if not tables:
+        return None, "", "", table_findings
+    match, match_findings = _route_update_table_match(tables, request, severity, source)
+    if match is None:
+        return None, "", "", [*table_findings, *match_findings]
+    table, row, _match_index = match
+
+    row_text = text[row.line_start : row.line_end]
+    row_markers = set(_route_update_row_marker_ids(row_text))
+    cell_updates: dict[int, str] = {}
+    findings: list[Finding] = [*table_findings, *match_findings]
+    if request.field:
+        target_index, target_findings = _route_update_header_index(table, request.field, f"--field {request.field!r}", severity, source)
+        if target_index is None:
+            return None, "", "", [*findings, *target_findings]
+        cell_updates[target_index] = _route_update_cell_value_preserving_marker(row.cells[target_index].value, request.value)
+        findings.extend(target_findings)
+        findings.append(Finding("info", "route-update-field", f"matched exact table column {table.header_cells[target_index]!r}", source, row.line_index + 1))
+
+    if request.adopt_row_id:
+        existing_markers = _route_update_row_marker_ids(text)
+        if request.adopt_row_id in existing_markers and request.adopt_row_id not in row_markers:
+            return None, "", "", [*findings, Finding(severity, "route-update-refused", f"--adopt-row-id {request.adopt_row_id!r} already exists on a different row", source)]
+        if row_markers and request.adopt_row_id not in row_markers:
+            return None, "", "", [*findings, Finding(severity, "route-update-refused", "selected table row already has a different mlh-row marker", source, row.line_index + 1)]
+        if request.adopt_row_id not in row_markers:
+            base_value = request.value if request.field and 0 in cell_updates else row.cells[0].value
+            cell_updates[0] = _route_update_cell_value_with_marker(base_value, request.adopt_row_id)
+            findings.append(Finding("info", "route-update-adopt", f"would adopt table row as mlh-row:{request.adopt_row_id}", source, row.line_index + 1))
+
+    replacements: list[tuple[int, int, str]] = []
+    for cell_index, new_value in cell_updates.items():
+        cell = row.cells[cell_index]
+        replacements.append((row.line_start + cell.value_start, row.line_start + cell.value_end, new_value))
+    selector = f"table_match={request.match_column}={request.match_value!r}"
+    if request.table_heading:
+        selector = f"table_heading={request.table_heading!r}; {selector}"
+    if request.field:
+        selector = f"{selector}; field={request.field}"
+    if request.adopt_row_id:
+        selector = f"{selector}; adopt_row_id={request.adopt_row_id}"
+    return _route_update_apply_replacements(text, replacements), "table-row-update", selector, findings
+
+
+def _route_update_append_table_text(
+    text: str,
+    request: RouteUpdateRequest,
+    severity: str,
+    source: str,
+) -> tuple[str | None, str, str, list[Finding]]:
+    tables, table_findings = _route_update_selected_tables(_route_update_tables(text), request, severity, source)
+    if not tables:
+        return None, "", "", table_findings
+    if len(tables) != 1:
+        return None, "", "", [
+            *table_findings,
+            Finding(severity, "route-update-refused", "append requires --table-heading when the target has multiple matching tables", source),
+        ]
+    table = tables[0]
+    append_cells = _route_update_parse_table_line(_route_update_line_body(request.append_row))
+    if append_cells is None or _route_update_is_table_separator(append_cells):
+        return None, "", "", [*table_findings, Finding(severity, "route-update-refused", "--append-row must be one simple Markdown pipe table row", source)]
+    if len(append_cells) != len(table.header_cells):
+        return None, "", "", [
+            *table_findings,
+            Finding(severity, "route-update-refused", f"--append-row has {len(append_cells)} cells but selected table has {len(table.header_cells)} headers", source),
+        ]
+
+    append_row = request.append_row
+    if request.adopt_row_id:
+        if request.adopt_row_id in _route_update_row_marker_ids(text):
+            return None, "", "", [*table_findings, Finding(severity, "route-update-refused", f"--adopt-row-id {request.adopt_row_id!r} already exists", source)]
+        append_row = _route_update_replace_table_line_cell(append_row, append_cells, 0, _route_update_cell_value_with_marker(append_cells[0].value, request.adopt_row_id))
+
+    if request.match_column:
+        match_index, match_findings = _route_update_header_index(table, request.match_column, f"--match-column {request.match_column!r}", severity, source)
+        if match_index is None:
+            return None, "", "", [*table_findings, *match_findings]
+        new_match_value = _route_update_visible_cell_value(append_cells[match_index].value)
+        if request.match_value and request.match_value != new_match_value:
+            return None, "", "", [
+                *table_findings,
+                Finding(severity, "route-update-refused", f"--match-value {request.match_value!r} does not match append-row {request.match_column} cell {new_match_value!r}", source),
+            ]
+        for row in table.rows:
+            if _route_update_visible_cell_value(row.cells[match_index].value) == new_match_value:
+                return None, "", "", [
+                    *table_findings,
+                    Finding(severity, "route-update-refused", f"append would duplicate existing {request.match_column}={new_match_value!r}", source, row.line_index + 1),
+                ]
+
+    insert_at = table.rows[-1].line_end if table.rows else table.separator_line_end
+    prefix = "" if insert_at == 0 or text[insert_at - 1] in "\r\n" else "\n"
+    updated_text = text[:insert_at] + prefix + append_row + "\n" + text[insert_at:]
+    selector = f"append_row under heading={table.heading!r}"
+    if request.match_column:
+        selector = f"{selector}; duplicate_check={request.match_column}"
+    if request.adopt_row_id:
+        selector = f"{selector}; adopt_row_id={request.adopt_row_id}"
+    findings = [
+        *table_findings,
+        Finding("info", "route-update-append", f"matched table for append under heading {table.heading!r}", source, table.header_line_index + 1),
+    ]
+    return updated_text, "table-row-append", selector, findings
+
+
+def _route_update_replace_table_line_cell(line_body: str, cells: tuple[RouteUpdateTableCell, ...], cell_index: int, value: str) -> str:
+    cell = cells[cell_index]
+    return line_body[: cell.value_start] + value + line_body[cell.value_end :]
+
+
 def _route_update_row_span(text: str, row_id: str, severity: str, source: str) -> tuple[tuple[int, int] | None, list[Finding]]:
     pattern = re.compile(rf"(?m)^<!--\s*mlh-row:{re.escape(row_id)}\s*-->\s*$")
     matches = list(pattern.finditer(text))
     if not matches:
-        return None, [Finding(severity, "route-update-refused", f"row marker <!-- mlh-row:{row_id} --> was not found exactly once", source)]
+        inline_pattern = re.compile(rf"<!--\s*mlh-row:{re.escape(row_id)}\s*-->")
+        inline_matches = list(inline_pattern.finditer(text))
+        if not inline_matches:
+            return None, [
+                Finding(
+                    severity,
+                    "route-update-refused",
+                    f"row marker <!-- mlh-row:{row_id} --> was not found exactly once; for legacy Markdown tables use --match-column/--match-value or --adopt-row-id first",
+                    source,
+                )
+            ]
+        if len(inline_matches) > 1:
+            return None, [Finding(severity, "route-update-refused", f"inline row marker mlh-row:{row_id} is duplicated; exact row selector is required", source)]
+        start = text.rfind("\n", 0, inline_matches[0].start()) + 1
+        end = text.find("\n", inline_matches[0].end())
+        if end < 0:
+            end = len(text)
+        else:
+            end += 1
+        return (start, end), [Finding("info", "route-update-row", f"matched inline table row marker mlh-row:{row_id}", source)]
     if len(matches) > 1:
         return None, [Finding(severity, "route-update-refused", f"row marker <!-- mlh-row:{row_id} --> is duplicated; exact row selector is required", source)]
     start = matches[0].start()
@@ -15238,13 +15658,46 @@ def _route_update_field_span(
     pattern = re.compile(rf"(?m)^(?P<prefix>\s*-\s*(?:`{escaped}`|{escaped})\s*:\s*)(?P<value>.*?)(?P<suffix>\s*)$")
     matches = list(pattern.finditer(row_text))
     if not matches:
-        return None, [Finding(severity, "route-update-refused", f"field {field!r} was not found as a single row bullet", source)]
+        return _route_update_marked_table_field_span(text, row_span, field, severity, source)
     if len(matches) > 1:
         return None, [Finding(severity, "route-update-refused", f"field {field!r} is duplicated in the selected row", source)]
     match = matches[0]
     value_start = row_span[0] + match.start("value")
     value_end = row_span[0] + match.end("value")
     return (value_start, value_end), [Finding("info", "route-update-field", f"matched exact mutable field {field!r}", source)]
+
+
+def _route_update_marked_table_field_span(
+    text: str,
+    row_span: tuple[int, int],
+    field: str,
+    severity: str,
+    source: str,
+) -> tuple[tuple[int, int] | None, list[Finding]]:
+    row_text = text[row_span[0] : row_span[1]]
+    row_start = row_span[0]
+    if "\n" in row_text.strip("\r\n"):
+        row_start = row_span[0] + row_text.find("|") if "|" in row_text else row_span[0]
+        row_end = text.find("\n", row_start)
+        row_end = len(text) if row_end < 0 else row_end + 1
+        row_span = (row_start, row_end)
+        row_text = text[row_span[0] : row_span[1]]
+    if _route_update_parse_table_line(_route_update_line_body(row_text)) is None:
+        return None, [Finding(severity, "route-update-refused", f"field {field!r} was not found as a single row bullet or marked table row column", source)]
+
+    tables = _route_update_tables(text)
+    for table in tables:
+        for row in table.rows:
+            if row.line_start == row_span[0]:
+                column_index, findings = _route_update_header_index(table, field, f"field {field!r}", severity, source)
+                if column_index is None:
+                    return None, findings
+                cell = row.cells[column_index]
+                return (
+                    (row.line_start + cell.value_start, row.line_start + cell.value_end),
+                    [Finding("info", "route-update-field", f"matched exact table column {table.header_cells[column_index]!r}", source, row.line_index + 1)],
+                )
+    return None, [Finding(severity, "route-update-refused", "marked table row was not part of a simple Markdown pipe table", source)]
 
 
 def _route_update_value_authority_overclaim(value: str) -> bool:
@@ -15256,9 +15709,23 @@ def _route_update_value_authority_overclaim(value: str) -> bool:
     return any(marker in lowered for marker in ("lifecycle", "archive", "roadmap", "commit", "push", "release", "provider"))
 
 
-def _route_update_token(target_rel: str, current_hash: str, row_id: str, field: str, value: str, updated_text: str) -> str:
+def _route_update_token(request: RouteUpdateRequest, current_hash: str, updated_text: str) -> str:
     updated_hash = hashlib.sha256(updated_text.encode("utf-8")).hexdigest()
-    payload = "\n".join((target_rel, current_hash, row_id, field, value, updated_hash))
+    payload = "\n".join(
+        (
+            request.target,
+            current_hash,
+            request.row_id,
+            request.field,
+            request.value,
+            request.table_heading,
+            request.match_column,
+            request.match_value,
+            request.append_row,
+            request.adopt_row_id,
+            updated_hash,
+        )
+    )
     return f"{ROUTE_UPDATE_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
 
 
@@ -15269,19 +15736,19 @@ def _route_update_route_findings(plan: RouteUpdatePlan, *, apply: bool) -> list[
             "route-update-token",
             (
                 f"current target sha256={plan.current_target_hash}; proposal_token={plan.proposal_token}; "
-                f"apply with: mylittleharness --root <root> route-update --apply --target {plan.rel_path} "
-                f"--row-id {plan.row_id} --field {plan.field} --value <reviewed-line> --proposal-token {plan.proposal_token}"
+                "apply with the same reviewed selector flags plus "
+                f"`--proposal-token {plan.proposal_token}`"
             ),
             plan.rel_path,
         )
     ]
     if plan.current_text == plan.updated_text:
-        findings.append(Finding("info", "route-update-current", f"selected row field already has the reviewed value in {plan.rel_path}; no route write is needed", plan.rel_path))
+        findings.append(Finding("info", "route-update-current", f"selected {plan.action} is already current in {plan.rel_path}; no route write is needed", plan.rel_path))
         return findings
     prefix = "updated" if apply else "would update"
     findings.extend(
         [
-            Finding("info", "route-update-updated" if apply else "route-update-preview", f"{prefix} exact row {plan.row_id!r} field {plan.field!r} in {plan.rel_path}", plan.rel_path),
+            Finding("info", "route-update-updated" if apply else "route-update-preview", f"{prefix} exact {plan.action} in {plan.rel_path}: {plan.selector}", plan.rel_path),
             *route_write_findings("route-update-route-write", (RouteWriteEvidence(plan.rel_path, plan.current_text, plan.updated_text),), apply=apply),
         ]
     )
@@ -15293,7 +15760,7 @@ def _route_update_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "route-update-boundary",
-            "route-update edits only one exact declared row field in existing route-owned decisions/incubation tracker Markdown; it cannot replace report bodies, create files, approve lifecycle, archive, roadmap, staging, commit, push, provider routing, or release",
+            "route-update edits only one exact declared row field, matched table cell/adoption marker, or reviewed table append in existing route-owned decisions/incubation tracker Markdown; it cannot replace report bodies, create files, approve lifecycle, archive, roadmap, staging, commit, push, provider routing, or release",
             "project/decisions",
         )
     ]

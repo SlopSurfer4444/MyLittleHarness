@@ -9982,7 +9982,7 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if route_id == "incubation":
         route_path = _hook_route_file_path(inventory, rel)
         if route_path is not None and route_path.exists():
-            return mlh_command("route-update", "--dry-run", "--target", rel, "--row-id", "<id>", "--field", "<field>", "--value", '"<reviewed-line>"')
+            return mlh_command("route-update", "--dry-run", "--target", rel, "--match-column", "ID", "--match-value", '"<existing-id>"', "--field", '"<table-column>"', "--value", '"<reviewed-line>"')
         return mlh_command("incubate", "--dry-run", "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--note-file", "-")
     if route_id == "operator-prompts":
         return mlh_command(
@@ -10001,7 +10001,7 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if route_id == "decisions":
         route_path = _hook_route_file_path(inventory, rel)
         if route_path is not None and route_path.exists():
-            return mlh_command("route-update", "--dry-run", "--target", rel, "--row-id", "<id>", "--field", "<field>", "--value", '"<reviewed-line>"')
+            return mlh_command("route-update", "--dry-run", "--target", rel, "--match-column", "ID", "--match-value", '"<existing-id>"', "--field", '"<table-column>"', "--value", '"<reviewed-line>"')
         return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
     if route_id in {"adrs", "product-docs"}:
         return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)

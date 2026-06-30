@@ -52,7 +52,7 @@ by themselves.
 | `standing-delegation` | autonomy policy evidence | yes | yes | writes one append-only standing-delegation JSON with scope roots, allowed routine actions, expiration/revocation posture, owner attestation, and hard human boundaries; later routes must consume it explicitly |
 | `evidence --receipt-refresh` | evidence maintenance | yes | yes plus proposal token | refreshes `source_hashes` only for an existing worker-run receipt JSON |
 | `evidence --retarget-ref` | evidence maintenance | yes | yes plus proposal token | retargets scoped provenance refs in existing route-owned evidence |
-| `route-update` | route-owned tracker maintenance | yes | yes plus proposal token | updates one exact row field in existing decision/incubation tracker Markdown |
+| `route-update` | route-owned tracker maintenance | yes | yes plus proposal token | updates one exact row field, table cell, adoption marker, or reviewed table append in existing decision/incubation tracker Markdown |
 | `verification-supersede` | verification report correction | yes | yes plus proposal token | writes one new direct verification report that supersedes an existing direct report with target and replacement hashes |
 | `incubate` | future idea/fix-candidate capture | yes | yes | writes non-authority incubation notes |
 | `intake` | incoming information route | yes | yes | writes one explicit target when reviewed |
@@ -119,15 +119,21 @@ targets refresh `source_hashes` after retargeting. It refuses path escapes,
 symlinks, missing new refs, malformed records, stale tokens, and authority
 overclaims, and it cannot approve lifecycle, archive, roadmap status,
 provider routing, staging, commits, or acceptance.
-Protected route-owned tracker row maintenance uses
+Protected route-owned tracker row maintenance uses either marker mode
 `route-update --dry-run --target project/plan-incubation/<tracker>.md
---row-id <id> --field <field> --value "<reviewed-line>"`. The matching
-apply requires the reported `ru-*` proposal token and updates only the selected
-row field in an existing `project/decisions/*.md` or
+--row-id <id> --field <field> --value "<reviewed-line>"` or legacy table mode
+`route-update --dry-run --target project/plan-incubation/<tracker>.md
+--match-column ID --match-value "<existing-id>" --field "<table-column>"
+--value "<reviewed-line>"`. Legacy table mode can use `--table-heading` to
+select one pipe table, `--append-row "| ... |"` to append one reviewed row, and
+`--adopt-row-id <id>` to add an inline `mlh-row` marker for future marker-mode
+updates. The matching apply requires the reported `ru-*` proposal token and
+updates only the selected row field/table cell/adoption marker or appends the
+reviewed row in an existing `project/decisions/*.md` or
 `project/plan-incubation/*.md` target with route frontmatter. It refuses
-missing or duplicate row markers, stale tokens, nested evidence/report targets,
-path escapes, symlinks, malformed frontmatter, unknown fields, multi-line body
-replacement, and authority overclaims.
+missing or duplicate row markers, ambiguous table matches, duplicate normalized
+headers, stale tokens, nested evidence/report targets, path escapes, symlinks,
+malformed frontmatter, multi-line body replacement, and authority overclaims.
 Reviewed correction of an existing verification report uses
 `verification-supersede --dry-run --target project/verification/<old>.md
 --new-target project/verification/<new>.md --text-file <reviewed-report.md>

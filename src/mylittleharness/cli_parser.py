@@ -393,15 +393,20 @@ def build_parser() -> argparse.ArgumentParser:
     route_update = subparsers.add_parser(
         "route-update",
         help=argparse.SUPPRESS,
-        description="Advanced mutating command: update one exact row field in an existing route-owned tracker Markdown file.",
+        description="Advanced mutating command: update one exact row field or legacy table row in an existing route-owned tracker Markdown file.",
     )
     route_update_mode = route_update.add_mutually_exclusive_group(required=True)
     route_update_mode.add_argument("--dry-run", action="store_true", help="Preview one exact row-field route update without writing files.")
     route_update_mode.add_argument("--apply", action="store_true", help="Apply one reviewed row-field route update with a matching proposal token.")
     route_update.add_argument("--target", required=True, help="Existing root-relative project/decisions/*.md or project/plan-incubation/*.md target.")
-    route_update.add_argument("--row-id", required=True, help="Exact row marker id, matched as <!-- mlh-row:<id> -->.")
-    route_update.add_argument("--field", required=True, help="Allowed field name to update inside the selected row.")
-    route_update.add_argument("--value", required=True, help="Reviewed single-line replacement value for the selected field.")
+    route_update.add_argument("--row-id", help="Exact row marker id, matched as <!-- mlh-row:<id> --> or an inline table marker.")
+    route_update.add_argument("--field", help="Field or table column name to update inside the selected row.")
+    route_update.add_argument("--value", help="Reviewed single-line replacement value for the selected field or table column.")
+    route_update.add_argument("--table-heading", help="Optional Markdown heading whose following pipe table should be selected.")
+    route_update.add_argument("--match-column", help="Legacy table selector column for a no-marker row, such as ID or Item.")
+    route_update.add_argument("--match-value", help="Exact visible cell value for --match-column.")
+    route_update.add_argument("--append-row", help="Reviewed single Markdown pipe row to append to the selected legacy table.")
+    route_update.add_argument("--adopt-row-id", help="Add an inline mlh-row marker to the selected table row or appended row.")
     route_update.add_argument("--proposal-token", dest="proposal_token", help="Proposal token emitted by the matching route-update dry-run.")
     verification_supersede = subparsers.add_parser(
         "verification-supersede",

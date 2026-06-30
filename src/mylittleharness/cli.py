@@ -1161,7 +1161,18 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "route-update":
-        request = make_route_update_request(args.target, args.row_id, args.field, args.value, args.proposal_token)
+        request = make_route_update_request(
+            args.target,
+            args.row_id,
+            args.field,
+            args.value,
+            args.table_heading,
+            args.match_column,
+            args.match_value,
+            args.append_row,
+            args.adopt_row_id,
+            args.proposal_token,
+        )
         report_name = "route-update --apply" if args.apply else "route-update --dry-run"
         findings = route_update_apply_findings(inventory, request) if args.apply else route_update_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
@@ -3645,11 +3656,11 @@ def _suggestions(command: str, findings) -> list[str]:
         return ["intake apply wrote one explicit routed note; classification remains advisory and does not approve lifecycle movement."]
     if command == "route-update":
         if any(finding.code == "route-update-preview" for finding in findings):
-            return ["route-update dry-run reported the exact target row, before/after hashes, and proposal token without writing files."]
+            return ["route-update dry-run reported the exact target row/table selector, before/after hashes, and proposal token without writing files."]
         if any(finding.code == "route-update-updated" for finding in findings):
-            return ["route-update apply updated one exact row field in an existing route-owned tracker; lifecycle, archive, roadmap status, staging, commit, push, provider routing, and release remain explicit."]
+            return ["route-update apply updated one exact row field, table cell, adoption marker, or reviewed table append in an existing route-owned tracker; lifecycle, archive, roadmap status, staging, commit, push, provider routing, and release remain explicit."]
         if any(finding.code == "route-update-current" for finding in findings):
-            return ["route-update found the selected row field already current; no route write was needed."]
+            return ["route-update found the selected row/table change already current; no route write was needed."]
         if any(finding.code == "route-update-refused" and finding.severity == "error" for finding in findings):
             return ["route-update apply was refused before protected route-owned Markdown changed; rerun dry-run for a fresh token if the target changed."]
         return ["route-update completed without approving lifecycle, archive, roadmap status, staging, commit, push, provider routing, or release."]
