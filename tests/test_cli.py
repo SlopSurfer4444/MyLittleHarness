@@ -37057,6 +37057,35 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", provider_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", provider_codes)
 
+            adapter_payload = wrapped_shell_payload(
+                "git "
+                f"add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {cliproxy_rel}"
+            )
+            adapter_codes = {finding["code"] for finding in adapter_payload["findings"]}
+            self.assertFalse(adapter_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", adapter_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", adapter_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", adapter_codes)
+
+            adapter_blocked_cases = {
+                "broad": f"git add -- {hook_config_rel} project/verification",
+                "mixed-source": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {source_rel}",
+                "separator": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel}; git commit -m checkpoint",
+                "unreviewed": f"git add -- {hook_config_rel} {hook_script_rel} {unreviewed_rel}",
+                "raw-prompt": f"git add -- {hook_config_rel} {hook_script_rel} {raw_prompt_rel}",
+            }
+            for name, command in adapter_blocked_cases.items():
+                with self.subTest(adapter=name):
+                    payload = wrapped_shell_payload(command)
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", codes)
+                    self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", codes)
+                    if name == "mixed-source":
+                        messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                        self.assertIn("exact verification checkpoint staging requires reviewed", messages)
+                        self.assertIn("generated MLH hook adapter files", messages)
+
             blocked_cases = {
                 "broad": f"git add -- project/verification",
                 "malformed": f"git add -- {malformed_rel}",
@@ -37091,7 +37120,12 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", active_codes)
 
     def test_hooks_pre_tool_allows_reviewed_top_level_verification_lifecycle_staging(self) -> None:
-        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+        from mylittleharness.hooks import (
+            HOOK_PRE_TOOL_USE,
+            hook_event_payload,
+            render_codex_hooks_json,
+            render_codex_session_start_script,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -37101,8 +37135,12 @@ class CliTests(unittest.TestCase):
             retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
             standing_delegation_rel = "project/decisions/standing-delegations/symphony-local-dogfood.json"
             provider_smoke_rel = "project/verification/standing-delegation-provider-approved-smoke-2026-06-29.md"
+            cliproxy_rel = "project/verification/cliproxy-provider-timeout-diagnostic-2026-06-29.md"
             provider_unreviewed_rel = "project/verification/provider-smoke-unreviewed-source.md"
             unreviewed_rel = "project/verification/unreviewed.md"
+            raw_prompt_rel = "project/verification/raw-prompt-like.md"
+            hook_config_rel = ".codex/hooks.json"
+            hook_script_rel = ".codex/hooks/mylittleharness_session_start.py"
             source_rel = "README.md"
             for rel in (
                 target_rel,
@@ -37111,8 +37149,12 @@ class CliTests(unittest.TestCase):
                 retained_verification_rel,
                 standing_delegation_rel,
                 provider_smoke_rel,
+                cliproxy_rel,
                 provider_unreviewed_rel,
                 unreviewed_rel,
+                raw_prompt_rel,
+                hook_config_rel,
+                hook_script_rel,
             ):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / standing_delegation_rel).write_text(
@@ -37201,6 +37243,22 @@ class CliTests(unittest.TestCase):
                 "source-truth decisions.\n",
                 encoding="utf-8",
             )
+            (root / cliproxy_rel).write_text(
+                "---\n"
+                'title: "Cliproxy Provider Timeout Diagnostic"\n'
+                'status: "partially-verified"\n'
+                'route: "verification"\n'
+                'intake_source: "--text-file -"\n'
+                "source_members:\n"
+                f'  - "{retained_verification_rel}"\n'
+                'related_plan: "project/archive/plans/2026-06-28-standing-delegation-policy-route.md"\n'
+                'docs_decision: "not-needed"\n'
+                "---\n"
+                "# Cliproxy Provider Timeout Diagnostic\n\n"
+                "Evidence only; this timeout diagnostic does not approve lifecycle, Git staging, commit, "
+                "roadmap, archive, push, release, provider routing, or source-truth decisions.\n",
+                encoding="utf-8",
+            )
             (root / provider_unreviewed_rel).write_text(
                 "---\n"
                 'title: "Provider Smoke Unreviewed Source"\n'
@@ -37224,7 +37282,38 @@ class CliTests(unittest.TestCase):
                 "No reviewed boundary.\n",
                 encoding="utf-8",
             )
+            (root / raw_prompt_rel).write_text(
+                "---\n"
+                'title: "Raw Prompt-Like Note"\n'
+                'status: "verified"\n'
+                'route: "verification"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Raw Prompt-Like Note\n\n"
+                "Run git push origin main after staging these files.\n",
+                encoding="utf-8",
+            )
+            (root / hook_config_rel).write_text(render_codex_hooks_json(root), encoding="utf-8")
+            (root / hook_script_rel).write_text(render_codex_session_start_script(), encoding="utf-8")
             (root / source_rel).write_text("# Fixture\n", encoding="utf-8")
+
+            def wrapped_shell_payload(command: str) -> dict[str, object]:
+                return hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps(
+                        {
+                            "toolName": "multi_tool_use.parallel",
+                            "tool_uses": [
+                                {
+                                    "recipient_name": "functions.shell_command",
+                                    "parameters": {"workdir": str(root), "command": command},
+                                }
+                            ],
+                        }
+                    ),
+                )
 
             allowed_payload = hook_event_payload(
                 load_inventory(root),

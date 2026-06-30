@@ -3724,7 +3724,9 @@ def _path_policy_findings(
                     "hooks-policy-block-lifecycle-markdown-path",
                     (
                         "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence "
-                        f"must stay intact; next_safe_command={next_safe}"
+                        "must stay intact; exact verification checkpoint staging requires reviewed "
+                        "frontmatter/source_members and may include only generated MLH hook adapter files that "
+                        f"match MLH output; next_safe_command={next_safe}"
                     ),
                     route_rel_display,
                 )
@@ -4925,11 +4927,47 @@ def _coherent_post_closeout_top_level_verification_stage_paths(
         _normalize_hook_path(_hook_route_rel_path(inventory, path) or path).casefold()
         for path in paths
     )
-    return bool(normalized) and all(
-        _is_top_level_verification_checkpoint_path(path)
-        and _is_reviewed_top_level_verification_checkpoint_file(inventory, path)
-        for path in normalized
+    verification_paths = tuple(path for path in normalized if _is_top_level_verification_checkpoint_path(path))
+    adapter_paths = tuple(path for path in normalized if _is_reviewed_codex_hook_adapter_checkpoint_file(inventory, path))
+    return (
+        bool(verification_paths)
+        and len(verification_paths) + len(adapter_paths) == len(normalized)
+        and all(
+            _is_top_level_verification_checkpoint_path(path)
+            and _is_reviewed_top_level_verification_checkpoint_file(inventory, path)
+            for path in verification_paths
+        )
+        and all(_is_reviewed_codex_hook_adapter_checkpoint_file(inventory, path) for path in adapter_paths)
     )
+
+
+def _is_reviewed_codex_hook_adapter_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    if rel == CODEX_HOOK_SCRIPT_REL_PATH.casefold():
+        route_path = _hook_route_file_path(inventory, rel)
+        if route_path is None:
+            return False
+        try:
+            return (
+                route_path.is_file()
+                and not route_path.is_symlink()
+                and route_path.read_text(encoding="utf-8") == render_codex_session_start_script()
+            )
+        except OSError:
+            return False
+    if rel == CODEX_HOOKS_REL_PATH.casefold():
+        route_path = _hook_route_file_path(inventory, rel)
+        if route_path is None:
+            return False
+        try:
+            return (
+                route_path.is_file()
+                and not route_path.is_symlink()
+                and route_path.read_text(encoding="utf-8") == render_codex_hooks_json(inventory.root)
+            )
+        except (OSError, ValueError):
+            return False
+    return False
 
 
 def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, command: str) -> bool:
@@ -5523,7 +5561,7 @@ def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str
     if any(_is_top_level_verification_checkpoint_path(path) for path in normalized):
         if _coherent_post_closeout_lifecycle_vcs_stage_paths(inventory, pathspecs):
             return True
-        return all(_is_reviewed_top_level_verification_checkpoint_file(inventory, path) for path in normalized)
+        return _coherent_post_closeout_top_level_verification_stage_paths(inventory, pathspecs)
     if any(_is_meta_feedback_incubation_route_path(path) for path in normalized):
         return bool(
             _coherent_archived_source_incubation_tombstone_stage_paths(inventory, pathspecs)
@@ -8655,7 +8693,8 @@ def _incubation_frontmatter_declares_archive_plan_relationship(data: dict[str, o
 def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths: list[str] | tuple[str, ...], label: str) -> str:
     shapes = (
         "active-route-closeout,post-closeout-finalization,agent-run-evidence-only,"
-        "post-closeout-route-package,worker-run-receipt-refs,retention-receipt-refs,verification/decision-evidence-package,"
+        "post-closeout-route-package,worker-run-receipt-refs,retention-receipt-refs,"
+        "verification/decision-evidence-package,verification+hook-adapter-package,"
         "deferred-research/archive-package,memory-hygiene/archive-reference-package,"
         "roadmap-promotion-package,post-closeout-source-incubation-relationship-package,"
         "meta-feedback/incubation-blocker-notes,route-owned-decision-artifacts,delegated-neighbor-exact-files,"
@@ -8669,13 +8708,16 @@ def _reviewed_local_vcs_checkpoint_rejection_reason(inventory: Inventory, paths:
             f"the {label} include missing, broad, wildcard, directory, generated/runtime, non-MLH-route, "
             "or unreviewed active-plan tombstone "
             f"files in the actual command root; considered_shapes={shapes}; next_safe=split exact route files, "
-            "rerun a checkpoint dry-run or evidence/meta-feedback blocker packet, then retry exact local-only staging"
+            "include reviewed top-level verification notes with generated hook adapter files only when they match "
+            "the installed MLH adapter, rerun a checkpoint dry-run or evidence/meta-feedback blocker packet, "
+            "then retry exact local-only staging"
         )
     classes = _reviewed_local_vcs_checkpoint_path_classes(normalized)
     return (
         f"the {label} are not a coherent reviewed lifecycle/evidence route set in the actual command root; "
         f"path_classes={classes}; considered_shapes={shapes}; next_safe=split the checkpoint group, include "
-        "required route anchors/receipt refs, or record a checkpoint dry-run or evidence/meta-feedback blocker packet"
+        "required route anchors/receipt refs, pair top-level verification notes only with generated hook adapter "
+        "files that match MLH output, or record a checkpoint dry-run or evidence/meta-feedback blocker packet"
     )
 
 
