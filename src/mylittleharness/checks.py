@@ -15437,5 +15437,5 @@ def _line_claims_product_role(line: str) -> bool:
     return any(marker in lowered for marker in ("product source root", "product root", "product repository", "fixture metadata"))
 
 
-def load_for_root(root: Path) -> Inventory:
-    return load_inventory(root)
+def load_for_root(root: Path, *, profile: str = "full") -> Inventory:
+    return load_inventory(root, profile=profile)

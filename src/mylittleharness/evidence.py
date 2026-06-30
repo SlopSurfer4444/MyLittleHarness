@@ -1332,6 +1332,7 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
             findings.extend(_agent_run_record_boundary_findings())
             return findings
         findings.extend(_agent_run_record_refresh_route_findings(refresh_plan, apply=True))
+        findings.append(_agent_run_record_apply_checkpoint_finding(target_rel))
         for warning in cleanup_warnings:
             findings.append(Finding("warn", "agent-run-record-backup-cleanup", warning, target_rel))
         findings.extend(_agent_run_record_boundary_findings())
@@ -1360,12 +1361,25 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
                 f"created route {target_rel}; before_hash=missing; after_hash={_short_hash(text)}; before_bytes=missing; after_bytes={len(text.encode('utf-8'))}; source-bound write evidence is independent of Git tracking",
                 target_rel,
             ),
+            _agent_run_record_apply_checkpoint_finding(target_rel),
         ]
     )
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "agent-run-record-backup-cleanup", warning, target_rel))
     findings.extend(_agent_run_record_boundary_findings())
     return findings
+
+def _agent_run_record_apply_checkpoint_finding(target_rel: str) -> Finding:
+    return Finding(
+        "info",
+        "agent-run-record-apply-checkpoint",
+        (
+            f"apply completion checkpoint: target={target_rel}; if an outer wrapper times out, inspect this exact file "
+            "and rerun evidence --normalize-agent-run --dry-run --target <target> before retrying any apply"
+        ),
+        target_rel,
+    )
+
 
 
 

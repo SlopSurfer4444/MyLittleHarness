@@ -7121,6 +7121,8 @@ class CliTests(unittest.TestCase):
             record_path = root / "project/verification/agent-runs/run-1.md"
             record_text = record_path.read_text(encoding="utf-8")
             self.assertIn("agent-run-record-written", apply_rendered)
+            self.assertIn("agent-run-record-apply-checkpoint", apply_rendered)
+            self.assertIn("apply completion checkpoint: target=project/verification/agent-runs/run-1.md", apply_rendered)
             self.assertIn("evidence record apply wrote one source-bound agent run evidence record", apply_rendered)
             self.assertTrue(record_text.startswith("---\n"))
             self.assertTrue(record_text.endswith("\n"))
@@ -7170,6 +7172,8 @@ class CliTests(unittest.TestCase):
             metadata_apply_rendered = metadata_apply.getvalue()
             refreshed_metadata_text = record_path.read_text(encoding="utf-8")
             self.assertIn("agent-run-record-refreshed", metadata_apply_rendered)
+            self.assertIn("agent-run-record-apply-checkpoint", metadata_apply_rendered)
+            self.assertIn("apply completion checkpoint: target=project/verification/agent-runs/run-1.md", metadata_apply_rendered)
             self.assertTrue(refreshed_metadata_text.endswith("\n"))
             self.assertFalse(refreshed_metadata_text.endswith("\n\n"))
             self.assertIn('  - "project/verification/handoffs/run-1.json"', refreshed_metadata_text)
@@ -34254,7 +34258,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-block-code-write-outside-plan-scope", rogue_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", rogue_codes)
 
-    def test_hooks_pre_tool_allows_existing_frontmatter_route_apply_patch_updates(self) -> None:
+    def test_hooks_pre_tool_blocks_existing_frontmatter_route_apply_patch_updates(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -34292,11 +34296,13 @@ class CliTests(unittest.TestCase):
 
             payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], patch_input)
 
-            self.assertFalse(payload["block"])
+            self.assertTrue(payload["block"])
             finding_codes = {finding["code"] for finding in payload["findings"]}
-            self.assertIn("hooks-policy-allow-existing-route-markdown-patch", finding_codes)
-            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
-            self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertNotIn("hooks-policy-allow-existing-route-markdown-patch", finding_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+            self.assertIn("next_safe_command=", messages)
 
     def test_hooks_pre_tool_allows_active_plan_spec_docs_apply_patch_scope(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -34696,13 +34702,16 @@ class CliTests(unittest.TestCase):
                     "messages": (),
                 },
                 {
-                    "name": "existing frontmatter route patch remains allowed",
+                    "name": "existing frontmatter route patch uses owner route",
                     "hook": HOOK_PRE_TOOL_USE,
                     "input": json.dumps({"toolName": "apply_patch", "input": existing_route_patch}),
-                    "block": False,
-                    "include": {"hooks-policy-allow-existing-route-markdown-patch"},
-                    "exclude": {"hooks-policy-block-lifecycle-markdown-shortcut"},
-                    "messages": (),
+                    "block": True,
+                    "include": {
+                        "hooks-policy-block-lifecycle-markdown-path",
+                        "hooks-policy-block-lifecycle-markdown-shortcut",
+                    },
+                    "exclude": {"hooks-policy-allow-existing-route-markdown-patch"},
+                    "messages": ("next_safe_command=mylittleharness --root <root> research-import --dry-run",),
                 },
                 {
                     "name": "owner route evidence paths remain allowed",
@@ -39173,6 +39182,47 @@ class CliTests(unittest.TestCase):
             commit_codes = {finding["code"] for finding in commit_payload["findings"]}
             self.assertFalse(commit_payload["block"])
             self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", commit_codes)
+
+    def test_hooks_pre_tool_allows_neighbor_force_add_exact_reviewed_agent_run_checkpoint(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_active_live_root(Path(tmp) / "current", phase_status="pending")
+            neighbor_root = make_live_root(Path(tmp) / "neighbor")
+            agent_run_rel = "project/verification/agent-runs/symphony-proof.md"
+            agent_run_path = neighbor_root / agent_run_rel
+            agent_run_path.parent.mkdir(parents=True, exist_ok=True)
+            agent_run_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "symphony-proof"\n'
+                'status: "succeeded"\n'
+                "---\n"
+                "# Symphony Proof\n"
+                "\n"
+                "Reviewed route-created evidence.\n",
+                encoding="utf-8",
+            )
+            payload = hook_event_payload(
+                load_inventory(current_root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": f'git -C "{neighbor_root}" add -f -- {agent_run_rel}',
+                    }
+                ),
+            )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertIn("git add -f -- <exact-route-artifact>", messages)
+            self.assertIn(agent_run_rel, messages)
 
     def test_hooks_pre_tool_blocks_neighbor_exact_target_unsafe_checkpoint_forms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
@@ -44278,6 +44328,7 @@ class CliTests(unittest.TestCase):
                 ({"command": "C:/Git/cmd/git.exe clean -fd"}, "hooks-policy-block-git-before-lifecycle-closeout"),
                 ({"command": "git diff --output=src/rogue.py"}, "hooks-policy-block-code-write-outside-plan-scope"),
                 ({"command": 'powershell -Command "Set-Content src/rogue.py x"'}, "hooks-policy-block-code-write-outside-plan-scope"),
+                ({"command": "pwsh -NoProfile -File scripts/do-write.ps1"}, "hooks-policy-block-opaque-script-file-execution"),
                 ({"command": 'cmd /c "echo x > src/rogue.py"'}, "hooks-policy-block-code-write-outside-plan-scope"),
                 ({"command": 'eval "Set-Content src/rogue.py x"'}, "hooks-policy-block-code-write-outside-plan-scope"),
                 ({"command": "powershell -EncodedCommand SQBtAHAAbwByAHQALQBNAG8AZAB1AGwAZQA="}, "hooks-policy-block-opaque-shell-command"),
@@ -45527,6 +45578,19 @@ class CliTests(unittest.TestCase):
                                 "parameters": {"command": command, "workdir": str(root)},
                             }
                         ],
+                    },
+                    {
+                        "toolName": "multi_tool_use.parallel",
+                        "arguments": json.dumps(
+                            {
+                                "tool_uses": [
+                                    {
+                                        "recipient_name": "functions.shell_command",
+                                        "parameters": json.dumps({"command": command, "workdir": str(root)}),
+                                    }
+                                ]
+                            }
+                        ),
                     },
                 )
 
@@ -51170,6 +51234,58 @@ class CliTests(unittest.TestCase):
             self.assertIn("Dirty Route Summary", rendered)
             self.assertIn("Actionable Findings", rendered)
             self.assertNotIn("\nSources\n", rendered)
+
+    def test_check_quick_uses_bounded_inventory_and_omits_heavy_evidence_scans(self) -> None:
+        import mylittleharness.inventory as inventory_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            evidence_dir = root / "project/verification/agent-runs"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            (evidence_dir / "heavy.md").write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "heavy"\n'
+                'status: "succeeded"\n'
+                "---\n"
+                + ("# Heavy Evidence\n\n" + ("x" * 4096) + "\n") * 8,
+                encoding="utf-8",
+            )
+            original_read_surface = inventory_module._read_surface
+
+            def guarded_read_surface(root_path: Path, rel_path: str, role: str, required: bool, path: Path):
+                if rel_path.replace("\\", "/").startswith("project/verification/agent-runs/"):
+                    raise AssertionError(f"quick inventory should not read optional evidence body: {rel_path}")
+                return original_read_surface(root_path, rel_path, role, required, path)
+
+            json_output = io.StringIO()
+            with (
+                patch("mylittleharness.inventory._read_surface", side_effect=guarded_read_surface),
+                patch("mylittleharness.cli.agent_run_record_findings", side_effect=AssertionError("quick check used full agent-run scan")),
+                redirect_stdout(json_output),
+            ):
+                json_code = main(["--root", str(root), "check", "--quick", "--json"])
+
+            payload = json.loads(json_output.getvalue())
+            self.assertEqual(json_code, 0)
+            self.assertEqual("quick", payload["report_scope"]["scope"])
+            self.assertIn("Agent Run Evidence", payload["report_scope"]["omitted_heavy_sections"])
+            self.assertIn(
+                "check-quick-bounded-evidence-scan",
+                {finding["code"] for finding in payload["findings"]},
+            )
+
+            text_output = io.StringIO()
+            with (
+                patch("mylittleharness.inventory._read_surface", side_effect=guarded_read_surface),
+                patch("mylittleharness.cli.agent_run_record_findings", side_effect=AssertionError("quick check used full agent-run scan")),
+                redirect_stdout(text_output),
+            ):
+                text_code = main(["--root", str(root), "check", "--quick"])
+
+            self.assertEqual(text_code, 0)
+            self.assertIn("check --quick uses a bounded evidence posture", text_output.getvalue())
 
     def test_route_metadata_source_members_warning_is_nonblocking_readiness_signal(self) -> None:
         finding = Finding(

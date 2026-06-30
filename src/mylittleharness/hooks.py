@@ -1934,6 +1934,20 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 ),
             )
         )
+    opaque_script_target = _opaque_script_file_execution_target(command)
+    if opaque_script_target:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-opaque-script-file-execution",
+                (
+                    "blocked script-file execution because the hook cannot inspect the delegated script body; "
+                    "run a first-class MLH dry-run/apply route or expand the script into a visible reviewed command; "
+                    f"next_safe_command=Get-Content -LiteralPath {shell_arg(opaque_script_target)}"
+                ),
+                opaque_script_target,
+            )
+        )
     if block_unsafe_hook_simulation_payload:
         findings.append(
             Finding(
@@ -3481,13 +3495,7 @@ def _hook_apply_patch_target_paths(data: dict[str, object]) -> list[str]:
 
 
 def _is_existing_route_markdown_patch_request(inventory: Inventory, data: dict[str, object]) -> bool:
-    operations = _hook_apply_patch_target_operations(data)
-    if not operations:
-        return False
-    if any(operation != "update" for operation, _path in operations):
-        return False
-    paths = [path for _operation, path in operations]
-    return bool(paths) and all(_is_editable_route_patch_path(inventory, path) for path in paths)
+    return False
 
 
 def _is_active_plan_spec_doc_patch_request(inventory: Inventory, data: dict[str, object]) -> bool:
@@ -10200,6 +10208,75 @@ def _dedupe_nonempty(values: list[str]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _opaque_script_file_execution_target(command: str) -> str:
+    tokens = _shell_tokens(command)
+    target = _opaque_script_file_execution_target_from_tokens(tokens)
+    if target:
+        return target
+    for nested in _nested_shell_commands_from_tokens(tokens):
+        if nested and nested != "<MLH_ENCODED_COMMAND>":
+            target = _opaque_script_file_execution_target(nested)
+            if target:
+                return target
+    return ""
+
+
+def _opaque_script_file_execution_target_from_tokens(tokens: list[str]) -> str:
+    expect_command = True
+    index = 0
+    while index < len(tokens):
+        raw = str(tokens[index] or "").strip()
+        clean = _clean_shell_command_token(raw)
+        if not clean:
+            if _is_shell_command_separator(raw, clean):
+                expect_command = True
+            index += 1
+            continue
+        if expect_command and clean in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            target = _powershell_file_execution_target(tokens, index + 1)
+            if target:
+                return target
+        if expect_command and _is_direct_shell_script_token(clean):
+            return raw.strip(" \t\r\n\"'`")
+        if _is_shell_command_separator(raw, clean):
+            expect_command = True
+            index += 1
+            continue
+        expect_command = False
+        if raw.endswith(";"):
+            expect_command = True
+        index += 1
+    return ""
+
+
+def _powershell_file_execution_target(tokens: list[str], start: int) -> str:
+    index = start
+    while index < len(tokens):
+        raw = str(tokens[index] or "").strip()
+        clean = _clean_shell_command_token(raw)
+        if not clean:
+            index += 1
+            continue
+        if _is_shell_command_separator(raw, clean):
+            return ""
+        for prefix in ("-file:", "-file=", "/file:", "/file="):
+            if clean.casefold().startswith(prefix):
+                return clean[len(prefix) :].strip(" \t\r\n\"'`")
+        if clean in {"-file", "/file"}:
+            if index + 1 < len(tokens):
+                return str(tokens[index + 1] or "").strip(" \t\r\n\"'`")
+            return "<script-file>"
+        if _is_direct_shell_script_token(clean):
+            return raw.strip(" \t\r\n\"'`")
+        index += 1
+    return ""
+
+
+def _is_direct_shell_script_token(clean: str) -> bool:
+    normalized = clean.strip(" \t\r\n\"'`").replace("\\", "/").casefold()
+    return normalized.endswith((".ps1", ".psm1", ".cmd", ".bat"))
 
 
 def _looks_like_write_command(command: str) -> bool:

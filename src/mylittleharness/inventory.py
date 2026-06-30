@@ -191,7 +191,7 @@ def _configured_product_source_root(inventory: Inventory) -> str:
         return value
 
 
-def load_inventory(root: Path | str) -> Inventory:
+def load_inventory(root: Path | str, *, profile: str = "full") -> Inventory:
     root_path = Path(root).expanduser().resolve()
     if not root_path.exists():
         raise RootLoadError(f"target root does not exist: {root_path}")
@@ -250,24 +250,25 @@ def load_inventory(root: Path | str) -> Inventory:
     for name in EXPECTED_SPEC_NAMES:
         add(f"project/specs/workflow/{name}", "stable-spec", True)
 
-    _add_optional_glob(root_path, surfaces, "project/specs/**/*.md", "stable-spec")
-    _add_optional_glob(root_path, surfaces, "docs/**/*.md", "product-doc")
-    _add_optional_glob(root_path, surfaces, "project/adrs/*.md", "adr")
-    _add_optional_glob(root_path, surfaces, "project/decisions/*.md", "decision")
-    _add_optional_glob(root_path, surfaces, "project/plan-incubation/*.md", "incubation")
-    _add_optional_glob(root_path, surfaces, "project/operator-prompts/*.md", "operator-prompt")
-    _add_optional_glob(root_path, surfaces, "project/drafts/*.md", "draft")
-    _add_optional_glob(root_path, surfaces, "project/research/*.md", "research")
-    _add_optional_glob(root_path, surfaces, "project/attachments/**/artifact.md", "attachment")
-    _add_optional_glob(root_path, surfaces, "project/verification/*.md", "verification")
-    _add_optional_glob(root_path, surfaces, "project/verification/agent-runs/*.md", "agent-run")
-    _add_optional_glob(root_path, surfaces, "project/verification/handoffs/*.md", "handoff-note")
-    _add_optional_glob(root_path, surfaces, "project/verification/handoffs/*.json", "handoff")
-    _add_optional_glob(root_path, surfaces, "project/verification/work-claims/*.json", "work-claim")
-    _add_optional_glob(root_path, surfaces, "project/verification/worker-run-receipts/*.json", "worker-run-receipt")
-    _add_optional_glob(root_path, surfaces, "project/verification/approval-packets/*.json", "approval-packet")
-    _add_optional_glob(root_path, surfaces, "project/symphony/queue/*.json", "symphony-queue")
-    _add_optional_glob(root_path, surfaces, "specs/workflow/*.md", "package-mirror")
+    quick_profile = profile == "quick"
+    _add_optional_glob(root_path, surfaces, "project/specs/**/*.md", "stable-spec", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "docs/**/*.md", "product-doc", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/adrs/*.md", "adr", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/decisions/*.md", "decision", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/plan-incubation/*.md", "incubation", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/operator-prompts/*.md", "operator-prompt", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/drafts/*.md", "draft", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/research/*.md", "research", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/attachments/**/artifact.md", "attachment", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/*.md", "verification", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/agent-runs/*.md", "agent-run", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/handoffs/*.md", "handoff-note", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/handoffs/*.json", "handoff", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/work-claims/*.json", "work-claim", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/worker-run-receipts/*.json", "worker-run-receipt", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/verification/approval-packets/*.json", "approval-packet", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "project/symphony/queue/*.json", "symphony-queue", path_only=quick_profile)
+    _add_optional_glob(root_path, surfaces, "specs/workflow/*.md", "package-mirror", path_only=quick_profile)
 
     ordered = sorted(surfaces.values(), key=lambda item: item.rel_path)
     return Inventory(
@@ -482,11 +483,44 @@ def _same_path_value(value: object, expected: Path) -> bool:
         return normalized.replace("/", "\\").rstrip("\\").casefold() == str(expected).replace("/", "\\").rstrip("\\").casefold()
 
 
-def _add_optional_glob(root: Path, surfaces: dict[str, Surface], pattern: str, role: str) -> None:
+def _read_path_only_surface(root: Path, rel_path: str, role: str, required: bool, path: Path) -> Surface:
+    boundary_violation = source_path_boundary_violation(root, path, label=f"{role} source")
+    route = classify_memory_route(rel_path, role)
+    if boundary_violation is not None:
+        return Surface(
+            root=root,
+            rel_path=rel_path,
+            role=role,
+            required=required,
+            path=path,
+            exists=path.exists() or path.is_symlink(),
+            read_error=boundary_violation.message,
+            memory_route=route.route_id,
+            memory_route_target=route.target,
+            memory_route_authority=route.authority,
+        )
+    return Surface(
+        root=root,
+        rel_path=rel_path,
+        role=role,
+        required=required,
+        path=path,
+        exists=True,
+        memory_route=route.route_id,
+        memory_route_target=route.target,
+        memory_route_authority=route.authority,
+    )
+
+
+def _add_optional_glob(root: Path, surfaces: dict[str, Surface], pattern: str, role: str, *, path_only: bool = False) -> None:
     for path in sorted(root.glob(pattern)):
         if not path.is_file():
             continue
         rel_path = path.relative_to(root).as_posix()
         if rel_path in surfaces:
             continue
-        surfaces[rel_path] = _read_surface(root, rel_path, role, False, path)
+        surfaces[rel_path] = (
+            _read_path_only_surface(root, rel_path, role, False, path)
+            if path_only
+            else _read_surface(root, rel_path, role, False, path)
+        )

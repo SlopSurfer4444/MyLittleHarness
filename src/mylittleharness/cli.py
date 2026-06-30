@@ -533,6 +533,12 @@ def _has_error_finding(findings: list[Finding]) -> bool:
 
 
 
+def _inventory_profile_for_args(args: argparse.Namespace) -> str:
+    if args.command == "check" and bool(getattr(args, "quick", False)):
+        return "quick"
+    return "full"
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = _normalize_argv(argv)
     parser = build_parser()
@@ -586,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
 
     root = Path(args.root or ".").expanduser()
     try:
-        inventory = load_for_root(root)
+        inventory = load_for_root(root, profile=_inventory_profile_for_args(args))
     except RootLoadError as exc:
         emit_text(f"mylittleharness: {exc}", stream=sys.stderr)
         return 2
@@ -2769,7 +2775,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         )
         return "check --quick", [*sections, ("Boundary", boundary_section)]
 
-    if getattr(args, "quick", False) and getattr(args, "json", False):
+    if getattr(args, "quick", False):
         sections = [
             ("Status", status_findings(inventory)),
             ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
@@ -2781,9 +2787,9 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         boundary_section.append(
             Finding(
                 "info",
-                "check-quick-json-bounded-evidence-scan",
+                "check-quick-bounded-evidence-scan",
                 (
-                    "check --quick --json uses a bounded evidence posture and omits heavyweight agent-run, "
+                    "check --quick uses a bounded evidence posture and omits heavyweight agent-run, "
                     "receipt, handoff, work-claim, coordination-identity, retention, and drift scans; use "
                     "check --focus agents or check --deep for full evidence validation before lifecycle, archive, "
                     "staging, commit, push, or release decisions"
@@ -3047,6 +3053,19 @@ def _with_projection_cache_dirty_findings(command: str, args: object, inventory:
     result = [*findings, *mark_projection_cache_dirty(inventory, changed_paths, f"{command} --apply")]
     if not changed_paths or not _existing_context_memory_capsule(inventory):
         return result
+    if command == "evidence":
+        return [
+            *result,
+            Finding(
+                "info",
+                "context-memory-capsule-refresh-deferred",
+                (
+                    "generated context capsule refresh was deferred after evidence --apply so the route write can finish promptly; "
+                    f"repo-visible evidence is authoritative and the next safe refresh command is {_context_memory_recovery_command(inventory)}"
+                ),
+                CONTEXT_MEMORY_DIR_REL,
+            ),
+        ]
     return [*result, *_refresh_context_memory_after_apply(command, inventory)]
 
 

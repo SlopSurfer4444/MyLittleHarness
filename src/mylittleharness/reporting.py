@@ -333,6 +333,10 @@ def render_quick_check_report(
     blocking_warnings = _blocking_warnings(warnings)
     known_environment_warnings = [finding for finding in warnings if _is_known_environment_warning(finding)]
     actionable = [finding for finding in flat_findings if finding.severity in {"error", "warn"}]
+    bounded_evidence = next(
+        (finding for finding in flat_findings if finding.code == "check-quick-bounded-evidence-scan"),
+        None,
+    )
     posture_findings = [
         finding
         for finding in flat_findings
@@ -353,6 +357,8 @@ def render_quick_check_report(
     )
     lines.append(f"- sections: {len(sections)} checked")
     lines.append(f"- source_inventory_hidden: {len(sources)} inventory source(s); rerun without --quick for the full source list")
+    if bounded_evidence is not None:
+        lines.append(f"- evidence_heavy_scans_hidden: {bounded_evidence.message}")
     lines.append("")
 
     lines.append("Dirty Route Summary")
