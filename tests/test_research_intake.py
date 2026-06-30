@@ -122,7 +122,7 @@ class ResearchIntakeTests(unittest.TestCase):
             rendered = "\n".join(finding.render() for finding in findings)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("research-import-refused", rendered)
-            self.assertIn("--source-member source_members must point to an attachment, draft, incubation, research, or verification route", rendered)
+            self.assertIn("--source-member source_members must point to route-level source evidence, not decision or ADR artifacts", rendered)
             self.assertFalse((root / "project/research/invalid-source-member.md").exists())
 
     def test_research_import_dry_run_uses_route_metadata_source_member_guidance_without_writes(self) -> None:
@@ -177,7 +177,7 @@ class ResearchIntakeTests(unittest.TestCase):
             rendered = "\n".join(finding.render() for finding in findings)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("research-import-refused", rendered)
-            self.assertIn("--source-member source_members must point to an attachment, draft, incubation, research, or verification route", rendered)
+            self.assertIn("--source-member source_members must point to route-level source evidence, not nested verification receipt JSON", rendered)
 
     def test_apply_from_attachment_writes_research_handoff_with_attachment_source_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -8364,6 +8364,8 @@ def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
             or "do not approve" in content
             or "do not grant" in content
             or "cannot" in content
+            or "must not be cited as approval" in content
+            or "must not be cited" in content
         )
         and ("lifecycle" in content or "roadmap" in content)
         and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
@@ -8373,7 +8375,16 @@ def _route_evidence_text_has_non_authority_boundary(text: str) -> bool:
         and ("lifecycle" in content or "roadmap" in content)
         and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
     )
-    return explicit_non_authority or no_automatic_boundary
+    denied_decisions_boundary = (
+        (
+            "forbidden_decisions_not_taken" in content
+            or "forbidden decisions not taken" in content
+            or "forbidden_decisions" in content
+        )
+        and ("lifecycle" in content or "roadmap" in content)
+        and ("git" in content or "stage" in content or "staging" in content or "commit" in content)
+    )
+    return explicit_non_authority or no_automatic_boundary or denied_decisions_boundary
 
 
 def _route_evidence_text_has_safe_release_boundary(text: str) -> bool:
@@ -9232,11 +9243,11 @@ def _is_reviewed_top_level_verification_checkpoint_text(
         return False
     if _verification_checkpoint_has_invalid_source_member(inventory, data):
         return False
-    if _route_evidence_text_has_safe_release_boundary(text):
-        if str(data.get("route") or "").strip().casefold() != "verification":
-            return False
-        return _verification_checkpoint_has_reviewed_route_source_members(inventory, data)
-    return _route_evidence_text_has_non_authority_boundary(text)
+    if str(data.get("route") or "").strip().casefold() != "verification":
+        return False
+    if not _verification_checkpoint_has_reviewed_route_source_members(inventory, data):
+        return False
+    return _route_evidence_text_has_safe_release_boundary(text) or _route_evidence_text_has_non_authority_boundary(text)
 
 
 def _verification_checkpoint_has_reviewed_archive_or_retained_source_members(

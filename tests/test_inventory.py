@@ -227,7 +227,7 @@ class InventoryTests(unittest.TestCase):
                 any(
                     finding.source == "project/research/bad.md"
                     and finding.code == "route-metadata-destination"
-                    and "source_members must point to an attachment, draft, incubation, research, or verification route" in finding.message
+                    and "source_members must point to route-level source evidence, not decision or ADR artifacts" in finding.message
                     for finding in warnings
                 )
             )

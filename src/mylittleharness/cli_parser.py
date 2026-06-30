@@ -373,7 +373,16 @@ def build_parser() -> argparse.ArgumentParser:
     intake.add_argument("--title", help="Optional Markdown title for the applied intake note.")
     intake.add_argument("--status", choices=("pending", "passed", "failed", "partial", "partially-verified", "archived"), help="Explicit status for verification intake frontmatter.")
     intake.add_argument("--related-plan", dest="related_plan", help="Verification metadata related_plan route; use 'current' to bind the active plan.")
-    intake.add_argument("--source-member", dest="source_members", action="append", default=[], help="Verification metadata source_members route. May be repeated.")
+    intake.add_argument(
+        "--source-member",
+        dest="source_members",
+        action="append",
+        default=[],
+        help=(
+            "Route-owned source/evidence anchor for source_members, such as research, incubation, attachment, draft, "
+            "or top-level verification Markdown. Not nested receipt JSON, decisions, code, tests, or raw output. May be repeated."
+        ),
+    )
     intake.add_argument(
         "--update-existing-metadata",
         action="store_true",

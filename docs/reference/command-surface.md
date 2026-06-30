@@ -70,11 +70,14 @@ Roadmap relationship fields use a narrow vocabulary. `source_incubation` and
 `related_incubation` point to incubation routes, `source_research` points to
 research routes, `source_members` points to draft, incubation, research,
 verification, or attachment evidence routes, and `related_plan`/`archived_plan`
-point to implementation plans. Generated `output/...` paths belong in
-`output_refs` on agent-run or verification evidence, or must first be imported
-or adopted through a route such as `research-import`, `research-distill`,
-`attachment-import`, or evidence recording. Product source and test paths belong
-in `target_artifacts` and verification commands, not source relationship fields.
+point to implementation plans. For verification, cite route-level anchors such
+as `project/verification/*.md`; nested receipts under `agent-runs`, `handoffs`,
+`approval-packets`, or `work-claims` stay in note bodies, source hashes, or
+`output_refs`. Generated `output/...` paths belong in `output_refs` on
+agent-run or verification evidence, or must first be imported or adopted through
+a route such as `research-import`, `research-distill`, `attachment-import`, or
+evidence recording. Product source and test paths belong in `target_artifacts`
+and verification commands, not source relationship fields.
 `evidence --record`
 accepts ordinary root-relative refs and, when `product_source_root` is
 configured, `product-source:<relative-path>` refs for product-source files in

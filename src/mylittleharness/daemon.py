@@ -40,6 +40,7 @@ MLHD_STATE_FILE_NAME = "state.json"
 MLHD_EVENTS_FILE_NAME = "events.jsonl"
 MLHD_LAST_RUN_ONCE_FILE_NAME = "last-run-once.json"
 MLHD_PROJECTION_REFRESH_FILE_NAME = "projection-refresh.json"
+MLHD_WORKER_TIMEOUT_FILE_NAME = "worker-timeout.json"
 MLHD_AUTOSTART_SCHEMA = "mylittleharness.mlhd-autostart.v1"
 MLHD_AUTOSTART_FILE_NAME = "autostart.json"
 MLHD_MANAGED_RUNTIME_FILE_NAMES = (
@@ -50,6 +51,7 @@ MLHD_MANAGED_RUNTIME_FILE_NAMES = (
     MLHD_EVENTS_FILE_NAME,
     MLHD_LAST_RUN_ONCE_FILE_NAME,
     MLHD_PROJECTION_REFRESH_FILE_NAME,
+    MLHD_WORKER_TIMEOUT_FILE_NAME,
     MLHD_AUTOSTART_FILE_NAME,
 )
 MLHD_PROJECTION_QUIET_PERIOD_SECONDS = 1.0
@@ -64,6 +66,7 @@ MLHD_RUN_ONCE_POST_TIMEOUT_RECIPE = (
     "after a shell timeout, inspect mlhd status/dashboard/check first; do not start another run-once until the "
     "bounded outcome marker is completed or interrupted and projection freshness still needs refresh"
 )
+MLHD_WORKER_RUN_ONCE_TIMEOUT_SECONDS = 600.0
 _MLHD_WORKER_LOOP_CODE = "\n".join(
     [
         "import json, os, subprocess, sys, time",
@@ -71,9 +74,11 @@ _MLHD_WORKER_LOOP_CODE = "\n".join(
         "root = Path(sys.argv[1])",
         "interval_seconds = float(sys.argv[2])",
         "quiet_period_seconds = sys.argv[3]",
+        "timeout_seconds = float(sys.argv[4])",
         "runtime_dir = root / '.mylittleharness' / 'runtime' / 'mlhd'",
         "pid_path = runtime_dir / 'pid.json'",
         "lock_path = runtime_dir / 'lock.json'",
+        "timeout_path = runtime_dir / 'worker-timeout.json'",
         "for _ in range(50):",
         "    if lock_path.exists() and pid_path.exists():",
         "        break",
@@ -89,7 +94,12 @@ _MLHD_WORKER_LOOP_CODE = "\n".join(
         "while True:",
         "    if not lock_path.exists() or not pid_path.exists():",
         "        break",
-        "    subprocess.run(runner, **run_kwargs)",
+        "    try:",
+        "        subprocess.run(runner, timeout=timeout_seconds, **run_kwargs)",
+        "    except subprocess.TimeoutExpired:",
+        "        runtime_dir.mkdir(parents=True, exist_ok=True)",
+        "        payload = {'schema': 'mylittleharness.mlhd-control-plane.v1', 'status': 'timed-out', 'last_action': 'run-once', 'timeout_seconds': timeout_seconds, 'updated_at_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'authority': 'disposable mlhd worker diagnostic only; inspect mlhd status before retrying'}",
+        "        timeout_path.write_text(json.dumps(payload, sort_keys=True) + '\\n', encoding='utf-8')",
         "    time.sleep(interval_seconds)",
     ]
 )
@@ -859,6 +869,7 @@ def _mlhd_worker_command(root: Path, *, quiet_period_seconds: float) -> list[str
         str(root),
         f"{MLHD_WORKER_INTERVAL_SECONDS:g}",
         f"{quiet_period_seconds:g}",
+        f"{MLHD_WORKER_RUN_ONCE_TIMEOUT_SECONDS:g}",
     ]
 
 
@@ -870,6 +881,7 @@ def _mlhd_worker_command_template(*, quiet_period_seconds: float) -> list[str]:
         "<root>",
         f"{MLHD_WORKER_INTERVAL_SECONDS:g}",
         f"{quiet_period_seconds:g}",
+        f"{MLHD_WORKER_RUN_ONCE_TIMEOUT_SECONDS:g}",
     ]
 
 

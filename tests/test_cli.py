@@ -5758,11 +5758,40 @@ class CliTests(unittest.TestCase):
 
     def test_intake_apply_refuses_unsafe_verification_metadata_paths(self) -> None:
         cases = (
-            ("--related-plan", "../outside.md"),
-            ("--source-member", "C:/outside.md"),
-            ("--source-member", "project/decisions/downstream-decision.md"),
+            ("--related-plan", "../outside.md", ""),
+            ("--source-member", "C:/outside.md", ""),
+            (
+                "--source-member",
+                "project/decisions/downstream-decision.md",
+                "source_members must point to route-level source evidence, not decision or ADR artifacts",
+            ),
+            (
+                "--source-member",
+                "project/verification/agent-runs/receipt.json",
+                "source_members must point to route-level source evidence, not nested verification receipt JSON",
+            ),
+            (
+                "--source-member",
+                "project/verification/handoffs/handoff.json",
+                "source_members must point to route-level source evidence, not nested verification receipt JSON",
+            ),
+            (
+                "--source-member",
+                "project/verification/approval-packets/decision.json",
+                "source_members must point to route-level source evidence, not nested verification receipt JSON",
+            ),
+            (
+                "--source-member",
+                "project/verification/work-claims/claim.json",
+                "source_members must point to route-level source evidence, not nested verification receipt JSON",
+            ),
+            (
+                "--source-member",
+                "src/mylittleharness/hooks.py",
+                "source_members must point to route-level source evidence, not code, test, or product-doc paths",
+            ),
         )
-        for flag, value in cases:
+        for flag, value, expected in cases:
             with self.subTest(flag=flag):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = make_live_root(Path(tmp))
@@ -5787,8 +5816,8 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(code, 2)
                     self.assertEqual(before, snapshot_tree(root))
                     self.assertIn("intake-refused", output.getvalue())
-                    if value.startswith("project/decisions/"):
-                        self.assertIn("source_members must point to an attachment, draft, incubation, research, or verification route", output.getvalue())
+                    if expected:
+                        self.assertIn(expected, output.getvalue())
 
     def test_intake_apply_accepts_research_prompt_feature_idea_into_live_incubation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11914,7 +11943,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("-c", popen_args)
             worker_loop_code = popen_args[2]
             self.assertIn("CREATE_NO_WINDOW", worker_loop_code)
-            self.assertIn("subprocess.run(runner, **run_kwargs)", worker_loop_code)
+            self.assertIn("subprocess.run(runner, timeout=timeout_seconds, **run_kwargs)", worker_loop_code)
+            self.assertIn("worker-timeout.json", worker_loop_code)
             popen_kwargs = popen.call_args.kwargs
             if os.name == "nt":
                 self.assertIn("creationflags", popen_kwargs)
@@ -11935,7 +11965,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(worker.pid, pid_payload["pid"])
             state_payload = json.loads((runtime_dir / "state.json").read_text(encoding="utf-8"))
             self.assertEqual("running", state_payload["status"])
-            self.assertEqual(["<python>", "-c", "<mlhd-background-generated-freshness-loop>", "<root>", "2", "1"], state_payload["worker_command_template"])
+            self.assertEqual(["<python>", "-c", "<mlhd-background-generated-freshness-loop>", "<root>", "2", "1", "600"], state_payload["worker_command_template"])
 
             status_json = io.StringIO()
             with redirect_stdout(status_json):
@@ -19552,7 +19582,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("research-import-refused", rendered)
-            self.assertIn("source_members must point to an attachment, draft, incubation, research, or verification route", rendered)
+            self.assertIn("source_members must point to route-level source evidence, not decision or ADR artifacts", rendered)
 
     def test_research_import_adopt_existing_apply_writes_route_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -36970,17 +37000,34 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             reviewed_rel = "project/verification/reviewed-checkpoint.md"
+            reviewed_source_rel = "project/verification/reviewed-checkpoint-source.md"
             symphony_rel = "project/verification/symphony-live-multirole-no-write-dogfood-2026-06-21.md"
+            symphony_design_rel = "project/verification/symphony-provider-cliproxy-readiness-design.md"
+            symphony_smoke_rel = "project/verification/openai-sdk-live-planner-queue-smoke.md"
             malformed_rel = "project/verification/malformed-checkpoint.md"
             authority_rel = "project/verification/authority-checkpoint.md"
             source_rel = "src/work.py"
             (root / reviewed_rel).parent.mkdir(parents=True, exist_ok=True)
             (root / source_rel).parent.mkdir(parents=True, exist_ok=True)
             (root / source_rel).write_text("print('ok')\n", encoding="utf-8")
+            for rel in (reviewed_source_rel, symphony_design_rel, symphony_smoke_rel):
+                (root / rel).write_text(
+                    "---\n"
+                    'route: "verification"\n'
+                    'status: "passed"\n'
+                    "---\n"
+                    f"# {Path(rel).stem}\n\n"
+                    "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                    "release, provider routing, or source-truth decisions.\n",
+                    encoding="utf-8",
+                )
             (root / reviewed_rel).write_text(
                 "---\n"
                 'title: "Reviewed checkpoint"\n'
                 'status: "passed"\n'
+                'route: "verification"\n'
+                "source_members:\n"
+                f'  - "{reviewed_source_rel}"\n'
                 'docs_decision: "not-needed"\n'
                 'authority: "evidence only; does not approve lifecycle, archive, roadmap, staging, commit, push, or release"\n'
                 "---\n"
@@ -37067,6 +37114,22 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", adapter_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", adapter_codes)
 
+            direct_adapter_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": f"git -C {root} add -- {hook_script_rel} {provider_smoke_rel} {cliproxy_rel}",
+                    }
+                ),
+            )
+            direct_adapter_codes = {finding["code"] for finding in direct_adapter_payload["findings"]}
+            self.assertFalse(direct_adapter_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", direct_adapter_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", direct_adapter_codes)
+
             adapter_blocked_cases = {
                 "broad": f"git add -- {hook_config_rel} project/verification",
                 "mixed-source": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {source_rel}",
@@ -37134,9 +37197,14 @@ class CliTests(unittest.TestCase):
             incubation_rel = "project/plan-incubation/handoff-accepted-packet-route-alias-normalization-gap.md"
             retained_verification_rel = "project/verification/bug-hunt-roadmap-coverage.md"
             standing_delegation_rel = "project/decisions/standing-delegations/symphony-local-dogfood.json"
+            provider_preflight_rel = "project/verification/symphony-provider-preflight-readiness-gate.md"
+            provider_design_rel = "project/verification/symphony-provider-cliproxy-readiness-design.md"
+            timeout_diagnostics_rel = "project/verification/symphony-test-timeout-receipt-diagnostics.md"
+            hook_hotfix_rel = "project/verification/symphony-mlh-hook-verification-checkpoint-staging-hotfix-2026-06-21.md"
             provider_smoke_rel = "project/verification/standing-delegation-provider-approved-smoke-2026-06-29.md"
             cliproxy_rel = "project/verification/cliproxy-provider-timeout-diagnostic-2026-06-29.md"
             provider_unreviewed_rel = "project/verification/provider-smoke-unreviewed-source.md"
+            missing_source_members_rel = "project/verification/missing-source-members.md"
             unreviewed_rel = "project/verification/unreviewed.md"
             raw_prompt_rel = "project/verification/raw-prompt-like.md"
             hook_config_rel = ".codex/hooks.json"
@@ -37148,9 +37216,14 @@ class CliTests(unittest.TestCase):
                 incubation_rel,
                 retained_verification_rel,
                 standing_delegation_rel,
+                provider_preflight_rel,
+                provider_design_rel,
+                timeout_diagnostics_rel,
+                hook_hotfix_rel,
                 provider_smoke_rel,
                 cliproxy_rel,
                 provider_unreviewed_rel,
+                missing_source_members_rel,
                 unreviewed_rel,
                 raw_prompt_rel,
                 hook_config_rel,
@@ -37208,6 +37281,51 @@ class CliTests(unittest.TestCase):
                 "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, or release decisions.\n",
                 encoding="utf-8",
             )
+            (root / provider_preflight_rel).write_text(
+                "---\n"
+                'route: "verification"\n'
+                'status: "passed"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Provider preflight readiness gate\n\n"
+                "forbidden_decisions_not_taken includes lifecycle, roadmap, archive, Git, provider routing, "
+                "credential approval, provider gateway setup, cliproxy setup, live provider dogfood, "
+                "target-repo acceptance, and self approval.\n",
+                encoding="utf-8",
+            )
+            (root / provider_design_rel).write_text(
+                "---\n"
+                'route: "verification"\n'
+                'status: "partial"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Cliproxy readiness design\n\n"
+                "This route did not and must not be cited as approval for lifecycle, Git staging, commit, "
+                "roadmap, archive, push, release, or provider routing decisions.\n",
+                encoding="utf-8",
+            )
+            (root / timeout_diagnostics_rel).write_text(
+                "---\n"
+                'route: "verification"\n'
+                'status: "partial"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Timeout receipt diagnostics\n\n"
+                "This diagnostic cannot approve MLH lifecycle movement, roadmap status, verification acceptance, "
+                "archive, closeout, staging, commit, push, release, provider routing, or source-truth decisions.\n",
+                encoding="utf-8",
+            )
+            (root / hook_hotfix_rel).write_text(
+                "---\n"
+                'route: "verification"\n'
+                'status: "passed"\n'
+                'intake_source: "--text-file -"\n'
+                "---\n"
+                "# Hook checkpoint staging hotfix\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                "release, provider routing, or source-truth decisions.\n",
+                encoding="utf-8",
+            )
             (root / target_rel).write_text(
                 "---\n"
                 'title: "MLH Warning Zero Reconciliation"\n'
@@ -37233,7 +37351,9 @@ class CliTests(unittest.TestCase):
                 'route: "verification"\n'
                 'intake_source: "--text-file -"\n'
                 "source_members:\n"
-                f'  - "{standing_delegation_rel}"\n'
+                f'  - "{provider_preflight_rel}"\n'
+                f'  - "{provider_design_rel}"\n'
+                f'  - "{hook_hotfix_rel}"\n'
                 'related_plan: "project/archive/plans/2026-06-28-standing-delegation-policy-route.md"\n'
                 'docs_decision: "not-needed"\n'
                 "---\n"
@@ -37250,7 +37370,9 @@ class CliTests(unittest.TestCase):
                 'route: "verification"\n'
                 'intake_source: "--text-file -"\n'
                 "source_members:\n"
-                f'  - "{retained_verification_rel}"\n'
+                f'  - "{provider_preflight_rel}"\n'
+                f'  - "{provider_design_rel}"\n'
+                f'  - "{timeout_diagnostics_rel}"\n'
                 'related_plan: "project/archive/plans/2026-06-28-standing-delegation-policy-route.md"\n'
                 'docs_decision: "not-needed"\n'
                 "---\n"
@@ -37272,6 +37394,17 @@ class CliTests(unittest.TestCase):
                 "Evidence only; no push, tag, publish, artifact upload, or release claim follows from this "
                 "note. It does not approve lifecycle, Git staging, commit, roadmap, provider routing, or "
                 "source-truth decisions.\n",
+                encoding="utf-8",
+            )
+            (root / missing_source_members_rel).write_text(
+                "---\n"
+                'title: "Missing Source Members"\n'
+                'status: "partially-verified"\n'
+                'route: "verification"\n'
+                "---\n"
+                "# Missing Source Members\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                "release, or source-truth decisions.\n",
                 encoding="utf-8",
             )
             (root / unreviewed_rel).write_text(
@@ -37327,6 +37460,15 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", allowed_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", allowed_codes)
 
+            (root / hook_script_rel).write_text(render_codex_session_start_script() + "# hand edited\n", encoding="utf-8")
+            hand_edited_adapter_payload = wrapped_shell_payload(
+                f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel}"
+            )
+            hand_edited_adapter_codes = {finding["code"] for finding in hand_edited_adapter_payload["findings"]}
+            self.assertTrue(hand_edited_adapter_payload["block"])
+            self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", hand_edited_adapter_codes)
+            (root / hook_script_rel).write_text(render_codex_session_start_script(), encoding="utf-8")
+
             blocked_cases = {
                 "broad": "git add -- project/verification",
                 "mixed": f"git add -- {target_rel} {source_rel}",
@@ -37335,6 +37477,7 @@ class CliTests(unittest.TestCase):
                 "separator-push": f"git add -- {target_rel}; git push origin main",
                 "separator-tag": f"git add -- {target_rel}; git tag v1.0.0",
                 "provider-unreviewed-source": f"git add -- {provider_unreviewed_rel}",
+                "missing-source-members": f"git add -- {missing_source_members_rel}",
                 "unreviewed": f"git add -- {unreviewed_rel}",
             }
             for name, command in blocked_cases.items():
@@ -39576,8 +39719,21 @@ class CliTests(unittest.TestCase):
                 root
             )
             dogfood_rel = "project/verification/symphony-live-multirole-no-write-dogfood-2026-06-21.md"
+            design_rel = "project/verification/symphony-provider-cliproxy-readiness-design.md"
             hotfix_rel = "project/verification/symphony-mlh-hook-verification-checkpoint-staging-hotfix-2026-06-21.md"
             (root / dogfood_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / design_rel).write_text(
+                "---\n"
+                'title: "Symphony provider cliproxy readiness design"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "---\n"
+                "# Symphony provider cliproxy readiness design\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                "release, provider routing, or source-truth decisions.\n",
+                encoding="utf-8",
+            )
             (root / dogfood_rel).write_text(
                 "---\n"
                 'title: "Symphony live multi-role no-write dogfood"\n'
@@ -39585,7 +39741,7 @@ class CliTests(unittest.TestCase):
                 'route: "verification"\n'
                 f'related_plan: "{archive_rel}"\n'
                 "source_members:\n"
-                '  - "project/verification/symphony-provider-cliproxy-readiness-design.md"\n'
+                f'  - "{design_rel}"\n'
                 "---\n"
                 "# Symphony live multi-role no-write dogfood\n\n"
                 "Boundary: this proves the live provider-backed no-write conductor path. "
@@ -39664,7 +39820,22 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             evidence_rel = "project/verification/symphony-planner-no-write-proposal-scope-hardening-2026-06-21.md"
+            evidence_source_rel = "project/verification/symphony-planner-no-write-source-boundary.md"
             (root / evidence_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / evidence_source_rel).write_text(
+                "---\n"
+                'title: "Planner no-write source boundary"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "source_members:\n"
+                f'  - "{evidence_source_rel}"\n'
+                "---\n"
+                "# Planner no-write source boundary\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                "release, provider routing, target-repo acceptance, or source-truth decisions.\n",
+                encoding="utf-8",
+            )
             (root / evidence_rel).write_text(
                 "---\n"
                 'title: "Planner proposal scope hardening"\n'
@@ -39737,7 +39908,21 @@ class CliTests(unittest.TestCase):
             prior_archive_rel = "project/archive/plans/prior-reviewed-closeout.md"
             (root / prior_archive_rel).write_text((root / archive_rel).read_text(encoding="utf-8"), encoding="utf-8")
             dogfood_rel = "project/verification/symphony-live-multirole-no-write-dogfood-2026-06-21.md"
+            design_rel = "project/verification/symphony-provider-cliproxy-readiness-design.md"
             hotfix_rel = "project/verification/symphony-mlh-hook-verification-checkpoint-staging-hotfix-2026-06-21.md"
+            (root / design_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / design_rel).write_text(
+                "---\n"
+                'title: "Symphony provider cliproxy readiness design"\n'
+                'status: "passed"\n'
+                'route: "verification"\n'
+                f'related_plan: "{archive_rel}"\n'
+                "---\n"
+                "# Symphony provider cliproxy readiness design\n\n"
+                "Evidence only; this does not approve lifecycle, Git staging, commit, roadmap, archive, push, "
+                "release, provider routing, or source-truth decisions.\n",
+                encoding="utf-8",
+            )
             for rel, body in (
                 (
                     dogfood_rel,
@@ -39752,6 +39937,7 @@ class CliTests(unittest.TestCase):
                     "policy, target-repo acceptance, or public publication.\n",
                 ),
             ):
+                source_member_rel = design_rel if rel == dogfood_rel else dogfood_rel
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text(
                     "---\n"
@@ -39759,6 +39945,8 @@ class CliTests(unittest.TestCase):
                     'status: "passed"\n'
                     'route: "verification"\n'
                     f'related_plan: "{archive_rel}"\n'
+                    "source_members:\n"
+                    f'  - "{source_member_rel}"\n'
                     "---\n"
                     f"# {Path(rel).stem}\n\n"
                     + body,

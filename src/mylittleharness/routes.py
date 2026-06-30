@@ -546,13 +546,45 @@ def route_destination_problem(field: str, rel_path: str, *, owner_route_id: str 
     if policy is None or route_destination_matches(policy, rel_path):
         return None
     normalized = normalize_route_path(rel_path)
-    if key == "source_members" and normalized.casefold().startswith("output/"):
+    if key == "source_members":
+        source_members_problem = _source_members_destination_problem(normalized)
+        if source_members_problem:
+            return source_members_problem
+    return f"{key} must point to {policy.label}: {normalized}"
+
+
+def _source_members_destination_problem(normalized: str) -> str:
+    lowered = normalized.casefold()
+    if lowered.startswith("output/"):
         return (
             "source_members must point to route-owned source evidence, not raw generated output; "
             "use output_refs on agent-run/verification evidence, or import the artifact under "
             f"project/verification or project/attachments before referencing it: {normalized}"
         )
-    return f"{key} must point to {policy.label}: {normalized}"
+    nested_verification_prefixes = (
+        "project/verification/agent-runs/",
+        "project/verification/approval-packets/",
+        "project/verification/handoffs/",
+        "project/verification/work-claims/",
+        "project/verification/worker-run-receipts/",
+    )
+    if lowered.startswith(nested_verification_prefixes):
+        return (
+            "source_members must point to route-level source evidence, not nested verification receipt JSON; "
+            "use a top-level project/verification/*.md anchor, or preserve nested receipts in the note body, "
+            f"source hashes, or output_refs: {normalized}"
+        )
+    if lowered.startswith(("project/decisions/", "project/adrs/")):
+        return (
+            "source_members must point to route-level source evidence, not decision or ADR artifacts; "
+            f"cite decisions in the note body or route-specific relationship fields when that route owns them: {normalized}"
+        )
+    if lowered.startswith(("src/", "tests/", "docs/")):
+        return (
+            "source_members must point to route-level source evidence, not code, test, or product-doc paths; "
+            f"use target_artifacts, verification commands, or prose anchors for implementation files: {normalized}"
+        )
+    return ""
 
 
 def _known_doc_target_alternates(rel: str) -> tuple[str, ...]:
