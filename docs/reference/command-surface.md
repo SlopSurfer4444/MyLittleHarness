@@ -30,6 +30,10 @@ The top-level help also points operators at
 human-gate decision must be prepared or recorded. That route remains advanced
 and evidence-bound: it does not waive human authority or approve lifecycle,
 accepted-work, provider, credential, archive, Git, or release actions.
+It also points to `mylittleharness standing-delegation --help` for bounded
+standing autonomy policies. Those records describe a green corridor for later
+explicit route consumption only; they do not approve protected owner boundaries
+by themselves.
 
 ## Recovery and Lifecycle Commands
 
@@ -45,6 +49,7 @@ accepted-work, provider, credential, archive, Git, or release actions.
 | `research-distill` | research distillate | yes | yes | writes reviewed synthesis with quality and planning gates |
 | `research-compare` | research comparison | yes | yes | writes reviewed comparison and optional source cleanup |
 | `approval-decision` | owner-decision evidence | yes | yes | writes one append-only owner-decision JSON bound to approval-packet refs by hash; does not itself approve lifecycle, accepted-work, provider routing, credentials, archive, staging, commit, rollback, or release |
+| `standing-delegation` | autonomy policy evidence | yes | yes | writes one append-only standing-delegation JSON with scope roots, allowed routine actions, expiration/revocation posture, owner attestation, and hard human boundaries; later routes must consume it explicitly |
 | `evidence --receipt-refresh` | evidence maintenance | yes | yes plus proposal token | refreshes `source_hashes` only for an existing worker-run receipt JSON |
 | `evidence --retarget-ref` | evidence maintenance | yes | yes plus proposal token | retargets scoped provenance refs in existing route-owned evidence |
 | `incubate` | future idea/fix-candidate capture | yes | yes | writes non-authority incubation notes |

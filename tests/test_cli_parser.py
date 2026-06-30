@@ -18,9 +18,11 @@ class CliParserTests(unittest.TestCase):
         for command in ("init", "check", "repair", "detach"):
             self.assertIn(command, help_text)
         self.assertIn("mylittleharness approval-decision --help", normalized_help)
+        self.assertIn("mylittleharness standing-delegation --help", normalized_help)
         self.assertIn("does not waive human authority", normalized_help)
         self.assertIn("approve lifecycle", normalized_help)
         self.assertIn("provider, credential, archive, Git, or release", normalized_help)
+        self.assertIn("never grants protected owner boundaries by itself", normalized_help)
         for hidden_command in ("roadmap", "memory-hygiene", "suggest"):
             self.assertNotIn(hidden_command, help_text)
 
@@ -28,6 +30,7 @@ class CliParserTests(unittest.TestCase):
         subparser_action = next(action for action in parser._actions if hasattr(action, "_choices_actions"))
         choice_actions = {action.dest: action.help for action in subparser_action._choices_actions}
         self.assertNotIn("approval-decision", choice_actions)
+        self.assertNotIn("standing-delegation", choice_actions)
 
     def test_hidden_suggest_command_still_parses_with_positive_limit(self) -> None:
         parser = build_parser()

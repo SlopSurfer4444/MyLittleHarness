@@ -45066,6 +45066,169 @@ class CliTests(unittest.TestCase):
                     self.assertIn(expected, rendered)
                     self.assertFalse((root / "project/decisions/owner-decisions/bad-decision.json").exists())
 
+    def test_standing_delegation_records_policy_without_approving_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            args = [
+                "--root",
+                str(root),
+                "standing-delegation",
+                "--policy-id",
+                "symphony-safe-slices",
+                "--owner-id",
+                "owner-operator",
+                "--delegation-intent",
+                "Allow bounded Symphony conveyor slices through later MLH dry-run apply routes",
+                "--scope-root",
+                "product-source/src/mylittleharness",
+                "--scope-root",
+                "project/verification",
+                "--allowed-action",
+                "bounded-slice-selection",
+                "--allowed-action",
+                "plan-opening",
+                "--allowed-action",
+                "scoped-product-edits",
+                "--allowed-action",
+                "verification",
+                "--allowed-action",
+                "evidence-writing",
+                "--allowed-action",
+                "writeback-when-legal",
+                "--allowed-action",
+                "archive-when-legal",
+                "--allowed-action",
+                "exact-local-commit",
+                "--allowed-action",
+                "reassessment",
+                "--allowed-action",
+                "continuation",
+                "--forbidden-action",
+                "provider-routing-approval",
+                "--forbidden-action",
+                "policy-changes",
+                "--expires-at",
+                "2099-01-01T00:00:00Z",
+                "--revocation-posture",
+                "owner may supersede this policy with a later explicit standing-delegation route",
+                "--owner-attestation",
+                "owner reviewed standing autonomy boundaries outside this agent conversation",
+                "--notes",
+                "does not approve H10, push, tag, release, or publication",
+            ]
+
+            before = snapshot_tree(root)
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main([*args, "--dry-run"])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("standing-delegation-target", dry_rendered)
+            self.assertIn("standing-delegation-boundary", dry_rendered)
+            self.assertIn("standing-delegation dry-run reported the policy target", dry_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main([*args, "--apply"])
+            apply_rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            self.assertIn("standing-delegation-written", apply_rendered)
+            policy_path = root / "project/decisions/standing-delegations/symphony-safe-slices.json"
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            self.assertEqual("mylittleharness.standing-delegation.v1", policy["schema"])
+            self.assertEqual("standing-delegation", policy["record_type"])
+            self.assertEqual("owner-operator", policy["owner_id"])
+            self.assertIn("bounded-slice-selection", policy["allowed_actions"])
+            self.assertIn("provider-routing-approval", policy["hard_human_boundaries"])
+            self.assertIn("policy-changes", policy["forbidden_actions"])
+            self.assertIn("later routes explicitly consume", policy["authority_boundary"])
+            self.assertIn("does not approve push, release, tag, publication", policy["non_authority"])
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check", "--focus", "agents"])
+            check_rendered = check_output.getvalue()
+            self.assertEqual(check_code, 0)
+            self.assertIn("check-agents-standing-delegation-record", check_rendered)
+            self.assertIn("later routes must consume this policy explicitly", check_rendered)
+
+    def test_standing_delegation_refuses_false_authority_inputs_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            base_args = [
+                "--root",
+                str(root),
+                "standing-delegation",
+                "--dry-run",
+                "--policy-id",
+                "bad-policy",
+                "--owner-id",
+                "owner-operator",
+                "--delegation-intent",
+                "Allow bounded conveyor slices through later MLH dry-run apply routes",
+                "--scope-root",
+                "project/verification",
+                "--allowed-action",
+                "verification",
+                "--expires-at",
+                "2099-01-01T00:00:00Z",
+                "--owner-attestation",
+                "owner reviewed standing autonomy boundaries outside this agent conversation",
+            ]
+
+            def with_option(args: list[str], option: str, value: str) -> list[str]:
+                updated = list(args)
+                updated[updated.index(option) + 1] = value
+                return updated
+
+            cases = [
+                (
+                    [item for item in base_args if item not in {"--owner-id", "owner-operator"}],
+                    "--owner-id is required",
+                ),
+                (
+                    with_option(base_args, "--owner-id", "sdk-runtime"),
+                    "--owner-id must identify a human or owner authority",
+                ),
+                (
+                    with_option(base_args, "--delegation-intent", "Use provider success as standing owner delegation"),
+                    "--delegation-intent cannot use provider, credential, session-active, SDK, runtime, or verifier success as standing owner delegation",
+                ),
+                (
+                    with_option(base_args, "--scope-root", "project/provider-routing"),
+                    "--scope-root cannot name provider, credential",
+                ),
+                (
+                    with_option(base_args, "--allowed-action", "release"),
+                    "--allowed-action cannot include hard human boundary: release",
+                ),
+                (
+                    with_option(base_args, "--allowed-action", "invent-route"),
+                    "--allowed-action must be one of",
+                ),
+                (
+                    with_option(base_args, "--expires-at", "2000-01-01T00:00:00Z"),
+                    "--expires-at must be in the future",
+                ),
+                (
+                    with_option(base_args, "--owner-attestation", "owner accepts SDK runtime success"),
+                    "--owner-attestation cannot rely on provider, credential",
+                ),
+            ]
+            for args, expected in cases:
+                with self.subTest(expected=expected):
+                    before = snapshot_tree(root)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(args)
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("standing-delegation-validation-posture", rendered)
+                    self.assertIn(expected, rendered)
+                    self.assertFalse((root / "project/decisions/standing-delegations/bad-policy.json").exists())
+
     def test_adapter_client_config_reports_default_active_mcp_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

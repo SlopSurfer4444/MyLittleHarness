@@ -62,7 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Compatibility and advanced diagnostics remain available for recovery and transition. "
             "Owner-decision route: run `mylittleharness approval-decision --help` to prepare or record "
             "an owner decision bound to reviewed human-gate refs; it does not waive human authority or "
-            "approve lifecycle, accepted-work, provider, credential, archive, Git, or release actions."
+            "approve lifecycle, accepted-work, provider, credential, archive, Git, or release actions. "
+            "Standing-delegation route: run `mylittleharness standing-delegation --help` to record a "
+            "bounded autonomy policy for later explicit route consumption; it never grants protected owner boundaries by itself."
         ),
     )
     parser.add_argument("--root", default=None, help="Target workflow root. Defaults to the current directory.")
@@ -317,6 +319,24 @@ def build_parser() -> argparse.ArgumentParser:
     approval_decision.add_argument("--follow-up-route", dest="follow_up_routes", action="append", default=[], help="Route expected to consume this decision later, such as transition or writeback. May be repeated.")
     approval_decision.add_argument("--owner-attestation", dest="owner_attestation", help="Owner attestation text for the reviewed decision.")
     approval_decision.add_argument("--notes", help="Optional owner-decision note.")
+    standing_delegation = subparsers.add_parser(
+        "standing-delegation",
+        help=argparse.SUPPRESS,
+        description="Advanced coordination helper: record bounded standing autonomy policies for later explicit route consumption.",
+    )
+    standing_delegation_mode = standing_delegation.add_mutually_exclusive_group(required=True)
+    standing_delegation_mode.add_argument("--dry-run", action="store_true", help="Preview a standing-delegation policy record without writing files.")
+    standing_delegation_mode.add_argument("--apply", action="store_true", help="Write one repo-visible standing-delegation policy record in an eligible live operating root.")
+    standing_delegation.add_argument("--policy-id", dest="policy_id", help="Stable policy id used as the JSON filename under project/decisions/standing-delegations/.")
+    standing_delegation.add_argument("--owner-id", dest="owner_id", help="Human owner identity responsible for the standing delegation.")
+    standing_delegation.add_argument("--delegation-intent", dest="delegation_intent", help="Plain-language autonomy corridor intent. Must not rely on SDK/session/provider success as approval.")
+    standing_delegation.add_argument("--scope-root", dest="scope_roots", action="append", default=[], help="Root-relative scope root covered by this policy. May be repeated.")
+    standing_delegation.add_argument("--allowed-action", dest="allowed_actions", action="append", default=[], help="Allowed routine autonomous action. May be repeated.")
+    standing_delegation.add_argument("--forbidden-action", dest="forbidden_actions", action="append", default=[], help="Additional protected action that remains outside the green corridor. May be repeated.")
+    standing_delegation.add_argument("--expires-at", dest="expires_at", help="UTC expiration timestamp in YYYY-MM-DDTHH:MM:SSZ format.")
+    standing_delegation.add_argument("--revocation-posture", dest="revocation_posture", help="How the owner may revoke or supersede this standing delegation.")
+    standing_delegation.add_argument("--owner-attestation", dest="owner_attestation", help="Owner attestation text for the reviewed standing policy.")
+    standing_delegation.add_argument("--notes", help="Optional standing-delegation note.")
     review_token = subparsers.add_parser(
         "review-token",
         help=argparse.SUPPRESS,

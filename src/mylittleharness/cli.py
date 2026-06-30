@@ -31,6 +31,12 @@ from .approval_decisions import (
     approval_decision_status_findings,
     make_approval_decision_request,
 )
+from .standing_delegations import (
+    make_standing_delegation_request,
+    standing_delegation_apply_findings,
+    standing_delegation_dry_run_findings,
+    standing_delegation_status_findings,
+)
 from .attachments import (
     attachment_import_apply_findings,
     attachment_import_dry_run_findings,
@@ -277,6 +283,7 @@ COMMANDS = (
     "handoff",
     "approval-packet",
     "approval-decision",
+    "standing-delegation",
     "review-token",
     "reconcile",
     "closeout",
@@ -310,6 +317,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "handoff",
     "approval-packet",
     "approval-decision",
+    "standing-delegation",
     "incubate",
     "incubation-reconcile",
     "intake",
@@ -1065,6 +1073,14 @@ def main(argv: list[str] | None = None) -> int:
         request = make_approval_decision_request(args)
         report_name = "approval-decision --apply" if args.apply else "approval-decision --dry-run"
         findings = approval_decision_apply_findings(inventory, request) if args.apply else approval_decision_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "standing-delegation":
+        request = make_standing_delegation_request(args)
+        report_name = "standing-delegation --apply" if args.apply else "standing-delegation --dry-run"
+        findings = standing_delegation_apply_findings(inventory, request) if args.apply else standing_delegation_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -2709,6 +2725,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
                 lambda: [
                     *reconcile_findings(inventory, "check-agents"),
                     *approval_decision_status_findings(inventory, "check-agents-approval-decision"),
+                    *standing_delegation_status_findings(inventory, "check-agents-standing-delegation"),
                     *coordination_evidence_identity_findings(inventory, "check-agents-coordination-evidence"),
                 ],
             ),
@@ -2751,6 +2768,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         ("Work Claims", work_claim_status_findings(inventory, "check-work-claim")),
         ("Handoff Packets", handoff_packet_status_findings(inventory, "check-handoff-packet")),
         ("Approval Decisions", approval_decision_status_findings(inventory, "check-approval-decision")),
+        ("Standing Delegations", standing_delegation_status_findings(inventory, "check-standing-delegation")),
         ("Coordination Evidence", coordination_evidence_identity_findings(inventory, "check-coordination-evidence")),
         ("Projection Cache", projection_cache_findings),
         ("Drift", check_drift_findings(inventory)),
@@ -3166,7 +3184,7 @@ def _section_named(sections: list[tuple[str, list[Finding]]], name: str) -> tupl
 def _suggestions(command: str, findings) -> list[str]:
     errors = [finding for finding in findings if finding.severity == "error"]
     warnings = [finding for finding in findings if finding.severity == "warn"]
-    dry_run_refusal = "" if command in {"approval-packet", "approval-decision", "claim", "handoff", "task-session"} else _dry_run_refusal_suggestion(command, findings)
+    dry_run_refusal = "" if command in {"approval-packet", "approval-decision", "standing-delegation", "claim", "handoff", "task-session"} else _dry_run_refusal_suggestion(command, findings)
     if dry_run_refusal:
         return [dry_run_refusal]
     if command == "check":
@@ -3366,6 +3384,15 @@ def _suggestions(command: str, findings) -> list[str]:
         if is_dry_run:
             return ["approval-decision dry-run reported the decision target, packet bindings, owner identity, and authority boundary without writing files."]
         return ["approval-decision apply wrote one MLH-owned owner-decision record; later lifecycle, accepted-work, provider, credential, archive, staging, commit, and release routes still require explicit consumption and their own dry-run/apply guardrails."]
+    if command == "standing-delegation":
+        is_dry_run = any(finding.code == "standing-delegation-dry-run" for finding in findings)
+        if any(finding.severity == "error" for finding in findings):
+            if is_dry_run:
+                return ["standing-delegation dry-run was refused before any autonomy policy evidence was written."]
+            return ["standing-delegation apply was refused before any autonomy policy evidence was written."]
+        if is_dry_run:
+            return ["standing-delegation dry-run reported the policy target, owner identity, scope roots, allowed actions, expiration, and hard boundary wording without writing files."]
+        return ["standing-delegation apply wrote one MLH-owned autonomy policy record; later lifecycle, provider, credential, archive, staging, commit, push, tag, release, and publication routes still require explicit consumption and their own guardrails."]
     if command == "review-token":
         if any(finding.severity == "error" for finding in findings):
             return ["review-token refused before token trust; refresh inputs and recompute before fan-in or apply review."]
@@ -3695,6 +3722,7 @@ def _dry_run_refusal_suggestion(command: str, findings) -> str:
     subjects = {
         "approval-packet": "approval evidence",
         "approval-decision": "owner-decision evidence",
+        "standing-delegation": "autonomy policy evidence",
         "claim": "work-claim evidence",
         "handoff": "handoff packet",
         "incubate": "incubation note",

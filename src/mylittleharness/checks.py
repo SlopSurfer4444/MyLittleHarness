@@ -283,6 +283,8 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
             "claim --dry-run|--apply",
             "handoff --dry-run|--apply",
             "approval-packet --dry-run|--apply",
+            "approval-decision --dry-run|--apply",
+            "standing-delegation --dry-run|--apply",
             "meta-feedback --dry-run|--apply",
             "hooks adapter --dry-run|--apply",
             "adapter --install-client-config --dry-run|--apply",
