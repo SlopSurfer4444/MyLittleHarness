@@ -37105,63 +37105,6 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", symphony_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", symphony_codes)
 
-            provider_payload = hook_event_payload(
-                load_inventory(root),
-                HOOK_PRE_TOOL_USE,
-                [],
-                json.dumps({"toolName": "shell_command", "command": f"git add -- {provider_smoke_rel}"}),
-            )
-            provider_codes = {finding["code"] for finding in provider_payload["findings"]}
-            self.assertFalse(provider_payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", provider_codes)
-            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", provider_codes)
-            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", provider_codes)
-
-            adapter_payload = wrapped_shell_payload(
-                "git "
-                f"add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {cliproxy_rel}"
-            )
-            adapter_codes = {finding["code"] for finding in adapter_payload["findings"]}
-            self.assertFalse(adapter_payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", adapter_codes)
-            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", adapter_codes)
-            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", adapter_codes)
-
-            direct_adapter_payload = hook_event_payload(
-                load_inventory(root),
-                HOOK_PRE_TOOL_USE,
-                [],
-                json.dumps(
-                    {
-                        "toolName": "shell_command",
-                        "command": f"git -C {root} add -- {hook_script_rel} {provider_smoke_rel} {cliproxy_rel}",
-                    }
-                ),
-            )
-            direct_adapter_codes = {finding["code"] for finding in direct_adapter_payload["findings"]}
-            self.assertFalse(direct_adapter_payload["block"])
-            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", direct_adapter_codes)
-            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", direct_adapter_codes)
-
-            adapter_blocked_cases = {
-                "broad": f"git add -- {hook_config_rel} project/verification",
-                "mixed-source": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {source_rel}",
-                "separator": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel}; git commit -m checkpoint",
-                "unreviewed": f"git add -- {hook_config_rel} {hook_script_rel} {unreviewed_rel}",
-                "raw-prompt": f"git add -- {hook_config_rel} {hook_script_rel} {raw_prompt_rel}",
-            }
-            for name, command in adapter_blocked_cases.items():
-                with self.subTest(adapter=name):
-                    payload = wrapped_shell_payload(command)
-                    codes = {finding["code"] for finding in payload["findings"]}
-                    self.assertTrue(payload["block"])
-                    self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", codes)
-                    self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", codes)
-                    if name == "mixed-source":
-                        messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
-                        self.assertIn("exact verification checkpoint staging requires reviewed", messages)
-                        self.assertIn("generated MLH hook adapter files", messages)
-
             blocked_cases = {
                 "broad": f"git add -- project/verification",
                 "malformed": f"git add -- {malformed_rel}",
@@ -37472,6 +37415,63 @@ class CliTests(unittest.TestCase):
             self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", allowed_codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", allowed_codes)
             self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", allowed_codes)
+
+            provider_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps({"toolName": "shell_command", "command": f"git add -- {provider_smoke_rel}"}),
+            )
+            provider_codes = {finding["code"] for finding in provider_payload["findings"]}
+            self.assertFalse(provider_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", provider_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", provider_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", provider_codes)
+
+            adapter_payload = wrapped_shell_payload(
+                "git "
+                f"add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {cliproxy_rel}"
+            )
+            adapter_codes = {finding["code"] for finding in adapter_payload["findings"]}
+            self.assertFalse(adapter_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", adapter_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", adapter_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", adapter_codes)
+
+            direct_adapter_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": f"git -C {root} add -- {hook_script_rel} {provider_smoke_rel} {cliproxy_rel}",
+                    }
+                ),
+            )
+            direct_adapter_codes = {finding["code"] for finding in direct_adapter_payload["findings"]}
+            self.assertFalse(direct_adapter_payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", direct_adapter_codes)
+            self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", direct_adapter_codes)
+
+            adapter_blocked_cases = {
+                "broad": f"git add -- {hook_config_rel} project/verification",
+                "mixed-source": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel} {source_rel}",
+                "separator": f"git add -- {hook_config_rel} {hook_script_rel} {provider_smoke_rel}; git commit -m checkpoint",
+                "unreviewed": f"git add -- {hook_config_rel} {hook_script_rel} {unreviewed_rel}",
+                "raw-prompt": f"git add -- {hook_config_rel} {hook_script_rel} {raw_prompt_rel}",
+            }
+            for name, command in adapter_blocked_cases.items():
+                with self.subTest(adapter=name):
+                    payload = wrapped_shell_payload(command)
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    self.assertTrue(payload["block"])
+                    self.assertNotIn("hooks-policy-allow-post-closeout-lifecycle-route-staging", codes)
+                    self.assertNotIn("hooks-policy-allow-post-closeout-local-vcs-staging", codes)
+                    if name == "mixed-source":
+                        messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                        self.assertIn("exact verification checkpoint staging requires reviewed", messages)
+                        self.assertIn("generated MLH hook adapter files", messages)
 
             (root / hook_script_rel).write_text(render_codex_session_start_script() + "# hand edited\n", encoding="utf-8")
             hand_edited_adapter_payload = wrapped_shell_payload(
@@ -39896,6 +39896,8 @@ class CliTests(unittest.TestCase):
                 'status: "passed"\n'
                 'route: "verification"\n'
                 f'related_plan: "{archive_rel}"\n'
+                "source_members:\n"
+                f'  - "{evidence_source_rel}"\n'
                 "---\n"
                 "# Planner proposal scope hardening\n\n"
                 "Boundary: this verification is evidence only. It cannot approve lifecycle "
