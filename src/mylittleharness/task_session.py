@@ -24,6 +24,11 @@ from .lifecycle_focus import session_active_work_findings
 from .models import Finding
 from .roadmap import roadmap_items_for_diagnostics
 from .root_boundary import record_id_conflict, root_relative_path_conflict
+from .standing_delegations import (
+    HARD_HUMAN_BOUNDARIES,
+    STANDING_DELEGATION_SCHEMA,
+    STANDING_DELEGATIONS_DIR_REL,
+)
 from .vcs import probe_vcs
 
 
@@ -32,6 +37,18 @@ TASK_SESSION_RECEIPT_SCHEMA = "mylittleharness.task-session.receipt.v1"
 TASK_SESSION_FAN_IN_SCHEMA = "mylittleharness.task-session.fan-in.inspect.v1"
 TASK_SESSION_CONDUCTOR_SCHEMA = "mylittleharness.task-session.conductor.inspect.v1"
 TASK_SESSION_PROVIDER_LAUNCHER_SCHEMA = "mylittleharness.task-session.provider-launcher.v1"
+STANDING_DELEGATION_CORRIDOR_ACTIONS = {
+    "bounded-slice-selection",
+    "scoped-product-edits",
+    "verification",
+    "evidence-writing",
+    "writeback-when-legal",
+    "transition-when-legal",
+    "archive-when-legal",
+    "reassessment",
+    "continuation",
+}
+
 TASK_SESSIONS_DIR_REL = "project/verification/task-sessions"
 SYMPHONY_QUEUE_DIR_REL = "project/symphony/queue"
 PROVIDER_LAUNCHER_PROFILE = "conductor_full_dev"
@@ -416,7 +433,9 @@ def _fan_in_state(inventory: Inventory) -> dict[str, object]:
     active_plan_data = _active_plan_data(inventory)
     active_plan = _active_plan_payload(inventory)
     session = _session_payload(inventory)
-    execution_slice = str(active_plan.get("execution_slice") or active_plan.get("primary_roadmap_item") or "").strip()
+    corridor = _standing_delegation_corridor_payload(inventory)
+    corridor_policy_ids = tuple(str(policy_id) for policy_id in _json_list(corridor.get("policy_ids")) if str(policy_id).strip())
+    execution_slice = str(active_plan.get("execution_slice") or active_plan.get("primary_roadmap_item") or (corridor_policy_ids[0] if corridor_policy_ids else "")).strip()
     dirty_start = _dirty_start_payload(inventory.root)
     product_diff_proof = {
         "dirty_paths": [
@@ -443,10 +462,12 @@ def _fan_in_state(inventory: Inventory) -> dict[str, object]:
     if inventory.root_kind != "live_operating_root":
         status = "refused"
         blockers.append(f"target root kind is {inventory.root_kind}; task-session fan-in inspect requires a live operating root")
-    elif not session.get("active_plan_exists"):
+    elif not session.get("active_plan_exists") and not corridor.get("active"):
         status = "blocked"
         missing.append("active-plan")
         blockers.append("active plan is missing; fan-in readiness requires repo-visible active-plan metadata")
+    elif not session.get("active_plan_exists") and corridor.get("active"):
+        status = "not-required"
     elif not gate.activated:
         status = "not-required"
     else:
@@ -472,6 +493,7 @@ def _fan_in_state(inventory: Inventory) -> dict[str, object]:
         "dirty_start": dirty_start,
         "execution_slice": execution_slice,
         "session_id": str(session.get("session_id") or ""),
+        "standing_delegation_corridor": corridor,
         "docs_decision": str(active_plan.get("docs_decision") or ""),
     }
 
@@ -482,6 +504,16 @@ def _conductor_state(inventory: Inventory) -> dict[str, object]:
     topology = _topology_payload(inventory)
     fan_in_state = _fan_in_state(inventory)
     coordination_findings = _coordination_raw_findings(inventory)
+    corridor = _standing_delegation_corridor_payload(inventory)
+    corridor_active = bool(corridor.get("active"))
+    corridor_policy_ids = tuple(str(policy_id) for policy_id in _json_list(corridor.get("policy_ids")) if str(policy_id).strip())
+    corridor_scope_roots = tuple(
+        str(root)
+        for record in _json_list(corridor.get("records"))
+        if isinstance(record, dict)
+        for root in _json_list(record.get("scope_roots"))
+        if str(root or "").strip()
+    )
     errors = tuple(finding.code for finding in coordination_findings if finding.severity == "error")
     warnings = tuple(finding.code for finding in coordination_findings if finding.severity == "warn")
     evidence_counts = _coordination_counts(coordination_findings)
@@ -492,21 +524,22 @@ def _conductor_state(inventory: Inventory) -> dict[str, object]:
     if inventory.root_kind != "live_operating_root":
         status = "refused"
         blockers.append(f"target root kind is {inventory.root_kind}; conductor inspect requires a live operating root")
-    elif not session.get("active_plan_exists"):
+    elif not session.get("active_plan_exists") and not corridor_active:
         status = "blocked"
         blockers.append("active plan is missing; conductor packet needs a repo-visible active plan before scheduling")
     elif errors:
         status = "blocked"
         blockers.append("coordination evidence has error-level diagnostics; inspect check --focus agents")
-    elif str(fan_in_state.get("status") or "") == "blocked":
+    elif str(fan_in_state.get("status") or "") == "blocked" and not corridor_active:
         status = "blocked"
         blockers.append("fan-in graph has missing repo-visible coordination evidence")
+    execution_slice = str(active_plan.get("execution_slice") or active_plan.get("primary_roadmap_item") or (corridor_policy_ids[0] if corridor_policy_ids else "standing-delegation-corridor" if corridor_active else ""))
 
     return {
         "status": status,
         "blockers": tuple(blockers),
         "session_id": str(session.get("session_id") or ""),
-        "execution_slice": str(active_plan.get("execution_slice") or active_plan.get("primary_roadmap_item") or ""),
+        "execution_slice": execution_slice,
         "coordination_root": str(topology.get("coordination_root") or ""),
         "integration_root": str(topology.get("coordination_root") or ""),
         "edit_worktree_roots": tuple(str(root) for root in _json_list(topology.get("target_roots")) if str(root).strip()),
@@ -515,15 +548,17 @@ def _conductor_state(inventory: Inventory) -> dict[str, object]:
             HANDOFF_PACKETS_DIR_REL,
             "project/verification/agent-runs",
             TASK_SESSIONS_DIR_REL,
+            STANDING_DELEGATIONS_DIR_REL,
             "project/research",
             "project/verification",
             SYMPHONY_QUEUE_DIR_REL,
         ),
         "safe_worker_routes": ("claim", "handoff", "evidence", "task-session", "approval-packet"),
         "forbidden_routes": tuple(sorted(TASK_SESSION_RECEIPT_FORBIDDEN_ROUTES | {"archive", "commit", "push", "release"})),
-        "write_scope": _string_tuple(active_plan.get("target_artifacts")),
-        "evidence_counts": {**evidence_counts, "task-session-receipt": len(receipt_refs), "symphony-queue": queue_count},
+        "write_scope": _string_tuple(active_plan.get("target_artifacts")) or corridor_scope_roots,
+        "evidence_counts": {**evidence_counts, "task-session-receipt": len(receipt_refs), "symphony-queue": queue_count, "standing-delegation": len(_json_list(corridor.get("records")))},
         "fan_in": fan_in_state,
+        "standing_delegation_corridor": corridor,
         "warnings": warnings,
         "errors": errors,
     }
@@ -542,6 +577,7 @@ def _conductor_payload(state: dict[str, object]) -> dict[str, object]:
         "forbidden_routes": list(_string_tuple(state.get("forbidden_routes"))),
         "write_scope": list(_string_tuple(state.get("write_scope"))),
         "blockers": list(_string_tuple(state.get("blockers"))),
+        "standing_delegation_corridor": dict(state.get("standing_delegation_corridor") or {}),
         "worker_launch_approved": False,
         "lifecycle_approval_granted": False,
         "provider_routing_authority": False,
@@ -565,7 +601,8 @@ def _conductor_summary_findings(state: dict[str, object]) -> list[Finding]:
             (
                 f"conductor_status={status}; session_id={state.get('session_id') or '<none>'}; "
                 f"execution_slice={state.get('execution_slice') or '<none>'}; "
-                f"fan_in_status={dict(state.get('fan_in') or {}).get('status') or '<none>'}"
+                f"fan_in_status={dict(state.get('fan_in') or {}).get('status') or '<none>'}; "
+                f"standing_delegation_corridor={str(bool(dict(state.get('standing_delegation_corridor') or {}).get('active'))).lower()}"
             ),
             "project/implementation-plan.md",
         ),
@@ -959,7 +996,8 @@ def _fan_in_next_safe_command(state: dict[str, object]) -> dict[str, object]:
 
 def _summary_findings(inventory: Inventory) -> list[Finding]:
     session = _session_payload(inventory)
-    return [
+    corridor = dict(session.get("standing_delegation_corridor") or {})
+    findings = [
         Finding("info", "task-session-inspect-read-only", "task-session inspect starts no worker, daemon, provider call, shell, queue consumer, writeback, archive, or Git operation"),
         Finding("info", "task-session-inspect-root", f"root_kind={inventory.root_kind}; root={inventory.root}"),
         Finding(
@@ -972,6 +1010,18 @@ def _summary_findings(inventory: Inventory) -> list[Finding]:
             "project/project-state.md" if inventory.state and inventory.state.exists else None,
         ),
     ]
+    if corridor.get("active"):
+        findings.append(
+            Finding(
+                "info",
+                "task-session-standing-delegation-corridor",
+                "standing-delegation corridor is active for bounded routine work; protected owner approvals, provider routing, Git, release, destructive cleanup, and policy changes remain gated",
+                STANDING_DELEGATIONS_DIR_REL,
+            )
+        )
+    for warning in _string_tuple(corridor.get("warnings"))[:5]:
+        findings.append(Finding("warn", "task-session-standing-delegation-corridor-warning", warning, STANDING_DELEGATIONS_DIR_REL))
+    return findings
 
 
 def _lifecycle_findings(inventory: Inventory) -> list[Finding]:
@@ -1101,6 +1151,77 @@ def _capability_findings() -> list[Finding]:
     ]
 
 
+def _standing_delegation_corridor_payload(inventory: Inventory) -> dict[str, object]:
+    records: list[dict[str, object]] = []
+    warnings: list[str] = []
+    authority_boundary = "standing delegation is routine-work corridor evidence only; protected owner decisions keep their own gates"
+    directory = inventory.root / STANDING_DELEGATIONS_DIR_REL
+    if inventory.root_kind != "live_operating_root" or not directory.exists():
+        return {
+            "active": False,
+            "records": [],
+            "policy_ids": [],
+            "warnings": [],
+            "record_count": 0,
+            "authority_boundary": authority_boundary,
+        }
+    for path in sorted(directory.glob("*.json")):
+        rel_path = _to_rel_path(inventory.root, path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            warnings.append(f"{rel_path}: unreadable standing-delegation record: {exc}")
+            continue
+        if not isinstance(data, dict):
+            warnings.append(f"{rel_path}: standing-delegation record is not a JSON object")
+            continue
+        if data.get("schema") != STANDING_DELEGATION_SCHEMA or data.get("record_type") != "standing-delegation":
+            warnings.append(f"{rel_path}: standing-delegation record has an unexpected schema or record_type")
+            continue
+        expires_at = str(data.get("expires_at") or "").strip()
+        if _standing_delegation_expired(expires_at):
+            warnings.append(f"{rel_path}: standing-delegation record is expired or has an invalid expiration")
+            continue
+        allowed_actions = tuple(
+            str(action).strip()
+            for action in _json_list(data.get("allowed_actions"))
+            if str(action or "").strip()
+        )
+        hard_boundaries = {str(item).strip() for item in _json_list(data.get("hard_human_boundaries"))}
+        missing_boundaries = sorted(set(HARD_HUMAN_BOUNDARIES).difference(hard_boundaries))
+        corridor_actions = tuple(action for action in allowed_actions if action in STANDING_DELEGATION_CORRIDOR_ACTIONS)
+        if missing_boundaries:
+            warnings.append(f"{rel_path}: standing-delegation record is missing hard boundaries: {', '.join(missing_boundaries)}")
+            continue
+        if not corridor_actions:
+            continue
+        records.append(
+            {
+                "policy_id": str(data.get("policy_id") or Path(rel_path).stem),
+                "rel_path": rel_path,
+                "allowed_actions": list(corridor_actions),
+                "scope_roots": list(_json_list(data.get("scope_roots"))),
+                "expires_at": expires_at,
+            }
+        )
+    return {
+        "active": bool(records),
+        "records": records,
+        "policy_ids": [str(record.get("policy_id") or "") for record in records],
+        "warnings": warnings,
+        "record_count": len(records),
+        "authority_boundary": authority_boundary,
+    }
+
+
+def _standing_delegation_expired(value: str) -> bool:
+    try:
+        expires_at = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return expires_at <= datetime.now(timezone.utc)
+
+
 def _boundary_findings() -> list[Finding]:
     return [
         Finding("info", "task-session-boundary", TASK_SESSION_BOUNDARY),
@@ -1111,7 +1232,9 @@ def _boundary_findings() -> list[Finding]:
 def _session_payload(inventory: Inventory) -> dict[str, object]:
     lifecycle = _lifecycle_payload(inventory)
     active_plan = _active_plan_payload(inventory)
-    session_id = str(active_plan.get("plan_id") or lifecycle.get("active_phase") or "no-active-plan")
+    corridor = _standing_delegation_corridor_payload(inventory)
+    corridor_policy_id = next((str(policy_id) for policy_id in _json_list(corridor.get("policy_ids")) if str(policy_id).strip()), "")
+    session_id = str(active_plan.get("plan_id") or lifecycle.get("active_phase") or corridor_policy_id or "no-active-plan")
     active_plan_exists = bool(active_plan.get("exists"))
     active_plan_open = str(lifecycle.get("plan_status") or "").strip().casefold() == "active" or bool(str(lifecycle.get("active_plan") or "").strip())
     if inventory.root_kind != "live_operating_root":
@@ -1120,6 +1243,8 @@ def _session_payload(inventory: Inventory) -> dict[str, object]:
         readiness = "ready"
     elif active_plan_open:
         readiness = "blocked-missing-active-plan"
+    elif corridor.get("active"):
+        readiness = "standing-delegation-corridor"
     else:
         readiness = "no-active-plan"
     return {
@@ -1128,8 +1253,9 @@ def _session_payload(inventory: Inventory) -> dict[str, object]:
         "active_plan_open": active_plan_open,
         "active_plan_exists": active_plan_exists,
         "docs_decision": str(active_plan.get("docs_decision") or ""),
-        "external_runtime_may_launch_workers": readiness == "ready",
+        "external_runtime_may_launch_workers": readiness in {"ready", "standing-delegation-corridor"},
         "lifecycle_approval_granted": False,
+        "standing_delegation_corridor": corridor,
     }
 
 

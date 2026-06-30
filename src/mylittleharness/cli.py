@@ -2740,7 +2740,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
             ("Status", status_findings(inventory)),
             ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
             ("Worktree Coordination", worktree_coordination_findings(inventory, code_prefix="check-worktree-coordination")),
-            ("Validation", validation_findings(inventory)),
+            ("Validation", _quick_validation_findings(inventory)),
         ]
         boundary_section.append(
             Finding(
@@ -2751,6 +2751,29 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
                     "marks omitted diagnostics as not-checked; it does not wait on mlhd run-once completion or prove "
                     "generated cache truth; rerun without --summary-only for the full quick JSON report and inspect "
                     "dashboard/check mlhd run_once markers for bounded refresh outcome"
+                ),
+            )
+        )
+        return "check --quick", [*sections, ("Boundary", boundary_section)]
+
+    if getattr(args, "quick", False) and getattr(args, "json", False):
+        sections = [
+            ("Status", status_findings(inventory)),
+            ("Session Active Work", session_active_work_findings(inventory, "check-session-active-work")),
+            ("Worktree Coordination", worktree_coordination_findings(inventory, code_prefix="check-worktree-coordination")),
+            ("Validation", _quick_validation_findings(inventory)),
+            ("Standing Delegations", standing_delegation_status_findings(inventory, "check-standing-delegation")),
+            ("Projection Cache", projection_cache_status_findings(inventory, bounded=True)),
+        ]
+        boundary_section.append(
+            Finding(
+                "info",
+                "check-quick-json-bounded-evidence-scan",
+                (
+                    "check --quick --json uses a bounded evidence posture and omits heavyweight agent-run, "
+                    "receipt, handoff, work-claim, coordination-identity, retention, and drift scans; use "
+                    "check --focus agents or check --deep for full evidence validation before lifecycle, archive, "
+                    "staging, commit, push, or release decisions"
                 ),
             )
         )
@@ -2830,17 +2853,78 @@ def _focused_report_scope(focus: str, sections: list[tuple[str, list[Finding]]])
     }
 
 
+def _quick_validation_findings(inventory: object) -> list[Finding]:
+    findings: list[Finding] = []
+    surface_by_rel = getattr(inventory, "surface_by_rel", {}) or {}
+    manifest_surface = getattr(inventory, "manifest_surface", None)
+    state_surface = getattr(inventory, "state", None)
+    active_plan_surface = getattr(inventory, "active_plan_surface", None)
+    required_surfaces = [
+        surface_by_rel.get("AGENTS.md"),
+        manifest_surface,
+        state_surface,
+    ]
+    state_data = getattr(getattr(state_surface, "frontmatter", None), "data", {}) if state_surface else {}
+    active_plan_open = str(state_data.get("plan_status") or "").strip().casefold() == "active" or bool(
+        str(state_data.get("active_plan") or "").strip()
+    )
+    if active_plan_open:
+        required_surfaces.append(active_plan_surface)
+    for surface in required_surfaces:
+        if surface is None:
+            findings.append(Finding("warn", "check-quick-validation-surface-missing", "required startup surface is not registered in inventory"))
+            continue
+        rel_path = str(getattr(surface, "rel_path", "") or "<unknown>")
+        if not bool(getattr(surface, "exists", False)):
+            findings.append(Finding("error", "check-quick-validation-required-surface-missing", f"required startup surface missing: {rel_path}", rel_path))
+        elif getattr(surface, "read_error", None):
+            findings.append(
+                Finding(
+                    "error",
+                    "check-quick-validation-required-surface-unreadable",
+                    f"required startup surface unreadable: {rel_path}: {getattr(surface, 'read_error', '')}",
+                    rel_path,
+                )
+            )
+        else:
+            findings.append(Finding("info", "check-quick-validation-required-surface-present", f"required startup surface present: {rel_path}", rel_path))
+    findings.append(
+        Finding(
+            "info",
+            "check-quick-validation-bounded",
+            "quick JSON validation checks startup-critical surfaces only; full validation is omitted for compactness, use check --focus validation or check --deep before lifecycle, archive, staging, commit, push, or release decisions",
+        )
+    )
+    return findings
+
+
 def _quick_report_scope(sections: list[tuple[str, list[Finding]]]) -> dict[str, object]:
     return {
         "scope": "quick",
         "included_sections": [name for name, _findings in sections],
         "text_report_omits_source_inventory": True,
-        "json_report_keeps_full_sources_and_findings": True,
+        "json_report_uses_bounded_evidence_posture": True,
+        "omitted_heavy_sections": _quick_json_omitted_sections(sections),
         "boundary": (
-            "quick text reports compact the display only; they do not skip check sections, "
-            "write files, approve lifecycle, archive, staging, commit, or push"
+            "quick reports compact heavyweight evidence validation by default; they do not write files, "
+            "approve lifecycle, archive, staging, commit, or push"
         ),
     }
+
+def _quick_json_omitted_sections(sections: list[tuple[str, list[Finding]]]) -> list[str]:
+    included = {name for name, _findings in sections}
+    heavy_sections = {
+        "Full Validation",
+        "Agent Run Evidence",
+        "Retention",
+        "Work Claims",
+        "Handoff Packets",
+        "Approval Decisions",
+        "Coordination Evidence",
+        "Drift",
+    }
+    return sorted(heavy_sections.difference(included))
+
 
 
 def _quick_summary_only_report_scope(sections: list[tuple[str, list[Finding]]]) -> dict[str, object]:
@@ -2849,6 +2933,7 @@ def _quick_summary_only_report_scope(sections: list[tuple[str, list[Finding]]]) 
         "Status",
         "Session Active Work",
         "Worktree Coordination",
+        "Full Validation",
         "Validation",
         "Agent Run Evidence",
         "Retention",

@@ -72,12 +72,14 @@ class InventoryTests(unittest.TestCase):
             (root / "project/verification/agent-runs").mkdir(parents=True)
             (root / "project/verification/handoffs").mkdir(parents=True)
             (root / "project/verification/work-claims").mkdir(parents=True)
+            (root / "project/verification/worker-run-receipts").mkdir(parents=True)
             (root / "project/verification/approval-packets").mkdir(parents=True)
             (root / "project/symphony/queue").mkdir(parents=True)
             (root / "project/verification/agent-runs/research.md").write_text("# Run\n", encoding="utf-8")
             (root / "project/verification/handoffs/research.md").write_text("# Handoff\n", encoding="utf-8")
             (root / "project/verification/handoffs/research.json").write_text("{}", encoding="utf-8")
             (root / "project/verification/work-claims/research.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/worker-run-receipts/research.json").write_text("{}", encoding="utf-8")
             (root / "project/verification/approval-packets/research.json").write_text("{}", encoding="utf-8")
             (root / "project/symphony/queue/research.json").write_text("{}", encoding="utf-8")
 
@@ -87,6 +89,7 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual("handoffs", inventory.surface_by_rel["project/verification/handoffs/research.md"].memory_route)
             self.assertEqual("handoffs", inventory.surface_by_rel["project/verification/handoffs/research.json"].memory_route)
             self.assertEqual("work-claims", inventory.surface_by_rel["project/verification/work-claims/research.json"].memory_route)
+            self.assertEqual("worker-run-receipts", inventory.surface_by_rel["project/verification/worker-run-receipts/research.json"].memory_route)
             self.assertEqual("approval-packets", inventory.surface_by_rel["project/verification/approval-packets/research.json"].memory_route)
             self.assertEqual("symphony-queue", inventory.surface_by_rel["project/symphony/queue/research.json"].memory_route)
 

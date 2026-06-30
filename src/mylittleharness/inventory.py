@@ -264,6 +264,7 @@ def load_inventory(root: Path | str) -> Inventory:
     _add_optional_glob(root_path, surfaces, "project/verification/handoffs/*.md", "handoff-note")
     _add_optional_glob(root_path, surfaces, "project/verification/handoffs/*.json", "handoff")
     _add_optional_glob(root_path, surfaces, "project/verification/work-claims/*.json", "work-claim")
+    _add_optional_glob(root_path, surfaces, "project/verification/worker-run-receipts/*.json", "worker-run-receipt")
     _add_optional_glob(root_path, surfaces, "project/verification/approval-packets/*.json", "approval-packet")
     _add_optional_glob(root_path, surfaces, "project/symphony/queue/*.json", "symphony-queue")
     _add_optional_glob(root_path, surfaces, "specs/workflow/*.md", "package-mirror")

@@ -7094,6 +7094,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("agent-run-record-written", apply_rendered)
             self.assertIn("evidence record apply wrote one source-bound agent run evidence record", apply_rendered)
             self.assertTrue(record_text.startswith("---\n"))
+            self.assertTrue(record_text.endswith("\n"))
+            self.assertFalse(record_text.endswith("\n\n"))
             self.assertIn('schema: "mylittleharness.agent-run.v1"', record_text)
             self.assertIn('assigned_scope: "agent-run-evidence-route-mvp"', record_text)
             self.assertIn('runtime: "local-shell"', record_text)
@@ -7139,6 +7141,8 @@ class CliTests(unittest.TestCase):
             metadata_apply_rendered = metadata_apply.getvalue()
             refreshed_metadata_text = record_path.read_text(encoding="utf-8")
             self.assertIn("agent-run-record-refreshed", metadata_apply_rendered)
+            self.assertTrue(refreshed_metadata_text.endswith("\n"))
+            self.assertFalse(refreshed_metadata_text.endswith("\n\n"))
             self.assertIn('  - "project/verification/handoffs/run-1.json"', refreshed_metadata_text)
             self.assertIn('  - "project/verification/handoffs/fanin.json"', refreshed_metadata_text)
             self.assertIn('  - "project/verification/work-claims/claim-1.json"', refreshed_metadata_text)
@@ -7175,6 +7179,9 @@ class CliTests(unittest.TestCase):
             refresh_apply_rendered = refresh_apply.getvalue()
             self.assertIn("agent-run-record-refreshed", refresh_apply_rendered)
             self.assertIn(f"refreshed route {record_rel}", refresh_apply_rendered)
+            refreshed_record_text = record_path.read_text(encoding="utf-8")
+            self.assertTrue(refreshed_record_text.endswith("\n"))
+            self.assertFalse(refreshed_record_text.endswith("\n\n"))
 
             refreshed_check = io.StringIO()
             with redirect_stdout(refreshed_check):
@@ -37582,6 +37589,39 @@ class CliTests(unittest.TestCase):
                     self.assertIn("index-only", messages)
                     self.assertIn("working-tree content remains untouched", messages)
 
+    def test_hooks_pre_tool_allows_exact_index_only_unstage_of_stale_lifecycle_pair(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_rel = "project/" + "project-state.md"
+            active_plan_rel = "project/" + "implementation-plan.md"
+            state_path = root / state_rel
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            command = f"git restore --staged -- {active_plan_rel} {state_rel}"
+
+            with patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=(active_plan_rel, state_rel)):
+                payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps({"toolName": "shell_command", "workdir": str(root), "command": command}),
+                )
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-post-closeout-index-split", finding_codes)
+            self.assertNotIn("hooks-policy-block-git-before-lifecycle-closeout", finding_codes)
+            self.assertIn("index-only", messages)
+
     def test_hooks_pre_tool_blocks_unsafe_index_split_forms(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -40057,6 +40097,28 @@ class CliTests(unittest.TestCase):
                 "</codex_delegation>"
             )
             hook_inputs = [
+                {
+                    "request": {
+                        "payload": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "codex_app.create_thread",
+                                        "arguments": json.dumps(
+                                            {
+                                                "workdir": str(root),
+                                                "input": prompt,
+                                                "metadata": {
+                                                    "route_terms": ["routes", "evidence", "staging", "provider", "hooks", "blockers"]
+                                                },
+                                            }
+                                        ),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
                 {
                     "request": {
                         "payload": {
@@ -43701,6 +43763,44 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("hooks-policy-block-product-root-path", finding_codes)
             self.assertNotIn("hooks-policy-block-product-root-direct-edit", finding_codes)
 
+    def test_hooks_pre_tool_worker_run_receipt_checkpoint_guidance_names_exact_force_add(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current_root = make_live_root(Path(tmp) / "current")
+            root = make_live_root(Path(tmp) / "neighbor")
+            receipt_rel = "project/" + "verification/worker-run-receipts/research.json"
+            (root / receipt_rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / receipt_rel).write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.worker-run-receipt.v1",
+                        "record_type": "worker-run-receipt",
+                        "receipt_id": "research",
+                        "non_authority": "worker run receipt evidence only; cannot approve lifecycle, Git, release, or provider routing",
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stage_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f'git -C "{root}" add -- {receipt_rel}',
+                }
+            )
+
+            payload = hook_event_payload(load_inventory(current_root), HOOK_PRE_TOOL_USE, [], stage_input)
+
+            finding_codes = {finding["code"] for finding in payload["findings"]}
+            messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+            self.assertFalse(payload["block"])
+            self.assertIn("hooks-policy-allow-reviewed-local-vcs-checkpoint", finding_codes)
+            self.assertIn(f"check-ignore -v -- {receipt_rel}", messages)
+            self.assertIn(f"add -f -- {receipt_rel}", messages)
+            self.assertNotIn("<ignored-route-artifact-if-needed>", messages)
+
     def test_hooks_pre_tool_allows_retention_route_and_receipt_backed_staging(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
 
@@ -45152,6 +45252,89 @@ class CliTests(unittest.TestCase):
             self.assertEqual(check_code, 0)
             self.assertIn("check-agents-standing-delegation-record", check_rendered)
             self.assertIn("later routes must consume this policy explicitly", check_rendered)
+
+    def test_task_session_conductor_uses_standing_delegation_corridor_without_granting_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "standing-delegation",
+                            "--policy-id",
+                            "symphony-safe-slices",
+                            "--owner-id",
+                            "owner-operator",
+                            "--delegation-intent",
+                            "Allow bounded Symphony routine slices through later MLH dry-run apply routes",
+                            "--scope-root",
+                            "product-source/src/mylittleharness",
+                            "--scope-root",
+                            "project/verification",
+                            "--allowed-action",
+                            "bounded-slice-selection",
+                            "--allowed-action",
+                            "scoped-product-edits",
+                            "--allowed-action",
+                            "verification",
+                            "--allowed-action",
+                            "evidence-writing",
+                            "--allowed-action",
+                            "writeback-when-legal",
+                            "--allowed-action",
+                            "archive-when-legal",
+                            "--allowed-action",
+                            "reassessment",
+                            "--allowed-action",
+                            "continuation",
+                            "--forbidden-action",
+                            "provider-routing-approval",
+                            "--forbidden-action",
+                            "policy-changes",
+                            "--expires-at",
+                            "2099-01-01T00:00:00Z",
+                            "--revocation-posture",
+                            "owner may supersede this policy with a later explicit standing-delegation route",
+                            "--owner-attestation",
+                            "owner reviewed standing autonomy boundaries outside this agent conversation",
+                            "--notes",
+                            "does not approve H10, push, tag, release, or publication",
+                            "--apply",
+                        ]
+                    ),
+                    0,
+                )
+            before = snapshot_tree_bytes(root)
+
+            inspect_output = io.StringIO()
+            with redirect_stdout(inspect_output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--json"]), 0)
+            conductor_output = io.StringIO()
+            with redirect_stdout(conductor_output):
+                self.assertEqual(main(["--root", str(root), "task-session", "--inspect", "--conductor", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            inspect_payload = json.loads(inspect_output.getvalue())
+            conductor_payload = json.loads(conductor_output.getvalue())
+            self.assertEqual("standing-delegation-corridor", inspect_payload["session"]["readiness"])
+            self.assertEqual("symphony-safe-slices", inspect_payload["session"]["session_id"])
+            self.assertTrue(inspect_payload["session"]["standing_delegation_corridor"]["active"])
+            self.assertTrue(inspect_payload["session"]["external_runtime_may_launch_workers"])
+            self.assertFalse(inspect_payload["session"]["lifecycle_approval_granted"])
+            self.assertEqual("ready", conductor_payload["conductor"]["status"])
+            self.assertEqual("not-required", conductor_payload["fan_in"]["status"])
+            self.assertTrue(conductor_payload["conductor"]["standing_delegation_corridor"]["active"])
+            self.assertIn("project/decisions/standing-delegations", conductor_payload["conductor"]["living_routes"])
+            self.assertIn("product-source/src/mylittleharness", conductor_payload["conductor"]["write_scope"])
+            self.assertEqual(1, conductor_payload["coordination"]["evidence_counts"]["standing-delegation"])
+            self.assertFalse(conductor_payload["approvals"]["worker_launch"])
+            self.assertFalse(conductor_payload["approvals"]["provider_routing"])
+            self.assertFalse(conductor_payload["approvals"]["lifecycle"])
+            self.assertFalse(conductor_payload["capabilities"]["worker_launch"])
+            self.assertFalse(conductor_payload["capabilities"]["provider_routing"])
 
     def test_standing_delegation_refuses_false_authority_inputs_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -49968,14 +50151,32 @@ class CliTests(unittest.TestCase):
             def fail_projection_rebuild(*_args: object, **_kwargs: object) -> object:
                 raise AssertionError("quick check must not rebuild full projection for cache status")
 
+            def fail_heavy_scan(*_args: object, **_kwargs: object) -> list[Finding]:
+                raise AssertionError("quick JSON must not run heavyweight evidence diagnostics")
+
             output = io.StringIO()
-            with patch("mylittleharness.checks.build_projection", side_effect=fail_projection_rebuild), redirect_stdout(output):
+            with (
+                patch("mylittleharness.checks.build_projection", side_effect=fail_projection_rebuild),
+                patch("mylittleharness.cli.validation_findings", side_effect=fail_heavy_scan),
+                patch("mylittleharness.cli.agent_run_record_findings", side_effect=fail_heavy_scan),
+                patch("mylittleharness.cli.retention_receipt_findings", side_effect=fail_heavy_scan),
+                patch("mylittleharness.cli.work_claim_status_findings", side_effect=fail_heavy_scan),
+                patch("mylittleharness.cli.handoff_packet_status_findings", side_effect=fail_heavy_scan),
+                patch("mylittleharness.cli.coordination_evidence_identity_findings", side_effect=fail_heavy_scan),
+                patch("mylittleharness.cli.check_drift_findings", side_effect=fail_heavy_scan),
+                redirect_stdout(output),
+            ):
                 code = main(["--root", str(root), "check", "--quick", "--json"])
 
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             payload = json.loads(output.getvalue())
             self.assertEqual("quick", payload["report_scope"]["scope"])
+            self.assertTrue(payload["report_scope"]["json_report_uses_bounded_evidence_posture"])
+            self.assertIn("Full Validation", payload["report_scope"]["omitted_heavy_sections"])
+            self.assertIn("Agent Run Evidence", payload["report_scope"]["omitted_heavy_sections"])
+            self.assertIn("Retention", payload["report_scope"]["omitted_heavy_sections"])
+            self.assertIn("Drift", payload["report_scope"]["omitted_heavy_sections"])
             self.assertEqual("check --quick", payload["summary"]["command"])
             sections = payload["sections"]
             projection_section = next(section for section in sections if section["name"] == "Projection Cache")
@@ -50019,6 +50220,7 @@ class CliTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
+                patch("mylittleharness.cli.validation_findings", side_effect=fail_full_report),
                 patch("mylittleharness.cli.agent_run_record_findings", side_effect=fail_full_report),
                 patch("mylittleharness.cli.retention_receipt_findings", side_effect=fail_full_report),
                 patch("mylittleharness.cli.work_claim_status_findings", side_effect=fail_full_report),
@@ -50037,6 +50239,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["report_scope"]["global_status_uncomputed"])
             self.assertTrue(payload["report_scope"]["status_represents_included_sections_only"])
             omitted_sections = payload["report_scope"]["omitted_sections"]
+            self.assertIn("Full Validation", omitted_sections)
             self.assertIn("Agent Run Evidence", omitted_sections)
             self.assertIn("Projection Cache", omitted_sections)
             self.assertIn("Retention", omitted_sections)

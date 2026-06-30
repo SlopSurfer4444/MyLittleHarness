@@ -2973,9 +2973,19 @@ def _common_hook_workdir(payloads: list[dict[str, object]]) -> str:
 
 
 def _hook_tool_intent(data: dict[str, object], text: str, *, inventory: Inventory | None = None) -> HookToolIntent:
-    command_payload = _hook_command_payload(data)
-    payload_text = text if command_payload is data else _stringify_jsonish(command_payload)
-    command = _hook_input_command(command_payload, payload_text)
+    direct_payloads = _hook_direct_command_payloads(data)
+    if not direct_payloads:
+        command_payload = data
+        payload_text = text
+        command = "" if _is_subagent_delegation_tool_request(data) else _hook_input_command(command_payload, payload_text)
+    elif len(direct_payloads) == 1:
+        command_payload = direct_payloads[0]
+        payload_text = _stringify_jsonish(command_payload)
+        command = _hook_input_command(command_payload, payload_text)
+    else:
+        command_payload = _combined_hook_command_payload(direct_payloads)
+        payload_text = _stringify_jsonish(command_payload)
+        command = _hook_input_command(command_payload, payload_text)
     write_target_paths = _hook_write_target_paths(command_payload, command, inventory=inventory)
     paths = _hook_input_paths(
         command_payload,
@@ -5876,6 +5886,8 @@ def _coherent_post_closeout_index_split_paths(
     if not any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
         return set()
     if selected == set(staged) and _coherent_checkpoint_path_set(inventory, selected):
+        return selected
+    if selected == set(staged) and all(_is_checkpoint_sensitive_staged_path(inventory, path) for path in selected):
         return selected
     if _coherent_checkpoint_path_set(inventory, staged):
         return set()
@@ -9549,6 +9561,7 @@ def _post_closeout_checkpoint_split_next_safe_command(inventory: Inventory, data
 def _post_closeout_checkpoint_split_candidate_paths(inventory: Inventory, staged: tuple[str, ...]) -> tuple[str, ...]:
     candidate_groups = [
         tuple(path for path in staged if _is_meta_feedback_incubation_route_path(path)),
+        tuple(path for path in staged if _is_agent_run_evidence_route_path(path)),
         tuple(
             path
             for path in staged
@@ -9603,19 +9616,22 @@ def _reviewed_local_vcs_checkpoint_next_safe_command(checkpoint: ReviewedLocalVc
     if checkpoint.root is None:
         return "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
     git_prefix = "gi" + "t" if checkpoint.visible_workdir else "gi" + "t -C " + shell_arg(str(checkpoint.root))
+    exact_paths = " ".join(shell_arg(path) for path in sorted(checkpoint.paths))
+    ignored_add = f"{git_prefix} check-ignore -v -- {exact_paths}; {git_prefix} add -f -- {exact_paths}" if exact_paths else f"{git_prefix} add -f -- <ignored-route-artifact-if-needed>"
+
     if checkpoint.mode == "commit":
         return f"{git_prefix} commit -F <message-file>"
     if checkpoint.mode == "staging-review-bundle":
         return (
             f"{git_prefix} status --short; "
             f"{git_prefix} diff --cached --check; "
-            f"{git_prefix} add -f -- <ignored-route-artifact-if-needed>; "
+            f"{ignored_add}; "
             f"{git_prefix} diff --cached --check; "
             f"{git_prefix} commit -F <message-file>"
         )
     return (
         f"{git_prefix} diff --cached --check; "
-        f"{git_prefix} add -f -- <ignored-route-artifact-if-needed>; "
+        f"{ignored_add}; "
         f"{git_prefix} diff --cached --check; "
         f"{git_prefix} commit -F <message-file>"
     )

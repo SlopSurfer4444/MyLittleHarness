@@ -2344,8 +2344,12 @@ def _render_agent_run_record(root: Path, request: AgentRunRecordRequest) -> tupl
     lines.extend(f"- `{command}`" for command in request.commands)
     lines.extend(["", "## Source Hashes", ""])
     lines.extend(f"- `{entry}`" for entry in source_hashes)
-    lines.append("")
-    return "\n".join(lines), findings
+    return _normalize_generated_markdown_text("\n".join(lines)), findings
+
+
+def _normalize_generated_markdown_text(text: str) -> str:
+    stripped = str(text or "").rstrip()
+    return f"{stripped}\n" if stripped else "\n"
 
 
 def _frontmatter_lines(key: str, value: object) -> list[str]:
@@ -5886,7 +5890,8 @@ def _merge_root_relative_refs(existing_refs: tuple[str, ...], requested_refs: tu
 
 def _replace_agent_run_source_hashes(text: str, source_hashes: Iterable[str]) -> str:
     updated = _replace_frontmatter_list(text, "source_hashes", tuple(source_hashes))
-    return _replace_source_hashes_section(updated, tuple(source_hashes))
+    updated = _replace_source_hashes_section(updated, tuple(source_hashes))
+    return _normalize_generated_markdown_text(updated)
 
 
 def _replace_frontmatter_list(text: str, key: str, values: tuple[str, ...]) -> str:
