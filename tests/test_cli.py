@@ -32416,7 +32416,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 2)
             self.assertIn("hooks --config-path is only valid with hooks adapter", stderr.getvalue())
 
-    def test_hooks_post_tool_warn_only_path_findings_keep_codex_output_continuing(self) -> None:
+    def test_hooks_post_tool_allows_read_only_lifecycle_path_findings_keep_codex_output_continuing(self) -> None:
         from mylittleharness.hooks import HOOK_POST_TOOL_USE, codex_hook_command_output, hook_event_payload
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -32427,8 +32427,12 @@ class CliTests(unittest.TestCase):
             payload = hook_event_payload(load_inventory(root), HOOK_POST_TOOL_USE, [], hook_input)
 
             self.assertFalse(payload["block"])
-            self.assertEqual("warn", payload["status"])
+            self.assertEqual("ok", payload["status"])
             self.assertIn(
+                "hooks-policy-allow-read-only-lifecycle-inspection",
+                {finding["code"] for finding in payload["findings"]},
+            )
+            self.assertNotIn(
                 "hooks-policy-block-lifecycle-authority-path",
                 {finding["code"] for finding in payload["findings"]},
             )
@@ -34791,13 +34795,13 @@ class CliTests(unittest.TestCase):
                     "messages": (),
                 },
                 {
-                    "name": "post-tool lifecycle paths warn without blocking output",
+                    "name": "post-tool read-only lifecycle paths continue without mutation warning",
                     "hook": HOOK_POST_TOOL_USE,
                     "input": json.dumps({"toolName": "shell_command", "command": f"Get-Content {state_rel}"}),
                     "block": False,
-                    "status": "warn",
-                    "include": {"hooks-policy-block-lifecycle-authority-path"},
-                    "exclude": set(),
+                    "status": "ok",
+                    "include": {"hooks-policy-allow-read-only-lifecycle-inspection"},
+                    "exclude": {"hooks-policy-block-lifecycle-authority-path"},
                     "messages": (),
                 },
                 {
@@ -45463,6 +45467,197 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["block"])
             self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
             self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", codes)
+
+    def test_hooks_allow_sysadmin_route_markdown_read_only_line_slices_across_codex_wrappers(self) -> None:
+        from mylittleharness.hooks import HOOK_POST_TOOL_USE, HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            note_rel = "project/plan-incubation/sysadmin-order-reconciliation.md"
+            evidence_rel = "project/verification/agent-runs/sysadmin-read.md"
+            note_path = root / note_rel
+            evidence_path = root / evidence_rel
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            note_path.write_text(
+                "---\n"
+                'status: "incubating"\n'
+                "---\n"
+                "# SysAdmin Order Reconciliation\n\n"
+                "invoice evidence can be read for review.\n",
+                encoding="utf-8",
+            )
+            evidence_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                "---\n"
+                "# SysAdmin Read\n\n"
+                "line-slice verification output.\n",
+                encoding="utf-8",
+            )
+            commands = (
+                f"Get-Content -Path {note_rel} -TotalCount 80",
+                f"Get-Content {note_rel} | Select-Object -Skip 1 -First 20",
+                f'powershell -NoProfile -Command "Get-Content -LiteralPath {evidence_rel} | Select-Object -First 120"',
+                f"Select-String -Path {note_rel} -Pattern invoice",
+                f"rg -n invoice {note_rel}",
+                f"git show HEAD -- {note_rel}",
+                f"git diff -- {note_rel}",
+            )
+
+            def wrapped_payloads(command: str) -> tuple[dict[str, object], ...]:
+                return (
+                    {"toolName": "shell_command", "command": command, "workdir": str(root)},
+                    {
+                        "toolName": "functions.shell_command",
+                        "arguments": json.dumps({"command": command, "workdir": str(root)}),
+                    },
+                    {
+                        "request": {
+                            "tool_call": {
+                                "arguments": json.dumps({"command": command, "workdir": str(root)})
+                            }
+                        }
+                    },
+                    {
+                        "toolName": "multi_tool_use.parallel",
+                        "tool_uses": [
+                            {
+                                "recipient_name": "functions.shell_command",
+                                "parameters": {"command": command, "workdir": str(root)},
+                            }
+                        ],
+                    },
+                )
+
+            for command in commands:
+                for payload_data in wrapped_payloads(command):
+                    with self.subTest(event="pre", command=command, wrapper=sorted(payload_data)):
+                        payload = hook_event_payload(
+                            load_inventory(root),
+                            HOOK_PRE_TOOL_USE,
+                            [],
+                            json.dumps(payload_data),
+                        )
+                        codes = {finding["code"] for finding in payload["findings"]}
+                        self.assertFalse(payload["block"])
+                        self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
+                        self.assertNotIn("hooks-policy-block-lifecycle-authority-path", codes)
+                        self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", codes)
+                        self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", codes)
+
+                    post_payload_data = dict(payload_data)
+                    post_payload_data["output"] = f"{note_rel}:4:invoice evidence can be read for review.\n"
+                    with self.subTest(event="post", command=command, wrapper=sorted(payload_data)):
+                        payload = hook_event_payload(
+                            load_inventory(root),
+                            HOOK_POST_TOOL_USE,
+                            [],
+                            json.dumps(post_payload_data),
+                        )
+                        codes = {finding["code"] for finding in payload["findings"]}
+                        self.assertFalse(payload["block"])
+                        self.assertIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
+                        self.assertNotIn("hooks-policy-block-lifecycle-authority-path", codes)
+                        self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", codes)
+                        self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", codes)
+
+    def test_hooks_block_route_markdown_read_then_write_shapes_across_codex_wrappers(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            note_rel = "project/plan-incubation/sysadmin-order-reconciliation.md"
+            evidence_rel = "project/verification/agent-runs/sysadmin-read.md"
+            note_path = root / note_rel
+            evidence_path = root / evidence_rel
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            note_path.write_text("# SysAdmin Order Reconciliation\ninvoice evidence.\n", encoding="utf-8")
+            evidence_path.write_text("# SysAdmin Read\n", encoding="utf-8")
+            unsafe_commands = (
+                f"Get-Content {note_rel} | Set-Content {note_rel}",
+                f"Select-String -Path {note_rel} -Pattern invoice | Out-File {evidence_rel}",
+                f"Get-Content {note_rel} > {evidence_rel}",
+                f'powershell -NoProfile -Command "Get-Content {note_rel} | Out-File {evidence_rel}"',
+                f"Copy-Item {note_rel} {evidence_rel}",
+                f"Move-Item {note_rel} {evidence_rel}",
+                f"Remove-Item -LiteralPath {note_rel}",
+                f"git rm {note_rel}",
+                f"git diff --output={evidence_rel}",
+            )
+            wrappers = (
+                lambda command: {"toolName": "shell_command", "command": command, "workdir": str(root)},
+                lambda command: {
+                    "toolName": "functions.shell_command",
+                    "arguments": json.dumps({"command": command, "workdir": str(root)}),
+                },
+                lambda command: {
+                    "toolName": "multi_tool_use.parallel",
+                    "tool_uses": [
+                        {
+                            "recipient_name": "functions.shell_command",
+                            "parameters": {"command": command, "workdir": str(root)},
+                        }
+                    ],
+                },
+            )
+
+            for command in unsafe_commands:
+                for wrapper in wrappers:
+                    with self.subTest(command=command):
+                        payload = hook_event_payload(
+                            load_inventory(root),
+                            HOOK_PRE_TOOL_USE,
+                            [],
+                            json.dumps(wrapper(command)),
+                        )
+                        codes = {finding["code"] for finding in payload["findings"]}
+                        self.assertTrue(payload["block"])
+                        self.assertTrue(any(code.startswith("hooks-policy-block-") for code in codes), codes)
+                        self.assertNotIn("hooks-policy-allow-read-only-lifecycle-inspection", codes)
+
+            workdir_scoped_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "functions.shell_command",
+                        "command": "Set-Content note.md bad",
+                        "workdir": str(root / "project/plan-incubation"),
+                    }
+                ),
+            )
+            workdir_scoped_codes = {finding["code"] for finding in workdir_scoped_payload["findings"]}
+            self.assertTrue(workdir_scoped_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", workdir_scoped_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-lifecycle-inspection", workdir_scoped_codes)
+
+            mixed_parallel_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                json.dumps(
+                    {
+                        "toolName": "multi_tool_use.parallel",
+                        "tool_uses": [
+                            {
+                                "recipient_name": "functions.shell_command",
+                                "parameters": {"command": f"Get-Content {note_rel}", "workdir": str(root)},
+                            },
+                            {
+                                "recipient_name": "functions.shell_command",
+                                "parameters": {"command": "Set-Content project/project-state.md bad", "workdir": str(root)},
+                            },
+                        ],
+                    }
+                ),
+            )
+            mixed_parallel_codes = {finding["code"] for finding in mixed_parallel_payload["findings"]}
+            self.assertTrue(mixed_parallel_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-authority-path", mixed_parallel_codes)
+            self.assertNotIn("hooks-policy-allow-read-only-lifecycle-inspection", mixed_parallel_codes)
 
     def test_hooks_apply_refuses_product_fixture_and_existing_hook_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

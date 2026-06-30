@@ -2592,7 +2592,18 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
 def _post_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> list[Finding]:
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
-    paths = _hook_tool_intent(data, text, inventory=inventory).paths
+    intent = _hook_tool_intent(data, text, inventory=inventory)
+    command_data = intent.payload
+    paths = intent.paths
+    command = intent.command
+    allow_read_only_source_paths = _is_read_only_tool_source_path_intent(
+        inventory,
+        data,
+        command_data,
+        command,
+        paths,
+        text,
+    )
     findings = [
         Finding(
             "info",
@@ -2600,10 +2611,62 @@ def _post_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> li
             "post-tool-use reports shortcut posture after tool execution; it cannot repair or approve the result",
         )
     ]
-    findings.extend(_path_policy_findings(inventory, paths, warn_only=True))
+    findings.extend(
+        _path_policy_findings(
+            inventory,
+            paths,
+            warn_only=True,
+            allow_read_only_source_paths=allow_read_only_source_paths,
+            source_command=command,
+        )
+    )
+    if allow_read_only_source_paths and any(_is_lifecycle_route_path(path) for path in paths):
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-read-only-lifecycle-inspection",
+                (
+                    "post-tool request/output appears to be read-only inspection of lifecycle route paths; "
+                    "route-owned Markdown remains protected from direct writes, staging, and lifecycle shortcuts"
+                ),
+                paths[0] if paths else None,
+            )
+        )
     if len(findings) == 1:
         findings.append(Finding("info", "hooks-policy-post-tool-use-clear", "no deterministic post-tool warning matched this tool result"))
     return findings
+
+
+def _is_read_only_tool_source_path_intent(
+    inventory: Inventory,
+    data: object,
+    command_data: object,
+    command: str,
+    paths: list[str],
+    text: str,
+) -> bool:
+    allow_read_only_product_source_vcs_inspection = _is_read_only_product_source_vcs_inspection_command(
+        inventory,
+        command,
+        paths,
+    )
+    allow_delegation_prompt_context = _is_delegation_prompt_context_request(data, text)
+    return (
+        _is_read_only_source_discovery_command(command)
+        or _is_read_only_shell_wrapper_command(command)
+        or _is_read_only_git_inspection_command(command)
+        or _is_read_only_mlh_inspection_command(command)
+        or _is_read_only_mlh_report_command(command)
+        or _is_read_only_hook_diagnostic_simulation_command(command)
+        or _is_bounded_mlh_read_tool_request(data)
+        or _is_read_only_product_source_smoke_command(inventory, command)
+        or _is_read_only_product_source_test_command(inventory, command_data, command, paths)
+        or _is_read_only_product_source_inspection_command(inventory, command_data, command)
+        or allow_read_only_product_source_vcs_inspection
+        or _is_read_only_subagent_delegation_request(data, text)
+        or _is_reviewed_local_vcs_delegation_request(data, text)
+        or (allow_delegation_prompt_context and _is_subagent_delegation_only_request(data))
+    )
 
 
 def _stop_policy_findings(inventory: Inventory) -> list[Finding]:
