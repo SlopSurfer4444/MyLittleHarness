@@ -91,6 +91,35 @@ def parse_frontmatter(text: str) -> Frontmatter:
     return Frontmatter(True, data, errors, closing_index + 2)
 
 
+def parse_frontmatter_top_level_scalars(text: str) -> Frontmatter:
+    """Read only top-level scalar frontmatter keys without interpreting nested YAML."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return Frontmatter.empty()
+
+    closing_index = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            closing_index = index
+            break
+    if closing_index is None:
+        return Frontmatter(True, {}, ["frontmatter opening marker has no closing marker"], len(lines) + 1)
+
+    data: dict[str, object] = {}
+    for line in lines[1:closing_index]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("- ") or line.startswith((" ", "\t")):
+            continue
+        match = KEY_RE.match(line)
+        if not match:
+            continue
+        key = match.group(1)
+        raw_value = match.group(2).strip()
+        data[key] = _parse_scalar(raw_value) if raw_value else ""
+
+    return Frontmatter(True, data, [], closing_index + 2)
+
+
 def extract_headings(text: str) -> list[Heading]:
     headings: list[Heading] = []
     for index, line in enumerate(text.splitlines(), start=1):

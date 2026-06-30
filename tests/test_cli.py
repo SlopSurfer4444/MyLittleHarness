@@ -7188,6 +7188,94 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--root", str(root), "check"]), 0)
             self.assertNotIn("check-agent-run-record-stale", refreshed_check.getvalue())
 
+
+    def test_evidence_normalize_agent_run_repairs_blank_eof_without_source_hash_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            record_rel = "project/verification/agent-runs/run-format.md"
+            record_path = root / record_rel
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            original_text = (
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "run-format"\n'
+                'role: "verifier"\n'
+                'status: "failed"\n'
+                "source_hashes:\n"
+                '  - "src/changed.py sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+                "---\n"
+                "# Run Format\n"
+                "\n"
+            )
+            record_path.write_text(original_text, encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                self.assertEqual(
+                    main([
+                        "--root",
+                        str(root),
+                        "evidence",
+                        "--normalize-agent-run",
+                        "--dry-run",
+                        "--target",
+                        record_rel,
+                    ]),
+                    0,
+                )
+            dry_rendered = dry_run_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("agent-run-record-normalize-dry-run", dry_rendered)
+            self.assertIn("format-only write does not refresh source_hashes", dry_rendered)
+            token_match = re.search(r"proposal_token=(arn-[a-f0-9]+)", dry_rendered)
+            self.assertIsNotNone(token_match)
+            token = token_match.group(1) if token_match else ""
+
+            bad_apply_output = io.StringIO()
+            with redirect_stdout(bad_apply_output):
+                self.assertEqual(
+                    main([
+                        "--root",
+                        str(root),
+                        "evidence",
+                        "--normalize-agent-run",
+                        "--apply",
+                        "--target",
+                        record_rel,
+                        "--proposal-token",
+                        "arn-stale",
+                    ]),
+                    2,
+                )
+            self.assertIn("--proposal-token must match", bad_apply_output.getvalue())
+            self.assertEqual(original_text, record_path.read_text(encoding="utf-8"))
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main([
+                        "--root",
+                        str(root),
+                        "evidence",
+                        "--normalize-agent-run",
+                        "--apply",
+                        "--target",
+                        record_rel,
+                        "--proposal-token",
+                        token,
+                    ]),
+                    0,
+                )
+            apply_rendered = apply_output.getvalue()
+            normalized = record_path.read_text(encoding="utf-8")
+            self.assertIn("agent-run-record-normalized", apply_rendered)
+            self.assertTrue(normalized.endswith("\n"))
+            self.assertFalse(normalized.endswith("\n\n"))
+            self.assertIn('src/changed.py sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', normalized)
+            self.assertIn("evidence normalize-agent-run apply updated only generated Markdown EOF/trailing whitespace", apply_rendered)
+
     def test_evidence_record_accepts_structured_product_source_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -37686,6 +37774,186 @@ class CliTests(unittest.TestCase):
                 self.assertIn(path, messages)
             self.assertIn(" add --", messages)
             self.assertIn("working tree is preserved", messages)
+
+
+    def test_hooks_pre_tool_handles_symphony_coordination_checkpoint_and_index_splits(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'active_plan: ""\n---',
+                    'active_plan: ""\nphase_status: "complete"\n---',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            def write(rel: str, text: str) -> None:
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+
+            def write_json(rel: str, data: dict[str, object]) -> None:
+                write(rel, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+            source_paths = (
+                "docs/specs/symphony-agent-backend-contract-spec.md",
+                "elixir/lib/symphony_elixir/agent_runner.ex",
+                "elixir/test/symphony_elixir/pipeline_catalog_test.exs",
+            )
+            for rel in source_paths:
+                write(rel, "# reviewed source change\n")
+
+            standing_rel = "project/decisions/standing-delegations/symphony-local-dogfood-20260628.json"
+            queue_rel = "project/symphony/queue/standing-delegation-conveyor-20260628-live-conduct.json"
+            bad_agent_rel = "project/verification/agent-runs/standing-delegation-conveyor-20260628-conductor.md"
+            good_agent_rel = "project/verification/agent-runs/standing-delegation-conveyor-20260628-live-conduct-conductor-cycle.md"
+            handoff_rel = "project/verification/handoffs/standing-delegation-conveyor-20260628-conductor.json"
+            work_claim_rel = "project/verification/work-claims/standing-delegation-conveyor-20260628-conductor.json"
+            task_session_rel = "project/verification/task-sessions/standing-delegation-conveyor-20260628-live-conduct-conductor-turn-1.json"
+
+            boundary = "repo-visible evidence only; cannot approve lifecycle, roadmap, archive, Git, staging, commit, push, release, provider routing, or closeout"
+            write_json(
+                standing_rel,
+                {
+                    "schema": "mylittleharness.standing-delegation.v1",
+                    "record_type": "standing-delegation",
+                    "policy_id": "symphony-local-dogfood-20260628",
+                    "scope_roots": [".", "project/verification", "project/decisions/standing-delegations"],
+                    "allowed_actions": ["bounded-slice-selection", "exact-local-commit"],
+                    "non_authority": f"does not approve lifecycle, roadmap, archive, Git, staging, commit, push, release, provider routing, or closeout by itself; {boundary}",
+                    "authority_boundary": boundary,
+                },
+            )
+            write_json(
+                queue_rel,
+                {
+                    "schema": "mlh.symphony.queue-item.v1",
+                    "id": "standing-delegation-conveyor-20260628-live-conduct",
+                    "identifier": "MLHQ-STANDING-DELEGATION-CONVEYOR-20260628-CONDUCT",
+                    "standing_delegation_refs": [standing_rel],
+                    "required_evidence": [bad_agent_rel, handoff_rel, work_claim_rel, good_agent_rel],
+                    "dispatch_preflight_refs": [bad_agent_rel, handoff_rel, work_claim_rel],
+                    "route_authority_boundary": boundary,
+                },
+            )
+            bad_record = (
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "standing-delegation-conveyor-20260628-conductor"\n'
+                'role: "conductor"\n'
+                'status: "failed"\n'
+                "---\n"
+                "# Conductor run\n"
+                "\n"
+            )
+            write(bad_agent_rel, bad_record)
+            write(
+                good_agent_rel,
+                "---\n"
+                'schema: "mylittleharness.agent-run.v1"\n'
+                'record_type: "agent-run"\n'
+                'record_id: "standing-delegation-conveyor-20260628-live-conduct-conductor-cycle"\n'
+                'role: "conductor"\n'
+                'status: "failed"\n'
+                "---\n"
+                "# Conductor cycle\n",
+            )
+            write_json(
+                handoff_rel,
+                {
+                    "schema": "mylittleharness.handoff-packet.v1",
+                    "handoff_id": "standing-delegation-conveyor-20260628-conductor",
+                    "status": "accepted",
+                    "evidence_refs": [bad_agent_rel],
+                    "authority_boundary": boundary,
+                },
+            )
+            write_json(
+                work_claim_rel,
+                {
+                    "schema": "mylittleharness.work-claim.v1",
+                    "record_type": "work-claim",
+                    "claim_id": "standing-delegation-conveyor-20260628-conductor",
+                    "status": "released",
+                    "authority_boundary": boundary,
+                },
+            )
+            write_json(
+                task_session_rel,
+                {
+                    "schema": "mylittleharness.task-session.receipt.v1",
+                    "record_type": "task-session-receipt",
+                    "session_id": "standing-delegation-conveyor-20260628-live-conduct-conductor-turn-1",
+                    "claim_refs": [work_claim_rel],
+                    "authority_boundary": boundary,
+                },
+            )
+
+            staged_paths = (
+                *source_paths,
+                standing_rel,
+                queue_rel,
+                bad_agent_rel,
+                good_agent_rel,
+                handoff_rel,
+                work_claim_rel,
+                task_session_rel,
+            )
+
+            def staged_text(_root: Path, rel: str) -> str | None:
+                target = root / rel
+                return target.read_text(encoding="utf-8") if target.exists() else None
+
+            git_word = "gi" + "t"
+            commit_command = f'{git_word} -C "{root}" commit -F reviewed-message.txt'
+            with (
+                patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths),
+                patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=staged_text),
+            ):
+                commit_payload = hook_event_payload(
+                    load_inventory(root),
+                    HOOK_PRE_TOOL_USE,
+                    [],
+                    json.dumps({"toolName": "shell_command", "workdir": str(root), "command": commit_command}),
+                )
+
+            commit_codes = {finding["code"] for finding in commit_payload["findings"]}
+            commit_messages = "\n".join(str(finding["message"]) for finding in commit_payload["findings"])
+            self.assertTrue(commit_payload["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", commit_codes)
+            self.assertIn("detected_checkpoint_classes=", commit_messages)
+            self.assertIn("standing-delegations", commit_messages)
+            self.assertIn("symphony-queue", commit_messages)
+            self.assertIn(f"restore --staged -- {bad_agent_rel}", commit_messages)
+            self.assertIn("diff --cached --check", commit_messages)
+            self.assertIn("working tree is preserved", commit_messages)
+
+            split_command = f'{git_word} -C "{root}" restore --staged -- {bad_agent_rel}'
+            source_split_command = f'{git_word} -C "{root}" restore --staged -- {source_paths[0]} {source_paths[1]}'
+            for command in (split_command, source_split_command):
+                with self.subTest(command=command):
+                    with (
+                        patch("mylittleharness.hooks._git_staged_paths_for_root", return_value=staged_paths),
+                        patch("mylittleharness.hooks._git_staged_file_text_for_root", side_effect=staged_text),
+                    ):
+                        payload = hook_event_payload(
+                            load_inventory(root),
+                            HOOK_PRE_TOOL_USE,
+                            [],
+                            json.dumps({"toolName": "shell_command", "workdir": str(root), "command": command}),
+                        )
+
+                    codes = {finding["code"] for finding in payload["findings"]}
+                    messages = "\n".join(str(finding["message"]) for finding in payload["findings"])
+                    self.assertFalse(payload["block"])
+                    self.assertIn("hooks-policy-allow-post-closeout-index-split", codes)
+                    self.assertIn("index-only", messages)
+                    self.assertIn("working-tree content remains untouched", messages)
 
     def test_hooks_pre_tool_commit_uses_staged_project_state_when_worktree_advances(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

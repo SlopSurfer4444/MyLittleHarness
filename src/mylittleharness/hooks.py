@@ -14,7 +14,7 @@ from .context_memory import context_memory_hook_context
 from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness_payload
 from .inventory import Inventory, load_inventory
 from .models import Finding
-from .parsing import parse_frontmatter
+from .parsing import parse_frontmatter, parse_frontmatter_top_level_scalars
 from .preflight import preflight_sections
 from .reporting import command_action_report_dict
 from .routes import classify_memory_route
@@ -5570,6 +5570,8 @@ def _is_checkpoint_sensitive_staged_path(inventory: Inventory, path: str) -> boo
         or _is_worker_run_receipt_route_path(rel)
         or _is_retention_receipt_route_path(rel)
         or _is_checkpoint_decision_route_path(rel)
+        or _is_standing_delegation_checkpoint_route_path(rel)
+        or _is_symphony_queue_checkpoint_route_path(rel)
         or _is_verification_checkpoint_route_path(rel)
         or _is_top_level_verification_checkpoint_path(rel)
         or _is_meta_feedback_incubation_route_path(rel)
@@ -5885,16 +5887,29 @@ def _coherent_post_closeout_index_split_paths(
         return set()
     if not any(_is_checkpoint_sensitive_staged_path(inventory, path) for path in staged):
         return set()
-    if selected == set(staged) and _coherent_checkpoint_path_set(inventory, selected):
+    staged_coherent = _coherent_checkpoint_path_set(inventory, staged)
+    if selected == set(staged) and staged_coherent:
         return selected
     if selected == set(staged) and all(_is_checkpoint_sensitive_staged_path(inventory, path) for path in selected):
         return selected
-    if _coherent_checkpoint_path_set(inventory, staged):
-        return set()
     remaining = tuple(path for path in staged if path not in selected)
     if _coherent_checkpoint_path_set(inventory, selected) or _coherent_checkpoint_path_set(inventory, remaining):
         return selected
+    if _reviewed_exact_index_only_unstage_selection_paths(inventory, selected):
+        return selected
     return set()
+
+
+def _reviewed_exact_index_only_unstage_selection_paths(inventory: Inventory, selected: set[str]) -> set[str]:
+    if not selected:
+        return set()
+    for path in selected:
+        if _is_checkpoint_sensitive_staged_path(inventory, path):
+            continue
+        if _is_exact_post_closeout_stage_file(inventory, path):
+            continue
+        return set()
+    return set(selected)
 
 
 def _normalized_exact_staged_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -5936,6 +5951,7 @@ def _coherent_checkpoint_path_set(inventory: Inventory, paths: set[str] | tuple[
     return (
         _coherent_reviewed_local_vcs_checkpoint_paths(inventory, ordered)
         or _coherent_post_closeout_mixed_vcs_finalization_paths(inventory, ordered)
+        or _coherent_post_closeout_coordination_evidence_checkpoint_paths(inventory, ordered)
     )
 
 
@@ -6571,6 +6587,53 @@ def _coherent_post_closeout_mixed_vcs_finalization_paths(
     return lifecycle_paths | ordinary_paths
 
 
+def _coherent_post_closeout_coordination_evidence_checkpoint_paths(
+    inventory: Inventory,
+    paths: list[str] | tuple[str, ...],
+    *,
+    prefer_staged_content: bool = False,
+) -> set[str]:
+    if _has_active_plan(inventory):
+        return set()
+    state = inventory.state
+    if not state or not state.exists:
+        return set()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip().casefold() != "none":
+        return set()
+    if str(state_data.get("phase_status") or "").strip().casefold() != "complete":
+        return set()
+
+    normalized: set[str] = set()
+    for path in paths:
+        clean = _normalize_hook_path(_hook_route_rel_path(inventory, path) or path).casefold()
+        if not clean or clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+            return set()
+        if any(char in clean for char in "*?[]"):
+            return set()
+        if clean.startswith(":") or any(clean.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
+            return set()
+        normalized.add(clean)
+    if not normalized:
+        return set()
+
+    route_paths = {path for path in normalized if _is_coordination_checkpoint_route_path(path)}
+    if not route_paths:
+        return set()
+    ordinary_paths = normalized - route_paths
+    for path in route_paths:
+        if not _is_reviewed_coordination_checkpoint_route_file(
+            inventory,
+            path,
+            prefer_staged_content=prefer_staged_content,
+        ):
+            return set()
+    for path in ordinary_paths:
+        if not _is_exact_post_closeout_stage_file(inventory, path):
+            return set()
+    return normalized
+
+
 def _coherent_post_closeout_roadmap_promotion_finalization_paths(
     inventory: Inventory,
     paths: list[str] | tuple[str, ...],
@@ -6765,6 +6828,13 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(
     post_closeout_paths = _coherent_post_closeout_lifecycle_vcs_finalization_paths(inventory, paths)
     if post_closeout_paths:
         return post_closeout_paths
+    coordination_paths = _coherent_post_closeout_coordination_evidence_checkpoint_paths(
+        inventory,
+        paths,
+        prefer_staged_content=prefer_staged_content,
+    )
+    if coordination_paths:
+        return coordination_paths
     archived_source_tombstone_paths = _coherent_archived_source_incubation_tombstone_stage_paths(inventory, paths)
     if archived_source_tombstone_paths:
         return archived_source_tombstone_paths
@@ -6797,7 +6867,7 @@ def _coherent_reviewed_local_vcs_checkpoint_paths(
         )
     agent_run_paths = {path for path in normalized if _is_agent_run_evidence_route_path(path)}
     if agent_run_paths and normalized == agent_run_paths:
-        return normalized if all(_is_reviewed_agent_run_evidence_file(inventory, path) for path in agent_run_paths) else set()
+        return normalized if all(_is_reviewed_agent_run_evidence_file(inventory, path, prefer_staged_content=prefer_staged_content) for path in agent_run_paths) else set()
     receipt_paths = {path for path in normalized if _is_worker_run_receipt_route_path(path)}
     if receipt_paths:
         allowed = set(receipt_paths)
@@ -7806,6 +7876,101 @@ def _is_checkpoint_decision_route_path(path: str) -> bool:
     return rel.startswith("project/decisions/") and rel.endswith(".md")
 
 
+def _is_standing_delegation_checkpoint_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/decisions/standing-delegations/") and rel.endswith(".json")
+
+
+def _is_symphony_queue_checkpoint_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return rel.startswith("project/symphony/queue/") and rel.endswith(".json")
+
+
+def _is_coordination_checkpoint_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return (
+        _is_agent_run_evidence_route_path(rel)
+        or _is_verification_checkpoint_route_path(rel)
+        or _is_standing_delegation_checkpoint_route_path(rel)
+        or _is_symphony_queue_checkpoint_route_path(rel)
+    )
+
+
+def _is_reviewed_coordination_checkpoint_route_file(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    if _is_agent_run_evidence_route_path(rel):
+        return _is_reviewed_agent_run_evidence_file(inventory, rel, prefer_staged_content=prefer_staged_content)
+    if _is_verification_checkpoint_route_path(rel):
+        return _is_reviewed_verification_checkpoint_file(inventory, rel)
+    if _is_standing_delegation_checkpoint_route_path(rel):
+        return _is_reviewed_standing_delegation_checkpoint_file(inventory, rel)
+    if _is_symphony_queue_checkpoint_route_path(rel):
+        return _is_reviewed_symphony_queue_checkpoint_file(inventory, rel)
+    return False
+
+
+def _is_reviewed_standing_delegation_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    data = _route_checkpoint_json_object(inventory, path)
+    if data is None:
+        return False
+    if str(data.get("schema") or "").strip() != "mylittleharness.standing-delegation.v1":
+        return False
+    if str(data.get("record_type") or "").strip() != "standing-delegation":
+        return False
+    if str(data.get("policy_id") or "").strip() != Path(path).stem:
+        return False
+    if _route_evidence_grants_authority(data):
+        return False
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True).casefold()
+    return _route_evidence_text_has_non_authority_boundary(encoded)
+
+
+def _is_reviewed_symphony_queue_checkpoint_file(inventory: Inventory, path: str) -> bool:
+    data = _route_checkpoint_json_object(inventory, path)
+    if data is None:
+        return False
+    if str(data.get("schema") or "").strip() != "mlh.symphony.queue-item.v1":
+        return False
+    item_id = str(data.get("id") or "").strip()
+    identifier = str(data.get("identifier") or "").strip()
+    if item_id and item_id != Path(path).stem:
+        return False
+    if not item_id and not identifier:
+        return False
+    if _route_evidence_grants_authority(data):
+        return False
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True).casefold()
+    if not _route_evidence_text_has_non_authority_boundary(encoded):
+        return False
+    evidence_fields = (
+        "claim_refs",
+        "dispatch_preflight_refs",
+        "handoff_refs",
+        "required_evidence",
+        "standing_delegation_refs",
+        "worker_launch_envelope_refs",
+    )
+    return any(isinstance(data.get(field), list) and data.get(field) for field in evidence_fields)
+
+
+def _route_checkpoint_json_object(inventory: Inventory, path: str) -> dict[str, object] | None:
+    route_path = _hook_route_file_path(inventory, path)
+    if route_path is None:
+        return None
+    try:
+        if not route_path.is_file() or route_path.is_symlink() or route_path.suffix.casefold() != ".json":
+            return None
+        data = json.loads(route_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _is_verification_checkpoint_route_path(path: str) -> bool:
     return bool(_verification_checkpoint_path_class(path))
 
@@ -7894,8 +8059,10 @@ def _is_reviewed_verification_checkpoint_file(inventory: Inventory, path: str) -
     schema, record_type = expected
     if str(data.get("schema") or "").strip() != schema:
         return False
-    if str(data.get("record_type") or "").strip() != record_type:
-        return False
+    actual_record_type = str(data.get("record_type") or "").strip()
+    if actual_record_type != record_type:
+        if not (route_class == "handoffs" and not actual_record_type and str(data.get("handoff_id") or "").strip()):
+            return False
     if _route_evidence_grants_authority(data):
         return False
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True).casefold()
@@ -8495,6 +8662,10 @@ def _reviewed_local_vcs_checkpoint_path_classes(paths: set[str]) -> str:
         classes.append("retention-receipts")
     if any(_is_checkpoint_decision_route_path(path) for path in paths):
         classes.append("decisions")
+    if any(_is_standing_delegation_checkpoint_route_path(path) for path in paths):
+        classes.append("standing-delegations")
+    if any(_is_symphony_queue_checkpoint_route_path(path) for path in paths):
+        classes.append("symphony-queue")
     verification_classes = sorted(
         {
             route_class
@@ -8585,18 +8756,23 @@ def _reviewed_deferred_archive_plan_source_research(inventory: Inventory, path: 
     return source_research
 
 
-def _is_reviewed_agent_run_evidence_file(inventory: Inventory, path: str) -> bool:
+def _is_reviewed_agent_run_evidence_file(
+    inventory: Inventory,
+    path: str,
+    *,
+    prefer_staged_content: bool = False,
+) -> bool:
     if not _is_agent_run_evidence_route_path(path):
         return False
-    route_path = _hook_route_file_path(inventory, path)
-    if route_path is None:
+    text = _route_file_text_for_checkpoint(inventory, path, prefer_staged_content=prefer_staged_content)
+    if text is None:
         return False
     try:
-        if not route_path.is_file() or route_path.is_symlink():
-            return False
-        frontmatter = parse_frontmatter(route_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
+        frontmatter = parse_frontmatter(text)
+    except ValueError:
         return False
+    if frontmatter.has_frontmatter and frontmatter.errors:
+        frontmatter = parse_frontmatter_top_level_scalars(text)
     if not frontmatter.has_frontmatter or frontmatter.errors:
         return False
     data = frontmatter.data
@@ -8604,7 +8780,14 @@ def _is_reviewed_agent_run_evidence_file(inventory: Inventory, path: str) -> boo
         str(data.get("schema") or "").strip() == "mylittleharness.agent-run.v1"
         and str(data.get("record_type") or "").strip() == "agent-run"
         and bool(str(data.get("status") or "").strip())
+        and _generated_markdown_has_canonical_eof(text)
     )
+
+
+def _generated_markdown_has_canonical_eof(text: str) -> bool:
+    stripped = str(text or "").rstrip()
+    expected = f"{stripped}\n" if stripped else "\n"
+    return text == expected
 
 
 def _is_worker_run_receipt_route_path(path: str) -> bool:
@@ -9445,6 +9628,9 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if _is_worker_run_receipt_route_path(rel):
         return mlh_command("evidence", "--receipt-refresh", "--dry-run", "--target", rel)
     if _is_agent_run_evidence_route_path(rel):
+        route_path = _hook_route_file_path(inventory, rel)
+        if route_path is not None and route_path.exists():
+            return mlh_command("evidence", "--normalize-agent-run", "--dry-run", "--target", rel)
         record_id = _route_topic_from_path(rel) or "<record-id>"
         return mlh_command(
             "evidence",
@@ -9537,7 +9723,7 @@ def _post_closeout_checkpoint_split_next_safe_command(inventory: Inventory, data
         return ""
     staged_paths = _git_staged_paths_for_root(target_inventory.root)
     staged = _normalized_exact_staged_paths(target_inventory, staged_paths)
-    if not staged or _coherent_checkpoint_path_set(target_inventory, staged):
+    if not staged or _is_post_closeout_local_vcs_commit_command(target_inventory, command):
         return ""
     split_paths = _post_closeout_checkpoint_split_candidate_paths(target_inventory, staged)
     if not split_paths:
@@ -9561,13 +9747,19 @@ def _post_closeout_checkpoint_split_next_safe_command(inventory: Inventory, data
 def _post_closeout_checkpoint_split_candidate_paths(inventory: Inventory, staged: tuple[str, ...]) -> tuple[str, ...]:
     candidate_groups = [
         tuple(path for path in staged if _is_meta_feedback_incubation_route_path(path)),
+        tuple(
+            path
+            for path in staged
+            if _is_agent_run_evidence_route_path(path)
+            and not _is_reviewed_agent_run_evidence_file(inventory, path, prefer_staged_content=True)
+        ),
         tuple(path for path in staged if _is_agent_run_evidence_route_path(path)),
         tuple(
             path
             for path in staged
             if _is_worker_run_receipt_route_path(path) or _is_retention_receipt_route_path(path)
         ),
-        tuple(path for path in staged if _is_checkpoint_decision_route_path(path) or _is_verification_checkpoint_route_path(path)),
+        tuple(path for path in staged if _is_coordination_checkpoint_route_path(path)),
     ]
     for group in candidate_groups:
         if not group:

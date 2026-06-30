@@ -14,7 +14,7 @@ from .command_discovery import rails_not_cognition_boundary_finding
 from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
-from .parsing import Frontmatter, parse_frontmatter
+from .parsing import Frontmatter, parse_frontmatter, parse_frontmatter_top_level_scalars
 from .root_boundary import (
     PRODUCT_SOURCE_REF_PREFIX,
     product_source_ref_rel as shared_product_source_ref_rel,
@@ -66,6 +66,7 @@ AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
 AGENT_RUN_RECORD_PREFIX = f"{AGENT_RUNS_DIR_REL}/"
 AGENT_RUN_RETIREMENT_SUMMARY_REL = "project/verification/agent-run-retirement-summary.md"
 AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
+AGENT_RUN_NORMALIZE_TOKEN_PREFIX = "arn-"
 AGENT_RUN_SOURCE_HASH_SUMMARY_THRESHOLD = 8
 AGENT_RUN_SOURCE_HASH_SUMMARY_SAMPLE_LIMIT = 4
 WORKER_RUN_RECEIPTS_DIR_REL = "project/verification/worker-run-receipts"
@@ -1124,6 +1125,21 @@ class AgentRunRecordRefreshPlan:
 
 
 @dataclass(frozen=True)
+class AgentRunRecordNormalizeRequest:
+    target: str
+    proposal_token: str
+
+
+@dataclass(frozen=True)
+class AgentRunRecordNormalizePlan:
+    rel_path: str
+    current_text: str
+    updated_text: str
+    current_target_hash: str
+    proposal_token: str
+
+
+@dataclass(frozen=True)
 class WorkerRunReceiptRefreshRequest:
     target: str
     proposal_token: str
@@ -1202,6 +1218,13 @@ def make_agent_run_record_request(args: object) -> AgentRunRecordRequest:
         provider=str(getattr(args, "provider", "") or "").strip(),
         model_id=str(getattr(args, "model_id", "") or "").strip(),
         tools=_tuple_values(getattr(args, "tools", ())),
+    )
+
+
+def make_agent_run_record_normalize_request(args: object) -> AgentRunRecordNormalizeRequest:
+    return AgentRunRecordNormalizeRequest(
+        target=str(getattr(args, "receipt_target", "") or "").replace("\\", "/").strip(),
+        proposal_token=str(getattr(args, "proposal_token", "") or "").strip(),
     )
 
 
@@ -1344,6 +1367,77 @@ def agent_run_record_apply_findings(inventory: Inventory, request: AgentRunRecor
     findings.extend(_agent_run_record_boundary_findings())
     return findings
 
+
+
+def agent_run_record_normalize_dry_run_findings(inventory: Inventory, request: AgentRunRecordNormalizeRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "agent-run-record-normalize-dry-run", "agent run evidence record format-normalization proposal only; no files were written"),
+        Finding("info", "agent-run-record-normalize-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _agent_run_record_normalize_request_findings(inventory, request, severity="warn")
+    findings.extend(request_findings)
+    if any(finding.severity in {"warn", "error"} for finding in request_findings):
+        findings.append(Finding("info", "agent-run-record-normalize-validation-posture", "dry-run refused before apply; fix the agent-run target before normalizing generated Markdown"))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+
+    plan, plan_findings = _agent_run_record_normalize_plan(inventory.root, request.target, severity="warn")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "agent-run-record-normalize-validation-posture", "dry-run refused before apply; fix the existing agent run evidence record before normalizing generated Markdown"))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+
+    findings.extend(_agent_run_record_normalize_route_findings(plan, apply=False))
+    findings.extend(_agent_run_record_normalize_boundary_findings())
+    return findings
+
+
+def agent_run_record_normalize_apply_findings(inventory: Inventory, request: AgentRunRecordNormalizeRequest) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding("info", "agent-run-record-normalize-apply", "agent run evidence record format-normalization apply started"),
+        Finding("info", "agent-run-record-normalize-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    request_findings = _agent_run_record_normalize_request_findings(inventory, request, severity="error")
+    findings.extend(request_findings)
+    if any(finding.severity == "error" for finding in request_findings):
+        findings.append(Finding("info", "agent-run-record-normalize-validation-posture", "apply refused before normalizing generated Markdown"))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+
+    plan, plan_findings = _agent_run_record_normalize_plan(inventory.root, request.target, severity="error")
+    findings.extend(plan_findings)
+    if plan is None:
+        findings.append(Finding("info", "agent-run-record-normalize-validation-posture", "apply refused before normalizing generated Markdown"))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+    if request.proposal_token != plan.proposal_token:
+        findings.append(Finding("error", "agent-run-record-normalize-refused", "--proposal-token must match the current dry-run normalization proposal", plan.rel_path))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+    if plan.current_text == plan.updated_text:
+        findings.append(Finding("info", "agent-run-record-normalize-current", "agent run evidence record generated Markdown already has canonical EOF formatting; no route write was needed", plan.rel_path))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+
+    target = inventory.root / plan.rel_path
+    tmp_path = target.with_name(f".{target.name}.tmp")
+    backup_path = target.with_name(f".{target.name}.bak")
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target, tmp_path, plan.updated_text, backup_path),),
+            root=inventory.root,
+        )
+    except FileTransactionError as exc:
+        findings.append(Finding("error", "agent-run-record-normalize-refused", f"failed to normalize agent run record before apply completed: {exc}", plan.rel_path))
+        findings.extend(_agent_run_record_normalize_boundary_findings())
+        return findings
+
+    findings.extend(_agent_run_record_normalize_route_findings(plan, apply=True))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "agent-run-record-normalize-backup-cleanup", warning, plan.rel_path))
+    findings.extend(_agent_run_record_normalize_boundary_findings())
+    return findings
 
 def worker_run_receipt_refresh_dry_run_findings(inventory: Inventory, request: WorkerRunReceiptRefreshRequest) -> list[Finding]:
     findings: list[Finding] = [
@@ -5760,6 +5854,178 @@ def _worker_run_receipt_refresh_boundary_findings() -> list[Finding]:
         ),
     ]
 
+
+
+def _agent_run_record_normalize_request_findings(
+    inventory: Inventory,
+    request: AgentRunRecordNormalizeRequest,
+    severity: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                severity,
+                "agent-run-record-normalize-refused",
+                "agent run record normalization is live-root only; product fixtures and archive roots remain read-only context",
+            )
+        )
+    if not request.target:
+        findings.append(Finding(severity, "agent-run-record-normalize-refused", "--target is required for agent-run normalization"))
+        return findings
+    findings.extend(_agent_run_record_normalize_target_findings(inventory.root, request.target, severity))
+    return findings
+
+
+def _agent_run_record_normalize_target_findings(root: Path, target_rel: str, severity: str) -> list[Finding]:
+    findings: list[Finding] = []
+    conflict = _root_relative_path_conflict(target_rel)
+    if conflict:
+        return [Finding(severity, "agent-run-record-normalize-refused", f"agent run record target {conflict}", target_rel)]
+    if not target_rel.startswith(AGENT_RUN_RECORD_PREFIX) or not target_rel.endswith(".md"):
+        return [
+            Finding(
+                severity,
+                "agent-run-record-normalize-refused",
+                f"agent run record target must be under {AGENT_RUN_RECORD_PREFIX}*.md",
+                target_rel,
+            )
+        ]
+    target = (root / target_rel).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return [Finding(severity, "agent-run-record-normalize-refused", "agent run record target escapes the target root", target_rel)]
+    parent = root.resolve()
+    for part in Path(target_rel).parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            findings.append(Finding(severity, "agent-run-record-normalize-refused", f"agent run record target directory contains a symlink segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+        if parent.exists() and not parent.is_dir():
+            findings.append(Finding(severity, "agent-run-record-normalize-refused", f"agent run record target directory contains a non-directory segment: {_to_rel_path(root, parent)}", target_rel))
+            break
+    if not target.exists():
+        findings.append(Finding(severity, "agent-run-record-normalize-refused", "agent run record target does not exist; normalization only maintains existing agent-run records", target_rel))
+    elif target.is_symlink():
+        findings.append(Finding(severity, "agent-run-record-normalize-refused", "agent run record target must not be a symlink", target_rel))
+    elif not target.is_file():
+        findings.append(Finding(severity, "agent-run-record-normalize-refused", "agent run record target is not a regular file", target_rel))
+    return findings
+
+
+def _agent_run_record_normalize_plan(root: Path, target_rel: str, severity: str) -> tuple[AgentRunRecordNormalizePlan | None, list[Finding]]:
+    target = root / target_rel
+    try:
+        current_text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding(severity, "agent-run-record-normalize-refused", f"agent run record could not be read before format normalization: {exc}", target_rel)]
+
+    frontmatter = parse_frontmatter(current_text)
+    frontmatter_scope_finding: Finding | None = None
+    if frontmatter.has_frontmatter and frontmatter.errors:
+        frontmatter = parse_frontmatter_top_level_scalars(current_text)
+        if not frontmatter.errors:
+            frontmatter_scope_finding = Finding(
+                "info",
+                "agent-run-record-normalize-frontmatter-scope",
+                "full frontmatter contains nested YAML outside the lightweight parser; normalization validated only top-level identity fields and preserves metadata bytes except generated Markdown EOF/trailing whitespace",
+                target_rel,
+            )
+    data = frontmatter.data
+    if not frontmatter.has_frontmatter:
+        return None, [Finding(severity, "agent-run-record-normalize-refused", "agent run record is missing frontmatter; normalization refuses to guess metadata boundaries", target_rel)]
+    if frontmatter.errors:
+        return None, [Finding(severity, "agent-run-record-normalize-refused", "agent run record has malformed frontmatter; normalization refuses to guess metadata boundaries", target_rel)]
+    if data.get("schema") != AGENT_RUN_SCHEMA:
+        return None, [Finding(severity, "agent-run-record-normalize-refused", f"agent run record schema should be {AGENT_RUN_SCHEMA}", target_rel)]
+    if data.get("record_type") != "agent-run":
+        return None, [Finding(severity, "agent-run-record-normalize-refused", "agent run record record_type should be agent-run", target_rel)]
+    record_id = str(data.get("record_id") or "").strip()
+    expected_record_id = Path(target_rel).stem
+    if record_id_conflict(record_id):
+        return None, [Finding(severity, "agent-run-record-normalize-refused", f"agent run record_id {record_id!r} is unsafe: {record_id_conflict(record_id)}", target_rel)]
+    if record_id != expected_record_id:
+        return None, [Finding(severity, "agent-run-record-normalize-refused", f"agent run record_id {record_id!r} does not match route target {expected_record_id!r}", target_rel)]
+
+    updated_text = _normalize_generated_markdown_text(current_text)
+    current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+    updated_hash = hashlib.sha256(updated_text.encode("utf-8")).hexdigest()
+    proposal_token = _agent_run_record_normalize_token(target_rel, current_hash, updated_hash)
+    findings = [
+        Finding(
+            "info",
+            "agent-run-record-normalize-target",
+            f"normalize generated Markdown EOF/trailing whitespace for existing agent run evidence record: {target_rel}",
+            target_rel,
+        )
+    ]
+    if frontmatter_scope_finding is not None:
+        findings.append(frontmatter_scope_finding)
+    return AgentRunRecordNormalizePlan(target_rel, current_text, updated_text, current_hash, proposal_token), findings
+
+
+def _agent_run_record_normalize_token(target_rel: str, current_hash: str, updated_hash: str) -> str:
+    payload = "\n".join((target_rel, current_hash, updated_hash))
+    return f"{AGENT_RUN_NORMALIZE_TOKEN_PREFIX}{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _agent_run_record_normalize_route_findings(plan: AgentRunRecordNormalizePlan, *, apply: bool) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "agent-run-record-normalize-token",
+            (
+                f"current target sha256={plan.current_target_hash}; proposal_token={plan.proposal_token}; "
+                f"apply with: mylittleharness --root <root> evidence --normalize-agent-run --apply --target {plan.rel_path} --proposal-token {plan.proposal_token}"
+            ),
+            plan.rel_path,
+        )
+    ]
+    if plan.current_text == plan.updated_text:
+        findings.append(
+            Finding(
+                "info",
+                "agent-run-record-normalize-current",
+                "agent run evidence record generated Markdown already has canonical EOF formatting; no route write is needed",
+                plan.rel_path,
+            )
+        )
+        return findings
+    before_hash = _short_hash(plan.current_text)
+    after_hash = _short_hash(plan.updated_text)
+    before_bytes = len(plan.current_text.encode("utf-8"))
+    after_bytes = len(plan.updated_text.encode("utf-8"))
+    prefix = "normalized" if apply else "would normalize"
+    findings.extend(
+        [
+            Finding("info", "agent-run-record-normalized" if apply else "agent-run-record-normalize-dry-run", f"{prefix} generated Markdown EOF/trailing whitespace for existing agent run evidence record: {plan.rel_path}", plan.rel_path),
+            Finding(
+                "info",
+                "agent-run-record-normalize-route-write",
+                f"{prefix} route {plan.rel_path}; before_hash={before_hash}; after_hash={after_hash}; before_bytes={before_bytes}; after_bytes={after_bytes}; format-only write does not refresh source_hashes or alter semantic evidence fields",
+                plan.rel_path,
+            ),
+        ]
+    )
+    return findings
+
+
+def _agent_run_record_normalize_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "agent-run-record-normalize-boundary",
+            "agent run record normalization only trims generated Markdown trailing whitespace/extra EOF blanks; it does not refresh source_hashes, alter frontmatter semantics, approve lifecycle, staging, commit, archive, or target acceptance",
+            AGENT_RUNS_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "agent-run-record-normalize-route",
+            f"agent run record normalization is limited to existing {AGENT_RUN_RECORD_PREFIX}*.md records and creates no runtime, queue, provider gateway, or hidden state",
+            AGENT_RUNS_DIR_REL,
+        ),
+    ]
 
 def _agent_run_record_target_rel(request: AgentRunRecordRequest) -> str:
     return f"{AGENT_RUN_RECORD_PREFIX}{request.record_id}.md"

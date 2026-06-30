@@ -98,11 +98,14 @@ from .daemon import mlhd_control_payload, mlhd_control_sections
 from .evidence import (
     agent_run_record_apply_findings,
     agent_run_record_dry_run_findings,
+    agent_run_record_normalize_apply_findings,
+    agent_run_record_normalize_dry_run_findings,
     agent_run_record_findings,
     evidence_ref_retarget_apply_findings,
     evidence_ref_retarget_dry_run_findings,
     evidence_findings,
     make_agent_run_record_request,
+    make_agent_run_record_normalize_request,
     make_evidence_ref_retarget_request,
     make_queue_runner_fixture_update_request,
     make_worker_run_receipt_refresh_request,
@@ -932,9 +935,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if command == "evidence":
-        evidence_modes = [bool(args.record), bool(args.receipt_refresh), bool(args.retarget_ref), bool(args.fixture_update)]
+        evidence_modes = [bool(args.record), bool(args.receipt_refresh), bool(args.retarget_ref), bool(args.fixture_update), bool(args.normalize_agent_run)]
         if sum(evidence_modes) > 1:
-            parser.error("evidence --record, --receipt-refresh, --retarget-ref, and --fixture-update are mutually exclusive")
+            parser.error("evidence --record, --receipt-refresh, --retarget-ref, --fixture-update, and --normalize-agent-run are mutually exclusive")
         if args.record and not (args.dry_run or args.apply):
             parser.error("evidence --record requires --dry-run or --apply")
         if args.receipt_refresh and not (args.dry_run or args.apply):
@@ -943,17 +946,27 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("evidence --retarget-ref requires --dry-run or --apply")
         if args.fixture_update and not (args.dry_run or args.apply):
             parser.error("evidence --fixture-update requires --dry-run or --apply")
+        if args.normalize_agent_run and not (args.dry_run or args.apply):
+            parser.error("evidence --normalize-agent-run requires --dry-run or --apply")
         fixture_text_args = [args.fixture_text is not None, args.fixture_text_file is not None]
         if any(fixture_text_args) and not args.fixture_update:
             parser.error("evidence --text/--text-file are only valid with --fixture-update")
         if args.fixture_update and sum(fixture_text_args) != 1:
             parser.error("evidence --fixture-update requires exactly one of --text or --text-file")
         if (args.dry_run or args.apply) and not any(evidence_modes):
-            parser.error("evidence --dry-run/--apply are only valid with --record, --receipt-refresh, --retarget-ref, or --fixture-update")
+            parser.error("evidence --dry-run/--apply are only valid with --record, --receipt-refresh, --retarget-ref, --fixture-update, or --normalize-agent-run")
         if args.record:
             request = make_agent_run_record_request(args)
             report_name = "evidence --record --apply" if args.apply else "evidence --record --dry-run"
             findings = agent_run_record_apply_findings(inventory, request) if args.apply else agent_run_record_dry_run_findings(inventory, request)
+            findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+            result = _result_for(findings)
+            emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+            return 2 if args.apply and result == "error" else 0
+        if args.normalize_agent_run:
+            request = make_agent_run_record_normalize_request(args)
+            report_name = "evidence --normalize-agent-run --apply" if args.apply else "evidence --normalize-agent-run --dry-run"
+            findings = agent_run_record_normalize_apply_findings(inventory, request) if args.apply else agent_run_record_normalize_dry_run_findings(inventory, request)
             findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
             result = _result_for(findings)
             emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -3332,6 +3345,19 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["Use snapshot inspection as safety-evidence review only; manual rollback and source files remain operator decisions."]
         return ["snapshot inspection completed as a terminal-only read-only report; it did not approve repair, rollback, cleanup, closeout, archive, commit, or lifecycle decision."]
     if command == "evidence":
+        is_normalize_dry_run = any(finding.code == "agent-run-record-normalize-dry-run" for finding in findings)
+        if is_normalize_dry_run and any(
+            finding.code == "agent-run-record-normalize-refused" and finding.severity in {"warn", "error"} for finding in findings
+        ):
+            return ["evidence normalize-agent-run dry-run was refused before any protected agent-run Markdown write preview became reliable."]
+        if is_normalize_dry_run:
+            return ["evidence normalize-agent-run dry-run reported the target, canonical EOF formatting delta, and proposal token without writing files."]
+        if any(finding.code == "agent-run-record-normalized" for finding in findings):
+            return ["evidence normalize-agent-run apply updated only generated Markdown EOF/trailing whitespace; lifecycle, source hashes, staging, commit, archive, and target acceptance remain explicit."]
+        if any(finding.code == "agent-run-record-normalize-current" for finding in findings):
+            return ["evidence normalize-agent-run found the existing agent-run Markdown already canonical; no route write was needed."]
+        if any(finding.code == "agent-run-record-normalize-refused" and finding.severity == "error" for finding in findings):
+            return ["evidence normalize-agent-run apply was refused before protected agent-run Markdown was changed."]
         is_fixture_update_dry_run = any(finding.code == "queue-runner-fixture-update-dry-run" for finding in findings)
         if is_fixture_update_dry_run and any(
             finding.code == "queue-runner-fixture-update-refused" and finding.severity in {"warn", "error"} for finding in findings
