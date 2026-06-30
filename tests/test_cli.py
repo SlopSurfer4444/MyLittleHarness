@@ -34564,6 +34564,31 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("next_safe_command=mylittleharness --root <root> writeback --dry-run", state_messages)
 
+    def test_hooks_pre_tool_next_safe_guidance_is_not_semantically_same_as_denied_command(self) -> None:
+        from mylittleharness.hooks import _hook_next_safe_command_or_boundary
+
+        target_rel = "project/verification/agent-runs/run-format.md"
+        next_safe = f"mylittleharness --root <root> evidence --normalize-agent-run --dry-run --target {target_rel}"
+        same_commands = [
+            f"mylittleharness --root . evidence --target {target_rel} --normalize-agent-run --dry-run",
+            f"mylittleharness.exe --root C:/AIDev/Workspaces/repos/symphony evidence --normalize-agent-run --target=C:/AIDev/Workspaces/repos/symphony/{target_rel} --dry-run",
+            f"python -m mylittleharness --root <root> evidence --dry-run --target project\\verification\\agent-runs\\run-format.md --normalize-agent-run",
+        ]
+
+        for blocked_command in same_commands:
+            self.assertIn(
+                "no legal command available for the exact blocked command",
+                _hook_next_safe_command_or_boundary(blocked_command, next_safe),
+            )
+
+        apply_command = f"mylittleharness --root . evidence --normalize-agent-run --apply --target {target_rel}"
+        chained_command = (
+            f"mylittleharness --root . evidence --normalize-agent-run --dry-run --target {target_rel}; "
+            f"Set-Content -Path {target_rel} -Value '# bypass'"
+        )
+        self.assertEqual(next_safe, _hook_next_safe_command_or_boundary(apply_command, next_safe))
+        self.assertEqual(next_safe, _hook_next_safe_command_or_boundary(chained_command, next_safe))
+
     def test_hooks_pre_tool_replays_analogous_weak_spot_matrix(self) -> None:
         from mylittleharness.hooks import (
             HOOK_POST_TOOL_USE,
@@ -43958,6 +43983,103 @@ class CliTests(unittest.TestCase):
             self.assertTrue(direct_write_payload["block"])
             self.assertIn("hooks-policy-block-lifecycle-markdown-path", direct_write_codes)
             self.assertIn("hooks-policy-block-lifecycle-markdown-shortcut", direct_write_codes)
+
+    def test_hooks_pre_tool_allows_evidence_normalize_agent_run_route_but_blocks_direct_writes(self) -> None:
+        from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            agent_run_rel = "project/" + "verification/agent-runs/run-format.md"
+            agent_run_path = root / agent_run_rel
+            agent_run_path.parent.mkdir(parents=True, exist_ok=True)
+            agent_run_path.write_text(
+                '---\nschema: "mylittleharness.agent-run.v1"\nrecord_type: "agent-run"\nrecord_id: "run-format"\n---\n# Run\n',
+                encoding="utf-8",
+            )
+            dry_run_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"mylittleharness --root . evidence --normalize-agent-run --dry-run --target {agent_run_rel}",
+                }
+            )
+            apply_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": f"mylittleharness --root . evidence --normalize-agent-run --apply --target {agent_run_rel}",
+                }
+            )
+            direct_write_inputs = [
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": f"Set-Content -Path {agent_run_rel} -Value '# bypass'",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": f"Add-Content -Path {agent_run_rel} -Value '# bypass'",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": f"Remove-Item -LiteralPath {agent_run_rel}",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": "git add project/verification/agent-runs",
+                    }
+                ),
+            ]
+            chained_shortcut_input = json.dumps(
+                {
+                    "toolName": "shell_command",
+                    "command": (
+                        f"mylittleharness --root . evidence --normalize-agent-run --dry-run --target {agent_run_rel}; "
+                        f"Set-Content -Path {agent_run_rel} -Value '# bypass'"
+                    ),
+                }
+            )
+
+            dry_run_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], dry_run_input)
+            apply_payload = hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], apply_input)
+            direct_write_payloads = [
+                hook_event_payload(load_inventory(root), HOOK_PRE_TOOL_USE, [], direct_write_input)
+                for direct_write_input in direct_write_inputs
+            ]
+            chained_shortcut_payload = hook_event_payload(
+                load_inventory(root),
+                HOOK_PRE_TOOL_USE,
+                [],
+                chained_shortcut_input,
+            )
+
+            for checked_payload in (dry_run_payload, apply_payload):
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertFalse(checked_payload["block"])
+                self.assertIn("hooks-policy-allow-mlh-owner-route-evidence-paths", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-authority-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+                self.assertNotIn("hooks-policy-block-lifecycle-markdown-shortcut", finding_codes)
+
+            for checked_payload in direct_write_payloads[:3]:
+                finding_codes = {finding["code"] for finding in checked_payload["findings"]}
+                self.assertTrue(checked_payload["block"])
+                self.assertIn("hooks-policy-block-lifecycle-markdown-path", finding_codes)
+            git_add_codes = {finding["code"] for finding in direct_write_payloads[3]["findings"]}
+            self.assertTrue(direct_write_payloads[3]["block"])
+            self.assertIn("hooks-policy-block-git-before-lifecycle-closeout", git_add_codes)
+
+            chained_codes = {finding["code"] for finding in chained_shortcut_payload["findings"]}
+            chained_messages = "\n".join(str(finding["message"]) for finding in chained_shortcut_payload["findings"])
+            same_next_safe = f"next_safe_command=mylittleharness --root <root> evidence --normalize-agent-run --dry-run --target {agent_run_rel}"
+            self.assertTrue(chained_shortcut_payload["block"])
+            self.assertIn("hooks-policy-block-lifecycle-markdown-path", chained_codes)
+            self.assertIn(same_next_safe, chained_messages)
+            self.assertNotIn("no legal command available for the exact blocked command", chained_messages)
 
     def test_hooks_pre_tool_allows_wrapped_handoff_and_evidence_route_payload_markdown_refs(self) -> None:
         from mylittleharness.hooks import HOOK_PRE_TOOL_USE, hook_event_payload

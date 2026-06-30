@@ -1906,6 +1906,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         reviewed_local_vcs_checkpoint_paths=(
             set(reviewed_local_vcs_checkpoint.paths) | set(reviewed_local_vcs_index_split.paths)
         ),
+        source_command=command,
     ):
         findings.append(finding)
     if _is_product_source_root_mlh_mutation_command(inventory, command_data, command):
@@ -3618,6 +3619,7 @@ def _path_policy_findings(
     allow_product_source_vcs_command: bool = False,
     reviewed_local_vcs_checkpoint_root: Path | None = None,
     reviewed_local_vcs_checkpoint_paths: set[str] | None = None,
+    source_command: str = "",
 ) -> list[Finding]:
     findings: list[Finding] = []
     severity = "warn" if warn_only else "error"
@@ -3697,19 +3699,24 @@ def _path_policy_findings(
             )
             continue
         if _is_lifecycle_authority_path(route_rel_display):
+            next_safe = _hook_route_next_safe_command(inventory, rel)
+            if source_command:
+                next_safe = _hook_next_safe_command_or_boundary(source_command, next_safe)
             findings.append(
                 Finding(
                     severity,
                     "hooks-policy-block-lifecycle-authority-path",
                     (
                         "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes "
-                        f"and record docs_decision/verification as required; next_safe_command={_hook_route_next_safe_command(inventory, rel)}"
+                        f"and record docs_decision/verification as required; next_safe_command={next_safe}"
                     ),
                     route_rel_display,
                 )
             )
         elif _is_lifecycle_markdown_path(route_rel_display):
             next_safe = _hook_lifecycle_markdown_path_next_safe_command(inventory, route_rel_display)
+            if source_command:
+                next_safe = _hook_next_safe_command_or_boundary(source_command, next_safe)
             findings.append(
                 Finding(
                     severity,
@@ -4125,6 +4132,7 @@ def _is_mlh_owner_route_review_command(command: str) -> bool:
             _is_mlh_evidence_record_route_command(policy_command)
             or _is_mlh_evidence_receipt_refresh_route_command(policy_command)
             or _is_mlh_evidence_fixture_update_route_command(policy_command)
+            or _is_mlh_evidence_normalize_agent_run_route_command(policy_command)
         )
     if subcommand == "retention" and "scan" in tokens:
         return not _looks_like_write_command(command)
@@ -4153,6 +4161,18 @@ def _has_mlh_option_value(command: str, option: str) -> bool:
         if clean.startswith(expected + "="):
             return bool(clean.split("=", 1)[1])
     return False
+
+
+def _mlh_option_first_value(command: str, option: str) -> str:
+    expected = option.casefold()
+    tokens = _shell_tokens(command)
+    for index, token in enumerate(tokens):
+        clean = _clean_token(token)
+        if clean == expected and index + 1 < len(tokens):
+            return _clean_token(tokens[index + 1])
+        if clean.startswith(expected + "="):
+            return clean.split("=", 1)[1]
+    return ""
 
 
 def _is_mlh_evidence_record_route_command(command: str) -> bool:
@@ -4186,6 +4206,18 @@ def _is_mlh_evidence_fixture_update_route_command(command: str) -> bool:
         _mlh_cli_subcommand(lowered) == "evidence"
         and not _looks_like_write_command(command)
         and "--fixture-update" in tokens
+        and (_has_mlh_option_value(command, "--target") or tokens.intersection({"--help", "-h"}))
+        and _has_mlh_review_mode_token(command)
+    )
+
+
+def _is_mlh_evidence_normalize_agent_run_route_command(command: str) -> bool:
+    lowered = command.casefold()
+    tokens = _mlh_command_token_set(command)
+    return (
+        _mlh_cli_subcommand(lowered) == "evidence"
+        and not _looks_like_write_command(command)
+        and "--normalize-agent-run" in tokens
         and (_has_mlh_option_value(command, "--target") or tokens.intersection({"--help", "-h"}))
         and _has_mlh_review_mode_token(command)
     )
@@ -9524,7 +9556,62 @@ def _hook_lifecycle_markdown_shortcut_next_safe_command(inventory: Inventory, pa
             '"<reason>"',
             "--repair-links",
         )
-    return _hook_route_next_safe_command(inventory, path)
+    return _hook_next_safe_command_or_boundary(command, _hook_route_next_safe_command(inventory, path))
+
+
+def _hook_next_safe_command_or_boundary(blocked_command: str, next_safe_command: str) -> str:
+    if _hook_mlh_route_commands_semantically_same(blocked_command, next_safe_command):
+        return (
+            "no legal command available for the exact blocked command; "
+            "fix the command shape or route classifier before retrying"
+        )
+    return next_safe_command
+
+
+def _hook_mlh_route_commands_semantically_same(left: str, right: str) -> bool:
+    left_signature = _hook_mlh_route_command_signature(left)
+    return bool(left_signature) and left_signature == _hook_mlh_route_command_signature(right)
+
+
+def _hook_mlh_route_command_signature(command: str) -> tuple[str, tuple[str, ...], tuple[str, ...], str, str]:
+    policy_command = _mlh_policy_command(command)
+    tokens = _shell_tokens(policy_command)
+    if not tokens:
+        return ()
+    for token in tokens:
+        if _is_shell_command_separator(str(token or ""), _clean_shell_command_token(str(token or ""))):
+            return ()
+    token_set = _mlh_command_token_set(policy_command)
+    subcommand = _mlh_cli_subcommand(policy_command.casefold())
+    if not subcommand:
+        return ()
+    route_flags = tuple(
+        flag
+        for flag in (
+            "--record",
+            "--receipt-refresh",
+            "--fixture-update",
+            "--normalize-agent-run",
+            "--retarget-ref",
+        )
+        if flag in token_set
+    )
+    modes = tuple(flag for flag in ("--dry-run", "--apply", "--help", "-h") if flag in token_set)
+    target = _hook_mlh_route_signature_path(policy_command, _mlh_option_first_value(policy_command, "--target"))
+    record_id = _mlh_option_first_value(policy_command, "--record-id")
+    return (subcommand, route_flags, modes, target, record_id)
+
+
+def _hook_mlh_route_signature_path(command: str, value: str) -> str:
+    if not value:
+        return ""
+    target = _normalize_hook_path(value)
+    root = _normalize_hook_path(_mlh_option_first_value(command, "--root")).rstrip("/")
+    if root and root not in {".", "<root>"} and target.startswith(root + "/"):
+        target = target[len(root) + 1 :]
+    while target.startswith("./"):
+        target = target[2:]
+    return target.casefold()
 
 
 def _hook_lifecycle_markdown_path_next_safe_command(inventory: Inventory, path: str) -> str:
