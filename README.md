@@ -111,7 +111,7 @@ After installation, the console script is equivalent:
 mylittleharness --root <target-repo> check
 ```
 
-The package metadata declares Python `>=3.11`, license `Apache-2.0`, version `1.0.2`, no required runtime dependencies, and the `mylittleharness` console script.
+The package metadata declares Python `>=3.11`, license `Apache-2.0`, version `1.0.3`, no required runtime dependencies, and the `mylittleharness` console script.
 
 ## First-Run Operator Path
 
@@ -164,13 +164,13 @@ Optional helpers reduce repeated reading. They do not move authority out of the 
 
 ## Local Release Posture
 
-The current product posture is a public GitHub source release at `1.0.2`. The release confidence claim is documentation-and-verification based; package-index publication, signed binary artifacts, global workstation adoption, and hosted services remain separate future distribution steps.
+The current product posture is a public GitHub source release at `1.0.3`. The release confidence claim is documentation-and-verification based; package-index publication, signed binary artifacts, global workstation adoption, and hosted services remain separate future distribution steps.
 
-See `CHANGELOG.md` and `RELEASE_NOTES.md` for the `1.0.2` release summary, verification expectations, and owner-approval boundary.
+See `CHANGELOG.md` and `RELEASE_NOTES.md` for the `1.0.3` release summary, verification expectations, and owner-approval boundary.
 
 The local release checklist is:
 
-- package metadata and runtime version agree on `1.0.2`
+- package metadata and runtime version agree on `1.0.3`
 - `bootstrap --package-smoke` passes from temporary source/build/install locations outside the product source checkout
 - Wheel, build, and install artifacts are verification outputs only
 - `bootstrap` rejects standalone `bootstrap --apply`
@@ -191,7 +191,7 @@ Use focused tests for bounded edits, then broader verification when the touched 
 ## Docs Map
 
 - `CHANGELOG.md`: public release change history.
-- `RELEASE_NOTES.md`: `1.0.2` release notes and owner-approval boundary.
+- `RELEASE_NOTES.md`: `1.0.3` release notes and owner-approval boundary.
 - `docs/README.md`: product documentation index and release posture.
 - `docs/security.md`: local trust and security boundaries.
 - `docs/reference/command-surface.md`: command overview.

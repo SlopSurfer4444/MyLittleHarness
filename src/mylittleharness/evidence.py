@@ -2304,13 +2304,14 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
         target_rel = _agent_run_record_target_rel(request)
         target = inventory.root / target_rel
         findings.extend(_agent_run_record_target_findings(inventory.root, target_rel, severity))
-        if _has_self_output_ref(request, target_rel):
+        self_ref_field, self_ref_value = _self_referential_record_ref(request, target_rel)
+        if self_ref_field:
             findings.append(
                 Finding(
                     severity,
                     "agent-run-record-refused",
-                    f"--output-ref must not point at the record target {target_rel}; self-referential agent run records become stale immediately",
-                    target_rel,
+                    f"{self_ref_field} must not point at the record target {target_rel}; self-referential agent run records become stale immediately",
+                    self_ref_value or target_rel,
                 )
             )
         elif target.exists() and target.is_file():
@@ -6229,8 +6230,20 @@ def _join_preserving_trailing_newline(lines: list[str], original_text: str) -> s
     return text
 
 
-def _has_self_output_ref(request: AgentRunRecordRequest, target_rel: str) -> bool:
-    return any(_same_root_relative_path(output_ref, target_rel) for output_ref in request.output_refs)
+def _self_referential_record_ref(request: AgentRunRecordRequest, target_rel: str) -> tuple[str, str]:
+    for field, refs in (
+        ("--input-ref", request.input_refs),
+        ("--output-ref", request.output_refs),
+        ("--claimed-path", request.claimed_paths),
+        ("--changed-file", request.changed_files),
+        ("--verification-ref", request.verification_refs),
+        ("--handoff-ref", request.handoff_refs),
+        ("--claim-ref", request.claim_refs),
+    ):
+        for ref in refs:
+            if _same_root_relative_path(ref, target_rel):
+                return field, ref
+    return "", ""
 
 
 def _same_root_relative_path(left: str, right: str) -> bool:

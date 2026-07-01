@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 from datetime import date
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -263,6 +264,7 @@ class CloseoutWritebackPlan:
 class AcceptanceEvidenceContract:
     work_class: str
     deliverable_class: str
+    execution_slice: str
     item_ids: tuple[str, ...]
     target_artifacts: tuple[str, ...]
     write_scope: tuple[str, ...]
@@ -2250,7 +2252,7 @@ def acceptance_evidence_findings(
         product_diff_proof=product_diff_scope_proof(inventory, closeout_values),
     )
     if fan_in_gate.activated and fan_in_gate.missing:
-        terminal_guidance = _fan_in_terminal_state_guidance(inventory.root, fan_in_gate)
+        terminal_guidance = _fan_in_terminal_state_guidance(inventory.root, fan_in_gate, contract)
         findings.append(
             Finding(
                 severity,
@@ -2642,20 +2644,105 @@ def _canonical_closeout_value(field: str, value: str) -> str:
 
 def _legal_dry_run_command_problem(command: str) -> str:
     normalized = re.sub(r"\s+", " ", str(command or "").strip()).casefold()
-    tokens = set(re.findall(r"[a-z0-9_./:\\-]+", normalized))
     if not normalized:
         return "legal-dry-run-command requires a non-empty command"
-    if "mylittleharness" not in tokens:
-        return "legal-dry-run-command must name a mylittleharness command"
-    if "--root" not in tokens:
+    if _next_state_shell_has_command_separator(command):
+        return "legal-dry-run-command must be one bounded MLH dry-run command, not a shell sequence"
+    tokens = _next_state_shell_tokens(command)
+    clean_tokens = [_next_state_clean_token(token) for token in tokens]
+    subcommand = _next_state_mlh_subcommand(clean_tokens)
+    if not subcommand:
+        return "legal-dry-run-command must start with mylittleharness or python -m mylittleharness"
+    if not _next_state_has_option(clean_tokens, "--root"):
         return "legal-dry-run-command must include --root"
-    if "--dry-run" not in tokens:
+    if "--dry-run" not in clean_tokens:
         return "legal-dry-run-command must include --dry-run"
-    if "--apply" in tokens:
+    if "--apply" in clean_tokens:
         return "legal-dry-run-command must not include --apply"
-    if not (tokens & NEXT_STATE_DRY_RUN_COMMANDS):
+    if subcommand not in NEXT_STATE_DRY_RUN_COMMANDS:
         allowed = ", ".join(sorted(NEXT_STATE_DRY_RUN_COMMANDS))
         return f"legal-dry-run-command must use a bounded MLH dry-run command: {allowed}"
+    return ""
+
+
+def _next_state_shell_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(str(command or ""), posix=False)
+    except ValueError:
+        return str(command or "").split()
+
+
+def _next_state_clean_token(token: str) -> str:
+    return str(token or "").strip(" \t\r\n\"'`{}[](),;").casefold()
+
+
+def _next_state_shell_has_command_separator(command: str) -> bool:
+    text = str(command or "")
+    if "\n" in text or "$(" in text:
+        return True
+    separators = {";", "&&", "||", "|", ">", ">>", "<", "2>", "2>>", "1>", "1>>", "2>&1", "&>"}
+    for token in _next_state_shell_tokens(command):
+        stripped = str(token or "").strip()
+        clean = _next_state_clean_token(token)
+        if stripped in separators or clean in separators:
+            return True
+        if stripped.endswith(";"):
+            return True
+    return False
+
+
+def _next_state_is_mlh_executable_token(token: str) -> bool:
+    clean = _next_state_clean_token(token)
+    if clean in {"mylittleharness", "mylittleharness.exe"}:
+        return True
+    return Path(clean).name in {"mylittleharness", "mylittleharness.exe"}
+
+
+def _next_state_is_python_executable_token(token: str) -> bool:
+    clean = _next_state_clean_token(token)
+    return Path(clean).name in {"python", "python.exe", "py", "py.exe"}
+
+
+def _next_state_has_option(tokens: list[str], option: str) -> bool:
+    expected = option.casefold()
+    return any(token == expected or token.startswith(expected + "=") for token in tokens)
+
+
+def _next_state_mlh_subcommand(tokens: list[str]) -> str:
+    index = 1 if tokens and tokens[0] == "&" else 0
+    if index >= len(tokens):
+        return ""
+    token = tokens[index]
+    if _next_state_is_mlh_executable_token(token):
+        return _next_state_subcommand_after(tokens, index + 1)
+    if (
+        _next_state_is_python_executable_token(token)
+        and index + 2 < len(tokens)
+        and tokens[index + 1] == "-m"
+        and tokens[index + 2] == "mylittleharness"
+    ):
+        return _next_state_subcommand_after(tokens, index + 3)
+    return ""
+
+
+def _next_state_subcommand_after(tokens: list[str], start: int) -> str:
+    options_with_values = {"--root", "--config", "--config-path"}
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if not token:
+            index += 1
+            continue
+        if token in options_with_values:
+            index += 2
+            continue
+        if token.startswith("--root=") or token.startswith("--config=") or token.startswith("--config-path="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
     return ""
 
 
@@ -2951,6 +3038,7 @@ def _active_acceptance_evidence_contract(inventory: Inventory) -> AcceptanceEvid
     return AcceptanceEvidenceContract(
         work_class=work_class,
         deliverable_class=deliverable_class,
+        execution_slice=str(data.get("execution_slice") or "").strip(),
         item_ids=item_ids,
         target_artifacts=target_artifacts,
         write_scope=write_scope,
@@ -4364,22 +4452,77 @@ def _writeback_incubation_archive_retry_findings(plan: RelationshipUpdatePlan) -
     return findings
 
 
-def _fan_in_terminal_state_guidance(root: Path, gate: FanInEvidenceGate) -> str:
+def _fan_in_terminal_state_guidance(root: Path, gate: FanInEvidenceGate, contract: AcceptanceEvidenceContract) -> str:
     if not gate.missing:
         return ""
     commands: list[str] = []
     root_arg = root.as_posix()
-    for claim_id in _fan_in_blocker_record_ids(gate.blockers, "project/verification/work-claims/"):
+    execution_slice = contract.execution_slice or (contract.item_ids[0] if contract.item_ids else "<execution-slice>")
+    release_condition = safe_double_quoted("handoff accepted, final agent-run evidence will be recorded after claim release")
+    if "work-claim" in gate.missing:
         commands.append(
             mlh_command(
                 "claim",
                 "--dry-run",
                 "--action",
-                "release",
+                "create",
                 "--claim-id",
-                claim_id,
-                "--release-condition",
-                safe_double_quoted("handoff accepted and agent-run evidence recorded"),
+                "<claim-id>",
+                "--claim-kind",
+                "write",
+                "--owner-role",
+                "<owner-role>",
+                "--owner-actor",
+                "<owner-actor>",
+                "--execution-slice",
+                execution_slice,
+                "--claimed-path",
+                "<changed-path>",
+                root=root_arg,
+            )
+        )
+    if "handoff" in gate.missing:
+        commands.append(
+            mlh_command(
+                "handoff",
+                "--dry-run",
+                "--action",
+                "create",
+                "--handoff-id",
+                "<handoff-id>",
+                "--worker-id",
+                "<owner-actor>",
+                "--role-id",
+                "<owner-role>",
+                "--execution-slice",
+                execution_slice,
+                "--allowed-route",
+                "evidence",
+                "--write-scope",
+                "<changed-path>",
+                "--stop-condition",
+                safe_double_quoted("verification failed"),
+                "--context-budget",
+                "compact",
+                "--required-output",
+                "agent-run-evidence",
+                "--claim-ref",
+                "<work-claim-ref>",
+                root=root_arg,
+            )
+        )
+        commands.append(
+            mlh_command(
+                "handoff",
+                "--dry-run",
+                "--action",
+                "accept",
+                "--handoff-id",
+                "<handoff-id>",
+                "--accepted-by",
+                "coordinator",
+                "--acceptance-note",
+                safe_double_quoted("claim release and final agent-run evidence still required"),
                 root=root_arg,
             )
         )
@@ -4395,7 +4538,35 @@ def _fan_in_terminal_state_guidance(root: Path, gate: FanInEvidenceGate) -> str:
                 "--accepted-by",
                 "coordinator",
                 "--acceptance-note",
-                safe_double_quoted("released claim and agent-run evidence reviewed"),
+                safe_double_quoted("claim release and final agent-run evidence still required"),
+                root=root_arg,
+            )
+        )
+    if "work-claim" in gate.missing:
+        commands.append(
+            mlh_command(
+                "claim",
+                "--dry-run",
+                "--action",
+                "release",
+                "--claim-id",
+                "<claim-id>",
+                "--release-condition",
+                release_condition,
+                root=root_arg,
+            )
+        )
+    for claim_id in _fan_in_blocker_record_ids(gate.blockers, "project/verification/work-claims/"):
+        commands.append(
+            mlh_command(
+                "claim",
+                "--dry-run",
+                "--action",
+                "release",
+                "--claim-id",
+                claim_id,
+                "--release-condition",
+                release_condition,
                 root=root_arg,
             )
         )
@@ -4416,7 +4587,11 @@ def _fan_in_terminal_state_guidance(root: Path, gate: FanInEvidenceGate) -> str:
         )
     if not commands:
         return ""
-    return " Next safe terminal-state command(s): " + "; ".join(commands) + "; then rerun writeback --dry-run."
+    return (
+        " Next safe fan-in command sequence: "
+        + "; ".join(commands)
+        + "; record or refresh final agent-run evidence after claim release, then rerun writeback --dry-run."
+    )
 
 
 def _fan_in_blocker_record_ids(blockers: tuple[str, ...], prefix: str) -> tuple[str, ...]:

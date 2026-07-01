@@ -259,7 +259,13 @@ from .task_session import (
     task_session_receipt_dry_run_findings,
     task_session_sections,
 )
-from .writeback import CLOSEOUT_WRITEBACK_FIELDS, make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
+from .writeback import (
+    CLOSEOUT_WRITEBACK_FIELDS,
+    _projected_active_plan_text,
+    make_writeback_request,
+    writeback_apply_findings,
+    writeback_dry_run_findings,
+)
 from .cli_parser import build_parser
 
 _CLOSEOUT_FILE_INPUT_MAX_BYTES = 64 * 1024
@@ -1927,7 +1933,7 @@ def _transition_preview_delegate_findings(inventory, args, next_plan_resolution=
         findings.extend(phase_findings)
         phase_completion_preview_ok = not any(finding.severity in {"warn", "error"} for finding in phase_findings)
         if phase_completion_preview_ok:
-            phase_completion_inventory = _transition_phase_complete_preview_inventory(inventory)
+            phase_completion_inventory = _transition_phase_complete_preview_inventory(inventory, args)
     if args.archive_active_plan:
         findings.append(
             Finding(
@@ -2283,15 +2289,24 @@ def _roadmap_item_mutation_args_present(args: argparse.Namespace) -> bool:
     )
 
 
-def _transition_phase_complete_preview_inventory(inventory):
+def _transition_phase_complete_preview_inventory(inventory, args):
     state = inventory.state
-    if state is None or not state.exists:
-        return inventory
-    state_text = _transition_frontmatter_text_with_scalars(state.content, {"phase_status": "complete"})
-    if state_text == state.content:
-        return inventory
-    state_surface = _transition_surface_with_content(state, state_text)
-    return _transition_inventory_with_surface(inventory, state_surface)
+    current = inventory
+    lifecycle_values = {"phase_status": "complete"}
+    if state is not None and state.exists:
+        state_text = _transition_frontmatter_text_with_scalars(state.content, lifecycle_values)
+        if state_text != state.content:
+            current = _transition_inventory_with_surface(current, _transition_surface_with_content(state, state_text))
+    plan_text = _projected_active_plan_text(
+        inventory,
+        _transition_closeout_values(args),
+        lifecycle_values,
+        completed_phase="",
+    )
+    plan = inventory.active_plan_surface
+    if plan_text is not None and plan is not None and plan.exists and plan_text != plan.content:
+        current = _transition_inventory_with_surface(current, _transition_surface_with_content(plan, plan_text))
+    return current
 
 
 def _transition_surface_with_content(surface, content: str):

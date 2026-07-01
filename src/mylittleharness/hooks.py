@@ -2024,6 +2024,20 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else None,
             )
         )
+    if _has_unresolved_mlh_splat_invocation(command):
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-unresolved-powershell-mlh-splat",
+                (
+                    "blocked PowerShell MLH splat because the hook can only verify static literal arrays and "
+                    "scalars assigned before the invocation; rerun the same route as a visible literal command, "
+                    "for example `mylittleharness --root <root> <route> --dry-run ...`. Dynamic variables, "
+                    "forward assignments, prose-only dry-run mentions, and chained writes remain blocked, and "
+                    "direct product-source mutation is still refused"
+                ),
+            )
+        )
     if _looks_like_generated_cache_write(paths, write_command):
         findings.append(
             Finding(

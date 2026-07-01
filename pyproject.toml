@@ -5,7 +5,7 @@ backend-path = ["build_backend"]
 
 [project]
 name = "mylittleharness"
-version = "1.0.2"
+version = "1.0.3"
 description = "Repo-visible workflow safety utility for initializing, checking, repairing, and navigating MyLittleHarness target repositories."
 readme = "README.md"
 license = { text = "Apache-2.0" }

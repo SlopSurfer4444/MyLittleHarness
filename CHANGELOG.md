@@ -2,6 +2,39 @@
 
 All notable changes for MyLittleHarness are recorded here once they are ready for a public release checkpoint.
 
+## 1.0.3 - Route Recovery And Release Guardrails - 2026-07-01
+
+This release publishes the accumulated post-1.0.2 recovery and route-guardrail work that was proven locally before publication. It remains a GitHub source release; package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, and workstation adoption are still outside this release.
+
+### Added
+
+- Standing-delegation policy evidence routes for bounded autonomy posture without Git, release, provider, or lifecycle approval.
+- Command discovery and route guidance coverage for pre-push, release, and operator rough-edge recovery paths.
+- Legacy operational tracker table update support for simple reviewed Markdown pipe tables.
+- Release lifecycle UX coverage for fan-in command sequencing, transition preview stability, and source-release publication lane boundaries.
+
+### Changed
+
+- Hook and route diagnostics now recover reviewed checkpoint, agent-run, adapter, source-member, and route-owned Markdown cases more consistently.
+- Product-source and operating-root guidance is stricter about exact staging, public-neutrality, route metadata, and pre-push package shape.
+- Evidence and route reports surface safer next commands for recovery/fan-in work without treating advisory output as approval.
+- `legal-dry-run-command` validation now parses bounded MLH commands structurally, including `python -m mylittleharness`, while rejecting shell sequences and apply commands.
+
+### Fixed
+
+- Restored hook regression fixtures and route behavior for normalize-agent-run, reviewed checkpoint split evidence, bounded evidence checkpoint UX, and adapter refresh allowance.
+- Hardened source-member destination checks, stable-spec related-spec routing, route-owned Markdown read-only inspection, and pre-push route/hook classification.
+- Repaired rough edges that could make legal verification checkpoint packages look unsafe or make unsafe package shapes look too plausible.
+- Prevented agent-run evidence from self-staling through self-referential source-hashed refs, and made unresolved PowerShell MLH splats fail with actionable literal-command guidance.
+
+### Verification Expectations
+
+- `pyproject.toml` and `mylittleharness.__version__` both report `1.0.3`.
+- Product tests run with bytecode disabled from the source checkout.
+- Package smoke builds and installs from temporary locations outside the product source checkout.
+- GitHub Actions `Tests` passes on the pushed `main` release commit before the GitHub release is treated as green.
+- The GitHub release includes the standard source archive plus an attached `mylittleharness-1.0.3-source.zip` asset.
+
 ## 1.0.2 - Lifecycle Checkpoint Hardening - 2026-06-28
 
 This release publishes the accumulated post-1.0.1 lifecycle and hook guardrail fixes that were proven locally before publication. It remains a GitHub source release; package-index publication, signed binary artifacts, global installation, PATH/profile mutation, hosted service behavior, and workstation adoption are still outside this release.

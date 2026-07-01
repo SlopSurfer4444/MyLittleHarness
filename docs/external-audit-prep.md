@@ -213,7 +213,7 @@ Each block gives: title; why it exists; files/modules/docs/tests; visible promis
 
 - Why: MLH is a local Python package with stdlib-first dependency posture.
 - Surfaces: `pyproject.toml`; `build_backend/mylittleharness_build.py`; `uv.lock`; `README.md`; `docs/README.md`; `docs/specs/product-boundary.md`; `bootstrap.py`; `templates/**`; `tests/test_package_metadata.py`; `tests/test_cli.py`.
-- Invariants: package name/version `mylittleharness`/`1.0.2`; runtime dependencies empty; stdlib build backend; console script `mylittleharness = mylittleharness.cli:main`; bootstrap inspect/package-smoke cannot publish, mutate PATH/user config, or write product-root artifacts.
+- Invariants: package name/version `mylittleharness`/`1.0.3`; runtime dependencies empty; stdlib build backend; console script `mylittleharness = mylittleharness.cli:main`; bootstrap inspect/package-smoke cannot publish, mutate PATH/user config, or write product-root artifacts.
 - Questions: Does wheel include required modules/templates and exclude cache/debris? Is dependency gate enforced by tests or docs only? Does package smoke run outside product checkout and without network assumptions? Are metadata/docs/tests consistent?
 - Evidence: `bootstrap --inspect`; `bootstrap --package-smoke`; direct PEP 517 backend review; package metadata tests.
 - Result: packaging report with metadata consistency, wheel contents, template inclusion, smoke behavior, dependency policy, risks.
